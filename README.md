@@ -1,4 +1,4 @@
-# Embodied Intelligence Frontier: LIBERO Study
+# RoboForge: Embodied Intelligence Frontier Harness
 
 This workspace evaluates whether a Thea-style embodied harness can expand its
 capabilities by discovering and registering public models, algorithms, tools,
