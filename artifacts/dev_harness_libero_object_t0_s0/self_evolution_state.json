@@ -1,0 +1,83 @@
+{
+  "current_tasks": [
+    "libero_object:task_0"
+  ],
+  "rounds": [
+    {
+      "round_id": 1,
+      "failure_summary": "Bowl slipped during grasp; audit candidate public grasp assets.",
+      "search_queries": [
+        "robot grasp policy"
+      ],
+      "discovered_resources": [
+        {
+          "source": "github",
+          "name": "PKU-EPIC/UniDexGrasp",
+          "url": "https://github.com/PKU-EPIC/UniDexGrasp",
+          "revision": "main",
+          "description": "Official code for \"UniDexGrasp: Universal Robotic Dexterous Grasping via Learning Diverse Proposal Generation and Goal-Conditioned Policy\" (CVPR 2023)",
+          "stars": 270
+        },
+        {
+          "source": "github",
+          "name": "microsoft/UniGraspTransformer",
+          "url": "https://github.com/microsoft/UniGraspTransformer",
+          "revision": "main",
+          "description": "<CVPR 2025> UniGraspTransformer: Simplified Policy Distillation for Scalable Dexterous Robotic Grasping",
+          "stars": 95
+        },
+        {
+          "source": "github",
+          "name": "enyen/NewStableTactileGrasp",
+          "url": "https://github.com/enyen/NewStableTactileGrasp",
+          "revision": "master",
+          "description": "Implementation of **Learning of Efficient Stable Robot Grasping Approach Using Transformer-based Control Policy**",
+          "stars": 7
+        },
+        {
+          "source": "github",
+          "name": "aadarshram/GRASP",
+          "url": "https://github.com/aadarshram/GRASP",
+          "revision": "master",
+          "description": "Generalized Robotic Action models for Sensorimotor Policies",
+          "stars": 0
+        },
+        {
+          "source": "github",
+          "name": "surajitsaikia27/DRL_Continiuos_Control",
+          "url": "https://github.com/surajitsaikia27/DRL_Continiuos_Control",
+          "revision": "master",
+          "description": "Deep Deterministic Policy Gradients (DDPG) for controlling Robotic hand to grasp ball",
+          "stars": 2
+        }
+      ],
+      "accepted_assets": [],
+      "rejected_assets": [
+        {
+          "asset_id": "PKU-EPIC/UniDexGrasp",
+          "reasons": [
+            "training provenance is not documented",
+            "preprocessing/action-normalization provenance is not documented"
+          ]
+        },
+        {
+          "asset_id": "microsoft/UniGraspTransformer",
+          "reasons": [
+            "training provenance is not documented",
+            "preprocessing/action-normalization provenance is not documented"
+          ]
+        },
+        {
+          "asset_id": "enyen/NewStableTactileGrasp",
+          "reasons": [
+            "training provenance is not documented",
+            "preprocessing/action-normalization provenance is not documented"
+          ]
+        }
+      ],
+      "development_score_before": null,
+      "development_score_after": null
+    }
+  ],
+  "sealed_results_consumed": false
+}

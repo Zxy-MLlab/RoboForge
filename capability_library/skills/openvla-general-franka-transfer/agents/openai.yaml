@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenVLA General Franka Transfer"
+  short_description: "Run public OpenVLA with non-LIBERO Franka stats"
+  default_prompt: "Use $openvla-general-franka-transfer to evaluate a provenance-checked generalist VLA candidate."

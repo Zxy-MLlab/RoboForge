@@ -1,0 +1,42 @@
+# Local environments and caches
+.venv/
+env/
+runtime_home/
+runtime/calvin_deps/
+runtime/calvin_gym/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Credentials and local configuration
+.env
+*.key
+*.pem
+
+# Large model assets and generated media/data
+checkpoints/*
+!checkpoints/README.md
+runs/
+runtime/*.sqlite3
+runtime/**/*.sqlite3
+artifacts/**/*.mp4
+artifacts/**/*.hdf5
+*.mp4
+*.hdf5
+*.tar
+*.pth
+*.pt
+*.safetensors
+*.bin
+
+# Generated controller outputs and local logs
+generated_controllers/
+*.log
+
+# Nested upstream checkout metadata
+Thea/.git/
+Thea/.venv/
+
+# Upstream/reference checkouts are not part of the distributable Harness
+Thea/
+third_party/

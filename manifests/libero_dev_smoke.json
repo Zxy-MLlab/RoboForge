@@ -1,0 +1,8 @@
+{
+  "claimable": false,
+  "suite": "libero_spatial",
+  "task_ids": [0],
+  "episodes_per_task": 1,
+  "seed": 1701,
+  "purpose": "runtime integration only"
+}

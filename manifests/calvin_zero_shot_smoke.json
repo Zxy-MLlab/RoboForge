@@ -1,0 +1,14 @@
+{
+  "protocol": "harness-acquired-task-zero-shot-v2",
+  "benchmark": "CALVIN",
+  "status": "adapter-ready-data-required",
+  "track": "harness_acquired_task_zero_shot",
+  "task_source": "official CALVIN environment task configuration",
+  "episode_source": null,
+  "episodes": 0,
+  "selection_firewall": "No evaluator result may select or modify a candidate.",
+  "agent_inputs": ["language_instruction", "rgb_static", "rgb_gripper", "documented_proprioception"],
+  "evaluator_only": ["task_success", "reward", "termination_reason", "episode_identifier", "privileged_scene_state"],
+  "data_gap": "The current server has CALVIN source and scene assets but no official evaluation trajectory/task-sequence files; no numeric CALVIN result is reported until those files are installed and hashed.",
+  "adapter": "Thea/simulation/thea_simulation/adapters/calvin.py"
+}

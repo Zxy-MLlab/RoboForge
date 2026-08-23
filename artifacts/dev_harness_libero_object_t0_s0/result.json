@@ -1,0 +1,23 @@
+{
+  "protocol": "harness-acquired-task-zero-shot-v2",
+  "harness": "Thea SimulationRuntime + ToolRegistry",
+  "suite": "libero_object",
+  "task_index": 0,
+  "initial_state_index": 0,
+  "success": false,
+  "terminated": false,
+  "truncated": false,
+  "tool_result": {
+    "success": false,
+    "reason": "Tool execution failed (RuntimeError)."
+  },
+  "failure_kind": "tool_execution_failure",
+  "learned_models_used": [],
+  "capability_acquisition_tools_registered": [
+    "search_public_embodied_resources",
+    "record_capability_acquisition_event",
+    "check_asset_provenance",
+    "self_evolve_from_failure"
+  ],
+  "claimable": false
+}

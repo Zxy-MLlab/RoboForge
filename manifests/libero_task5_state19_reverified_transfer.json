@@ -1,0 +1,25 @@
+{
+  "protocol": "sealed-generated-controller-transfer-v1",
+  "suite": "libero_spatial",
+  "controller_id": "rgbd_closed_loop_pick_place_reverified:v001",
+  "controller_workspace": "runs/coding_harness/state18_reverified_frozen/controllers",
+  "authoring_skills": [
+    "capability_library/skills/autonomous-closed-loop-grasp-place-recovery/SKILL.md",
+    "capability_library/skills/autonomous-rgbd-graspnet-pick-place/SKILL.md"
+  ],
+  "development_exclusions": [
+    {
+      "state": 18,
+      "reason": "GPT-5.6 autonomous controller evolution and sensor-verifier development"
+    }
+  ],
+  "episodes": [
+    {
+      "task": 5,
+      "state": 19,
+      "seed": 7
+    }
+  ],
+  "selection_basis": "The controller specification was generated in autonomous round 1 and selected only from corrected sensor evidence. State 19 was not used for authoring or iteration.",
+  "results_consumed_for_iteration": false
+}

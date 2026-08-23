@@ -1,0 +1,18 @@
+{
+  "protocol": "sealed-generated-controller-transfer-v1",
+  "suite": "libero_spatial",
+  "controller_id": "generic_rgbd_closed_loop_pick_place_v010:v001",
+  "controller_workspace": "runs/coding_harness/controllers_frozen_v6",
+  "authoring_skill": "capability_library/skills/autonomous-closed-loop-grasp-place-recovery/SKILL.md",
+  "development_exclusions": [
+    {"state": 0, "reason": "initial controller/tool development"},
+    {"state": 1, "reason": "failure-driven adaptation and transfer validation"},
+    {"state": 2, "reason": "v008/v009 sealed results consumed for failure-driven development"}
+  ],
+  "episodes": [
+    {"task": 1, "state": 2, "seed": 7},
+    {"task": 4, "state": 2, "seed": 7}
+  ],
+  "selection_basis": "Replay the two unresolved v008 state-2 tasks with the same frozen v010 controller; development evidence only.",
+  "results_consumed_for_iteration": true
+}

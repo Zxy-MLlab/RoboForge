@@ -1,0 +1,24 @@
+{
+  "id": "policy.openvla.openvla-7b-base",
+  "kind": "vision-language-action-policy",
+  "source": "openvla/openvla-7b",
+  "license": "MIT",
+  "artifact": {
+    "local_path": "/data/zxy/cache/models--openvla--openvla-7b/config.json",
+    "sha256": "edd5c5cf6d7927e07465cf086ebe41f7b3ec8f3b128a51f71d6db14dad7ad8b1"
+  },
+  "training_provenance": {
+    "status": "documented",
+    "datasets": ["Open X-Embodiment mixture"],
+    "benchmark_families": [],
+    "evidence": "Local public model card; no LIBERO dataset is listed"
+  },
+  "preprocessing_provenance": {
+    "status": "documented",
+    "datasets": ["nyu_franka_play_dataset_converted_externally_to_rlds"],
+    "benchmark_families": [],
+    "selected_action_normalization": "nyu_franka_play_dataset_converted_externally_to_rlds",
+    "note": "Public model config contains this non-LIBERO Franka normalization key"
+  },
+  "inference_inputs": ["agentview_rgb", "language_instruction"]
+}

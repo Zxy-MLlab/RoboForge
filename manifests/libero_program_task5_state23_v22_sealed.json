@@ -1,0 +1,15 @@
+{
+  "protocol": "sealed-controller-program-v1",
+  "suite": "libero_spatial",
+  "program_id": "rgbd_closed_loop_pick_place_v22:v001",
+  "controller_workspace": "runs/coding_harness/autonomous_task5_state23_full_program_v023_controllers",
+  "capability_workspace": "runs/coding_harness/autonomous_task5_state18_hook_contracts/capability_tools",
+  "episodes": [
+    {"task": 5, "state": 23, "seed": 7}
+  ],
+  "development_exclusions": [
+    {"task": 5, "state": 23, "reason": "autonomous evolution development episode"}
+  ],
+  "selection_basis": "First strict sensor-only success; frozen before evaluator access.",
+  "results_consumed_for_iteration": false
+}

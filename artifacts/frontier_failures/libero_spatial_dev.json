@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "claimable": false,
+  "protocol": "strict-code-zero-shot-v1",
+  "failures": [
+    {
+      "suite": "libero_spatial",
+      "task_index": 0,
+      "initial_state_index": 0,
+      "instruction": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "runs": [
+        "runs/dev_smoke/code_rgbd_v1_t0_s0",
+        "runs/dev_smoke/code_rgbd_v2_t0_s0",
+        "runs/dev_smoke/code_rgbd_v3_t0_s0",
+        "runs/dev_smoke/code_rgbd_v4_t0_s0",
+        "runs/dev_smoke/code_rgbd_v5_t0_s0",
+        "runs/dev_smoke/code_rgbd_v6_t0_s0",
+        "runs/dev_smoke/code_rgbd_v7_side_t0_s0"
+      ],
+      "stage": "grasp_acquisition",
+      "primary_cause": "gripper-object geometry and contact planning",
+      "evidence": [
+        "Classical perception selected the intended bowl and plate from RGB-D.",
+        "Cartesian feedback converged to every requested waypoint.",
+        "The Panda gripper reached fully closed joint positions without retaining the bowl.",
+        "Center grasps and generic rim offsets at multiple support-relative and RGB-D-derived heights failed.",
+        "The final center-grasp trial used the full Panda gripper travel.",
+        "A 6-DoF side-approach grasp also reached its Cartesian goals but closed empty."
+      ],
+      "not_observed": [
+        "language parse failure",
+        "target selection failure",
+        "Cartesian reachability failure",
+        "learned-model limitation"
+      ],
+      "next_generic_capability": "collision-aware 6-DoF side-grasp synthesis with gripper-aperture feedback",
+      "prohibited_response": "Do not add a task-ID/state-ID action script or inspect object-state coordinates."
+    }
+  ]
+}

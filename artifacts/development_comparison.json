@@ -1,0 +1,17 @@
+{
+  "claimable": false,
+  "manifest_role": "candidate selection only",
+  "libero_spatial_one_official_state_per_task": {
+    "lerobot_pi05_libero_finetuned": {
+      "successes": 9,
+      "episodes": 10,
+      "success_rate": 0.9
+    },
+    "openvla_oft_suite_specific": {
+      "successes": 5,
+      "episodes": 10,
+      "success_rate": 0.5,
+      "reproduction_warning": "Below the authors' reported aggregate; not selected."
+    }
+  }
+}

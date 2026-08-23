@@ -1,0 +1,22 @@
+{
+  "id": "perception.dinov2-vitl14-reg4",
+  "kind": "self-supervised-visual-feature-model",
+  "source": "https://github.com/facebookresearch/dinov2",
+  "license": "Apache-2.0",
+  "artifact": {
+    "local_path": "/data/zxy/cache/dinov2_vitl14_reg4_pretrain.pth",
+    "sha256": "36e4deffbaef061a2576705b0c36f93621e2ae20bf6274694821b0b492551b51"
+  },
+  "training_provenance": {
+    "status": "documented",
+    "datasets": ["LVD-142M"],
+    "benchmark_families": [],
+    "evidence": "DINOv2 public model card"
+  },
+  "preprocessing_provenance": {
+    "status": "documented",
+    "datasets": ["ImageNet normalization constants"],
+    "benchmark_families": []
+  },
+  "inference_inputs": ["agentview_rgb"]
+}

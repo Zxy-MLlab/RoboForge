@@ -1,0 +1,5 @@
+assets: /data/zxy/vla-report/openvla-oft-main/experiments/robot/libero/LIBERO/libero/libero/assets
+bddl_files: /data/zxy/vla-report/openvla-oft-main/experiments/robot/libero/LIBERO/libero/libero/bddl_files
+benchmark_root: /data/zxy/vla-report/openvla-oft-main/experiments/robot/libero/LIBERO/libero/libero
+datasets: /data/zxy/libero_datasets
+init_states: /data/zxy/LIBERO-PRO/libero/libero/init_files

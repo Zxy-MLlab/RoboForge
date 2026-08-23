@@ -1,0 +1,95 @@
+version: 2
+benchmark: LIBERO
+primary_track: harness_acquired_task_zero_shot
+
+definitions:
+  benchmark_family:
+    - LIBERO
+    - LIBERO-Plus
+    - LIBERO-Pro
+  trained_on_current_task: >-
+    Any parameter, adapter, action normalization statistic, prompt policy, or
+    learned retrieval asset fitted with demonstrations, trajectories, images,
+    labels, rewards, or simulator states from an evaluated task definition.
+    Exposure to other tasks is allowed but must be disclosed.
+
+tracks:
+  harness_acquired_task_zero_shot:
+    description: >-
+      Frozen learned models and code modules are allowed when provenance shows
+      no training exposure to the evaluated tasks. The Harness must discover,
+      acquire, register, and compose assets without human task-solving input.
+    reporting_strata:
+      benchmark_family_disjoint: No training exposure to any LIBERO-family task.
+      task_disjoint_transfer: Training may include other LIBERO-family tasks but not evaluated tasks.
+  classical_diagnostic:
+    description: Learned-model-free sensing and control retained as an ablation.
+  current_task_exposed_reference:
+    description: >-
+      Assets trained or normalized on evaluated tasks are retained for audit
+      and cannot contribute to the primary zero-shot claim.
+
+allowed_agent_inputs:
+  - language_instruction
+  - agentview_rgb
+  - agentview_depth
+  - wrist_rgb
+  - wrist_depth
+  - documented_camera_intrinsics
+  - documented_camera_extrinsics
+  - policy_required_proprioception
+
+allowed_capabilities:
+  - frozen_general_vlm
+  - frozen_general_perception_model
+  - frozen_general_grasp_policy
+  - frozen_task_disjoint_robot_policy
+  - code_algorithm
+  - motion_planner
+  - internet_retrieval_for_public_assets_documentation_and_experience
+
+evaluator_only:
+  - check_success
+  - reward
+  - termination_reason
+  - bddl_goal_predicates
+  - privileged_object_poses
+  - simulator_internal_state
+  - evaluation_episode_identifier
+
+forbidden:
+  - model_or_adapter_trained_on_current_evaluation_task
+  - action_normalization_or_retrieval_fitted_on_current_evaluation_task
+  - train_or_finetune_model_parameters_on_current_task_rollouts
+  - use_success_or_reward_during_action_selection
+  - episode_id_specific_prompt_action_or_hyperparameter
+  - manually_script_evaluated_task_solution
+  - select_checkpoint_prompt_or_hyperparameter_on_sealed_results
+  - use_privileged_state_goal_predicates_or_simulator_internals
+  - silently_mix_provenance_strata
+
+unknown_current_task_provenance_policy: reject_from_primary_track_until_resolved
+
+development_policy:
+  manifest: manifests/libero_dev_smoke.json
+  purpose: integration_failure_analysis_and_generic_tool_skill_improvement
+  claimable_metric: false
+  may_train_model_parameters: false
+  may_improve_generic_tools_and_skills_from_failures: true
+
+evaluation_policy:
+  historical_exposed_manifest: manifests/libero_frozen_eval.json
+  sealed_manifest: manifests/libero_sealed_eval_v2.json
+  freeze_candidate_before_first_sealed_run: true
+  run_sealed_manifest_once_per_frozen_candidate: true
+  sealed_results_may_not_drive_iteration: true
+  report_per_episode: true
+  report_all_failures: true
+  require_asset_provenance_gate: true
+
+autonomy_requirements:
+  - log_search_queries_and_sources
+  - log_installation_and_integration_attempts
+  - register_reusable_tools_skills_models_and_algorithms
+  - zero_human_task_solving_interventions_after_run_start
+  - report_baseline_to_final_gain_and_asset_ablation

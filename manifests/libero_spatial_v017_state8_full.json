@@ -1,0 +1,34 @@
+{
+  "protocol": "sealed-generated-controller-transfer-v1",
+  "suite": "libero_spatial",
+  "controller_id": "generic_rgbd_closed_loop_pick_place_v017:v001",
+  "controller_workspace": "runs/coding_harness/controllers_frozen_v15",
+  "authoring_skills": [
+    "capability_library/skills/autonomous-closed-loop-grasp-place-recovery/SKILL.md",
+    "capability_library/skills/visual-articulated-drawer-open-and-retrieve/SKILL.md"
+  ],
+  "development_exclusions": [
+    {"state": 0, "reason": "initial controller/tool development"},
+    {"state": 1, "reason": "failure-driven adaptation and transfer validation"},
+    {"state": 2, "reason": "prior sealed results consumed for self-evolution"},
+    {"state": 3, "reason": "v013 sealed evaluation and v014 task-0 recovery development"},
+    {"state": 4, "reason": "v015 fallback-candidate development"},
+    {"state": 5, "reason": "v016 correction-fallback development"},
+    {"state": 6, "reason": "v016 sealed transfer evaluation"},
+    {"state": 7, "reason": "v017 language-fallback development"}
+  ],
+  "episodes": [
+    {"task": 0, "state": 8, "seed": 7},
+    {"task": 1, "state": 8, "seed": 7},
+    {"task": 2, "state": 8, "seed": 7},
+    {"task": 3, "state": 8, "seed": 7},
+    {"task": 4, "state": 8, "seed": 7},
+    {"task": 5, "state": 8, "seed": 7},
+    {"task": 6, "state": 8, "seed": 7},
+    {"task": 7, "state": 8, "seed": 7},
+    {"task": 8, "state": 8, "seed": 7},
+    {"task": 9, "state": 8, "seed": 7}
+  ],
+  "selection_basis": "All ten LIBERO-Spatial tasks on state 8, which had no prior v017 controller run, inspection, or development use.",
+  "results_consumed_for_iteration": false
+}
