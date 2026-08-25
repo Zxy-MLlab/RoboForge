@@ -112,10 +112,17 @@ def doctor_command(args) -> int:
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
         checks["command_smoke"] = "available" if completed.returncode == 0 else completed.stdout[-1000:]
     except Exception as exc: checks["command_smoke"] = f"unavailable: {exc}"
+    try:
+        from .tool_runtime import ToolRuntime
+        ToolRuntime(python=sys.executable)
+        checks["tool_runtime"] = "available"
+    except Exception as exc:
+        checks["tool_runtime"] = f"unavailable: {type(exc).__name__}: {exc}"
     if args.checkpoint:
         checks["checkpoint"] = "available" if Path(args.checkpoint).is_file() else "missing"
     checks["ok"] = bool(checks["sandbox"] and checks["adapter_smoke"] == "available"
                          and checks["command_smoke"] == "available"
+                         and checks.get("tool_runtime") == "available"
                          and all(value == "available" for value in checks["dependencies"].values())
                          and (not args.checkpoint or checks["checkpoint"] == "available"))
     print(json.dumps(checks, indent=2, default=str)); return 0 if checks["ok"] else 1

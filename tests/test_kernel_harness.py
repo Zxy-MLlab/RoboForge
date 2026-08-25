@@ -216,6 +216,14 @@ def test_checkpoint_restores_snapshot_and_event_store_keeps_identical_events(tmp
     assert len(store.events()) == 2
 
 
+def test_capability_manager_builds_acquired_bundle_in_workspace(tmp_path):
+    workspace = PersistentWorkspace(tmp_path / "workspace")
+    workspace.write_file("bundle/module.py", "value = 1\n")
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace, adapter=FakeAdapter())
+    result = manager.build("bundle")
+    assert result["build"]["exit_code"] == 0
+
+
 def test_restart_resumes_after_committed_execution_without_repeating_action(tmp_path):
     adapter = FakeAdapter(); workspace = PersistentWorkspace(tmp_path / "workspace")
     manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace, adapter=adapter)

@@ -72,6 +72,17 @@ class CapabilityManager:
         return {"path": str(target.relative_to(self.workspace.root)),
                 "files": [str(item.relative_to(target)) for item in target.rglob("*") if item.is_file()]}
 
+    def build(self, directory: str, argv: list[str] | None = None) -> dict[str, Any]:
+        """Build/check an acquired bundle inside the workspace sandbox."""
+        target = (self.workspace.root / directory).resolve()
+        if self.workspace.root not in target.parents or not target.is_dir():
+            raise CapabilityError("build directory is outside workspace")
+        command = argv or ["python", "-m", "compileall", "-q", "."]
+        result = self.workspace.run_command(command, timeout_seconds=600)
+        if result.get("exit_code") != 0:
+            raise CapabilityError(f"capability build failed: {result.get('output', '')[-2000:]}")
+        return {"directory": directory, "command": command, "build": result}
+
     def _extract(self, source: Path, destination: Path):
         destination.mkdir(parents=True, exist_ok=True)
         if zipfile.is_zipfile(source):

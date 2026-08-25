@@ -80,6 +80,8 @@ class AgentLoop:
             {"url": string, "filename": string, "sha256": string}, ["url", "filename"]), cap.download)
         registry.add("unpack_public_asset", "Safely unpack a downloaded archive inside the workspace.", self._schema(
             {"path": string, "destination": string}, ["path", "destination"]), cap.unpack)
+        registry.add("build_capability", "Build or compile-check an acquired capability bundle in isolation.", self._schema(
+            {"directory": string, "argv": {"type": "array", "items": string}}, ["directory"]), cap.build)
         open_object = {"type": "object", "additionalProperties": True}
         registry.add("register_tool", "Register an immutable Tool version; call test_tool before it can be bound.", open_object, cap.register_tool)
         registry.add("test_tool", "Run JSON contract tests against a registered Tool.", self._schema(
