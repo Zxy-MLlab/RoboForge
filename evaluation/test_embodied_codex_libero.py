@@ -126,5 +126,6 @@ def test_validation_command_requires_three_state_runner_inputs():
     )
     assert "embodied_codex" in command
     assert "evaluate_libero_skill_sealed" not in " ".join(command)
-    assert command[command.index("--adapter")+1] == "libero@1"
+    assert command[command.index("--adapter")+1] == "libero"
+    assert command[command.index("--states")+1:command.index("--model-name")] == ["1", "2", "3"]
     assert "--controller-source" in command

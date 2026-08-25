@@ -132,11 +132,11 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
 def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output: Path,
                        model: str,reasoning_effort: str,device: str,python: str,
                        groundingdino_checkpoint: str,base_url: str):
-    state = states[0]
-    return ([python,"-m","embodied_codex","run","--adapter",f"libero@{state}",
+    return ([python,"-m","embodied_codex","run","--adapter","libero",
         "--task",str(task),"--profile","benchmark","--run-dir",str(output),
         "--asset-root",str(Path(skill_dir).resolve().parent / "assets"),
         "--controller-source",str(Path(skill_dir).resolve() / "controller.py"),
+        "--states",*[str(state) for state in states],
         "--model-name",model,"--reasoning-effort",reasoning_effort,
         "--base-url",base_url,"--max-steps","8"])
 

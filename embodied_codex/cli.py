@@ -57,31 +57,39 @@ def run_command(args) -> int:
     run_dir = Path(args.run_dir or f"runs/roboforge/{args.profile}").resolve(); run_dir.mkdir(parents=True, exist_ok=True)
     asset_root = Path(args.asset_root or (run_dir / "assets")).resolve(); asset_root.mkdir(parents=True, exist_ok=True)
     workspace = PersistentWorkspace(run_dir / "workspace")
-    if args.controller_source:
-        source = Path(args.controller_source).resolve()
-        if not source.is_file(): raise FileNotFoundError(source)
-        workspace.write_file("controller.py", source.read_text())
-    adapter = load_adapter(args.adapter, task=str(args.task), run_dir=run_dir)
-    tools, skills, experiences, gaps = _libraries(asset_root, workspace)
-    manager = CapabilityManager(asset_root=asset_root, workspace=workspace, adapter=adapter,
-                               tool_library=tools, skill_library=skills,
-                               experience_library=experiences, gap_library=gaps)
-    manager.bind_shared_tools()
-    contract = getattr(adapter, "sdk_index", None) or getattr(adapter, "sdk_contract", None) or {
-        "protocol": "adapter-provided", "operations": ["observe", "use", "act", "verify", "record"]}
-    policies = _benchmark_policies() if args.profile == "benchmark" else []
-    loop = AgentLoop(model=_model(args), workspace=workspace, adapter=adapter,
-        context_builder=ContextBuilder(adapter_index=contract, asset_registry=manager, workspace=workspace),
-        capability_manager=manager, runtime=ControllerRuntime(timeout_seconds=args.controller_timeout),
-        event_store=EventStore(run_dir), budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions),
-        root=run_dir, web_search=manager.web_search, policies=policies, resume=True)
-    try:
-        result = loop.run(getattr(adapter, "instruction", str(args.task)))
-    finally:
-        close = getattr(adapter, "close", None)
-        if callable(close): close()
-    result["profile"] = args.profile; result["evaluation_policies"] = [p.name for p in policies]
-    print(json.dumps(result, indent=2, default=str)); return 0 if result.get("finished") else 2
+    source = Path(args.controller_source).resolve() if args.controller_source else None
+    if source is not None and not source.is_file(): raise FileNotFoundError(source)
+    results = []
+    for state in list(args.states or [None]):
+        adapter_spec = args.adapter if state is None or "@" in args.adapter else f"{args.adapter}@{state}"
+        case_root = run_dir if state is None else run_dir / f"state_{state}"
+        case_root.mkdir(parents=True, exist_ok=True)
+        adapter = load_adapter(adapter_spec, task=str(args.task), run_dir=case_root)
+        if source is not None: workspace.write_file("controller.py", source.read_text())
+        tools, skills, experiences, gaps = _libraries(asset_root, workspace)
+        manager = CapabilityManager(asset_root=asset_root, workspace=workspace, adapter=adapter,
+                                   tool_library=tools, skill_library=skills,
+                                   experience_library=experiences, gap_library=gaps)
+        manager.bind_shared_tools()
+        contract = getattr(adapter, "sdk_index", None) or getattr(adapter, "sdk_contract", None) or {
+            "protocol": "adapter-provided", "operations": ["observe", "use", "act", "verify", "record"]}
+        policies = _benchmark_policies() if args.profile == "benchmark" else []
+        loop = AgentLoop(model=_model(args), workspace=workspace, adapter=adapter,
+            context_builder=ContextBuilder(adapter_index=contract, asset_registry=manager, workspace=workspace),
+            capability_manager=manager, runtime=ControllerRuntime(timeout_seconds=args.controller_timeout),
+            event_store=EventStore(case_root), budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions),
+            root=case_root, web_search=manager.web_search, policies=policies, resume=True)
+        try: result = loop.run(getattr(adapter, "instruction", str(args.task)))
+        finally:
+            close = getattr(adapter, "close", None)
+            if callable(close): close()
+        result["state"] = state; result["profile"] = args.profile
+        result["evaluation_policies"] = [p.name for p in policies]; results.append(result)
+    output = results[0] if len(results) == 1 else {
+        "finished": all(item.get("finished") for item in results),
+        "executions": sum(item.get("executions", 0) for item in results), "cases": results,
+        "profile": args.profile}
+    print(json.dumps(output, indent=2, default=str)); return 0 if output.get("finished") else 2
 
 
 def doctor_command(args) -> int:
@@ -119,6 +127,7 @@ def main(argv=None) -> int:
     run.add_argument("--profile", choices=("dev", "autonomous", "benchmark"), default="dev")
     run.add_argument("--run-dir"); run.add_argument("--asset-root"); run.add_argument("--model"); run.add_argument("--model-name", default="gpt-5.6-sol")
     run.add_argument("--controller-source", help="load a frozen controller into the workspace before running")
+    run.add_argument("--states", type=int, nargs="+", help="run the same Kernel over multiple Adapter cases")
     run.add_argument("--base-url", default=os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1")); run.add_argument("--reasoning-effort", default="high")
     run.add_argument("--max-steps", type=int, default=60); run.add_argument("--max-executions", type=int, default=20); run.add_argument("--controller-timeout", type=float, default=600)
     run.set_defaults(handler=run_command)
