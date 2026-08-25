@@ -233,3 +233,19 @@ def test_cli_explicit_resume_starts_a_fresh_bounded_session(tmp_path):
     assert result["finished"] is True
     assert result["session"]["index"] == 2
     assert result["session"]["steps"] < result["cumulative"]["steps"]
+
+
+def test_cli_run_auto_resumes_existing_checkpoint(tmp_path):
+    command = [sys.executable, "-m", "embodied_codex", "run",
+        "--adapter", "embodied_codex.fake_adapter:FakeAdapter",
+        "--model", "embodied_codex.fake_adapter:FakeModel", "--task", "auto resume",
+        "--profile", "autonomous", "--max-steps", "30",
+        "--run-dir", str(tmp_path / "run"), "--asset-root", str(tmp_path / "assets")]
+    environment = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1]))
+    first = subprocess.run([*command, "--max-steps", "1"], env=environment,
+        text=True, capture_output=True, timeout=60)
+    assert first.returncode == 2
+    second = subprocess.run(command, env=environment, text=True,
+        capture_output=True, timeout=60)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert json.loads(second.stdout)["finished"] is True

@@ -341,7 +341,9 @@ def main(argv=None) -> int:
         command.add_argument("--session-timeout", type=float, default=3600)
         command.add_argument("--controller-timeout", type=float, default=600)
         command.set_defaults(handler=run_command, resume=resume)
-    add_run_arguments(sub.add_parser("run"), resume=False)
+    # A run directory is resumable by default. ``resume`` remains an explicit,
+    # readable alias for automation and older shell scripts.
+    add_run_arguments(sub.add_parser("run"), resume=True)
     add_run_arguments(sub.add_parser("resume"), resume=True)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--adapter", required=True); doctor.add_argument("--task"); doctor.add_argument("--run-dir"); doctor.add_argument("--checkpoint")
     doctor.add_argument("--sandbox", choices=("auto", "posix", "bubblewrap", "unsafe"), default="auto")

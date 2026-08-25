@@ -16,6 +16,21 @@ from evaluation.run_embodied_codex_libero import (
 )
 
 
+def test_anti_cheating_audits_deduplicated_execution_artifact(tmp_path):
+    from embodied_codex.kernel.events import EventStore
+    from evaluation.anti_cheating import AntiCheatingPolicy
+
+    evidence = tmp_path / "evidence" / "execution-000001.json"
+    evidence.parent.mkdir()
+    evidence.write_text(json.dumps({"sensor_report": {
+        "benchmark_signal_exposed": True}}))
+    store = EventStore(tmp_path / "events")
+    store.commit("execution", {"artifact_uri": "run://evidence/execution-000001.json"})
+    loop = type("Loop", (), {"root": tmp_path, "event_store": store})()
+    with pytest.raises(RuntimeError, match="anti-cheating"):
+        AntiCheatingPolicy(name="anti_cheating").after_run(loop, {})
+
+
 def test_resumed_campaign_recovers_legacy_task_capability_library(tmp_path):
     campaign=tmp_path/"campaign";campaign.mkdir()
     (campaign/"campaign.json").write_text(json.dumps({"protocol":"legacy"}))
