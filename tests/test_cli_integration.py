@@ -46,3 +46,11 @@ class Model:
     assert output["finished"] is True
     assert output["executions"] == 1
     assert (run_dir / "checkpoint/state.json").is_file()
+
+    doctor = subprocess.run([sys.executable, "-m", "embodied_codex", "doctor",
+        "--adapter", "plugin:Adapter", "--task", "doctor", "--run-dir", str(tmp_path / "doctor")],
+        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+    assert doctor.returncode == 0, doctor.stdout
+    report = json.loads(doctor.stdout)
+    assert report["adapter_smoke"] == "available"
+    assert report["command_smoke"] == "available"

@@ -11,6 +11,10 @@ from embodied_codex.kernel.runtime import ControllerRuntime
 from embodied_codex.kernel.workspace import PersistentWorkspace
 from embodied_codex.kernel.assets import AssetRegistry
 from embodied_codex.assets import CapabilityLibrary
+from evaluation.anti_cheating import AntiCheatingPolicy
+from evaluation.generalization import GeneralizationPolicy
+from evaluation.provenance import ProvenancePolicy
+from evaluation.sealed_evaluation import SealedEvaluationPolicy
 
 
 class FakeAdapter:
@@ -36,6 +40,14 @@ class SharedAdapter(FakeAdapter):
         if method == "use":
             return {"tool_id": arguments["tool_id"], "result": self.capabilities[arguments["tool_id"]](arguments["payload"])}
         return super().dispatch(method, arguments)
+
+
+class SealedAdapter(FakeAdapter):
+    def __init__(self): super().__init__(); self.sealed = False
+    def seal_controller_execution(self): self.sealed = True
+    def _sealed_check_once(self):
+        assert self.sealed is True
+        return self.value == 1
 
 
 class CrashModel:
@@ -223,3 +235,20 @@ def test_restart_resumes_after_committed_execution_without_repeating_action(tmp_
     assert result["finished"] is True
     assert len([event for event in EventStore(tmp_path).events() if event["kind"] == "execution"]) == 1
     assert resumed_adapter.value == 0
+
+
+def test_benchmark_policies_execute_before_after_and_sealed_evaluator(tmp_path):
+    adapter = SealedAdapter(); workspace = PersistentWorkspace(tmp_path / "workspace")
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace, adapter=adapter)
+    policies = [AntiCheatingPolicy(name="anti_cheating"), GeneralizationPolicy(name="generalization"),
+                ProvenancePolicy(name="provenance"), SealedEvaluationPolicy(name="sealed_evaluation")]
+    result = AgentLoop(model=FakeModel(), workspace=workspace, adapter=adapter,
+        context_builder=ContextBuilder(adapter_index={"protocol": "fake-v1"}, asset_registry=None, workspace=workspace),
+        capability_manager=manager, runtime=ControllerRuntime(timeout_seconds=10),
+        event_store=EventStore(tmp_path), root=tmp_path, policies=policies).run()
+    assert result["sealed_evaluation"] is True
+    records = [event["payload"] for event in EventStore(tmp_path).events()
+               if event["kind"] == "evaluation_policy"]
+    assert {(item["policy"], item["phase"]) for item in records} == {
+        (name, phase) for name in ("anti_cheating", "generalization", "provenance", "sealed_evaluation")
+        for phase in ("before_run", "after_run")}
