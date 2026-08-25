@@ -36,6 +36,11 @@ roboforge run \
 Runtime、事件事务、checkpoint 和恢复链。自定义 Adapter 使用相同的
 `package.module:AdapterClass` plugin 格式。
 
+使用真实模型前必须显式配置对应 provider 的凭据：`OPENAI_API_KEY` 只连接
+`https://api.openai.com/v1`，`APEX_API_KEY` 只连接 `https://api.apexin.ai/v1`。也可以在
+doctor/run 中传入 `--provider openai` 或 `--provider apex`；内置 provider 不接受对方的
+endpoint。
+
 LIBERO 是 optional Adapter。安装脚本固定 LIBERO、GroundingDINO、SAM 和 GraspNet
 上游 revision；checkpoint 下载脚本在原子替换前校验 SHA256：
 
@@ -46,6 +51,9 @@ roboforge doctor --adapter libero
 roboforge run --adapter libero --task 0 --profile autonomous \
   --run-dir runs/libero-task-0 --asset-root assets/shared
 ```
+
+上述 LIBERO run 需要先设置 `OPENAI_API_KEY` 或 `APEX_API_KEY`；没有模型凭据时 doctor
+会明确报告 `model` 不可用并返回非零状态。
 
 也可通过 `ROBOFORGE_GROUNDINGDINO_ROOT`、`ROBOFORGE_GROUNDINGDINO_CONFIG`、
 `ROBOFORGE_GROUNDINGDINO_CHECKPOINT`、`ROBOFORGE_SAM_ROOT`、

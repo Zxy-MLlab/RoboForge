@@ -101,6 +101,11 @@ class LiberoDeployment:
         from libero.libero import benchmark,get_libero_path
         from libero.libero.envs import OffScreenRenderEnv
         self.episode=episode;self.artifact_dir=Path(artifact_dir).resolve()
+        # LIBERO does not provide a physical resume protocol.  A resumed
+        # Harness run therefore starts a fresh simulator generation and must
+        # retain the previous generation's evidence instead of overwriting it.
+        if self.artifact_dir.exists():
+            self.artifact_dir = self.artifact_dir / f"restart-{uuid.uuid4().hex}"
         self.artifact_dir.mkdir(parents=True,exist_ok=False)
         suite=benchmark.get_benchmark_dict()[episode.suite]();task=suite.get_task(episode.task_index)
         bddl=os.path.join(get_libero_path("bddl_files"),task.problem_folder,task.bddl_file)

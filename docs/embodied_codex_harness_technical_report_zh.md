@@ -130,19 +130,17 @@ Adapter 不拥有任务策略。它只负责：
 - 带 checkpoint 的公开仓库。
 
 需要 ROS graph、宿主 socket 或真机安全监督的能力不在隔离 worker 中冒充可执行资产；
-它必须由环境 Adapter 以 deployment-owned Tool 绑定，并接受同一 Schema、provenance
-和调用审计。Harness 可以生成/检索该插件，但部署授权与 IPC 边界属于环境适配层。
+它必须由环境 Adapter 以 deployment-owned Tool 绑定，并接受同一 Schema 和调用审计。
+Harness 可以生成/检索该插件，但部署授权与 IPC 边界属于环境适配层。
 
 Package 具有统一 `run(payload)` JSON contract，声明 `kind`、entrypoint、CPU/CUDA、
-超时、依赖和 network policy。部署 worker 强制断网。learned package 必须同时满足：
+超时、依赖和 network policy。部署 worker 强制断网。Package 必须满足：
 
-- 公开 HTTPS 来源；
-- training-data declaration；
-- model card；
-- checkpoint SHA256；
-- benchmark contamination check；
-- 自主网页搜索/读取形成的 research record 哈希；
-- 本地 bundle checkpoint 与声明哈希一致。
+- 如果声明 checkpoint，则本地 bundle checkpoint 与声明 SHA256 一致；
+- 所有依赖使用可验证的、固定版本的本地 wheel artifact。
+
+公开来源、训练数据声明、model card、benchmark contamination 和 provenance 审计不属于
+通用资产准入；需要时由 `evaluation/` 或部署方的独立 admission policy 执行。
 
 带外部 import 的 package 必须使用带 hash 的 vendored lock，或声明当前 worker 中的
 精确 `name==version` runtime requirement；运行时再次核对版本。
@@ -174,7 +172,9 @@ revision 不可变且只能延伸最新 revision。状态生命周期受代码�
 
 ### 3.5 Skill
 
-Skill 在 sensor success/generalization gate 后冻结，包含：
+Skill 由模型通过显式资产工具提交，核心只验证其成功证据和可移植性，并以
+`candidate`/`verified`/`promoted` 状态保存。跨场景数量、generalization 或 sealed gate
+由外部 admission/evaluation policy 决定。Skill 包含：
 
 - 完整 Controller 与 SHA256；
 - 实际调用的 Tool/Package 整包与 hash；
@@ -190,7 +190,7 @@ LLM 可以提出接口，但 Harness 会把 Tool dependencies、Robot operations
 
 ## 4. 自主进化的一轮
 
-1. Engine 检索与任务/上轮失败最相关的 Tool、Skill、Experience、Gap。
+1. Agent Loop 检索与任务/上轮失败最相关的 Tool、Skill、Experience、Gap。
 2. GPT 读取持久 Controller 或创建新 Controller。
 3. GPT 在沙箱中做语法、单元和合同测试。
 4. preflight 拒绝可静态确定的 SDK 拼写、空 reference 等错误，不消耗 robot rollout。
@@ -199,7 +199,7 @@ LLM 可以提出接口，但 Harness 会把 Tool dependencies、Robot operations
 7. GPT 查看证据，区分接口错误、感知错误、规划错误和物理失败。
 8. 若现有能力不足，发布 Gap，搜索互联网，安装并测试新 Tool/Package。
 9. GPT 改写 Controller，下一 iteration 再执行。
-10. 成功候选通过预声明 cases 后冻结 Skill；然后才进入 sealed batch。
+10. 模型可以选择保存 Skill、Experience 或 Gap；是否进入 sealed batch 由外部评测 runner 决定。
 
 失败 iteration 的结果不会因为 GPT API 超时而丢失；恢复时不会重复已经完成的物理实验。
 
@@ -243,22 +243,17 @@ campaign 创建前就确定互不重叠的 development/sealed states。同一 Co
 
 ## 7. 当前证据和边界
 
-截至 2026-08-25：
+截至 2026-08-25，本机可复现的证据是：
 
-- `pytest -q`：233 passed（3 个第三方 deprecation warning）；`git diff --check` 通过；
-- `kernel_conformance_v019`：cursor/valves/thermal 三类 Adapter 3/3 sensor success；
-  每个运行 22/22 审计门通过，接口、Controller、Tool 和资产错误为 0；
-- `asset_conformance_v016`：模型按 manual 调用而不读源码、错误 manual 注册被拒绝、
-  Experience 在新任务首轮被 Top-K 检索并形成 action→reobserve 闭环；
-- `acquisition_conformance_v015`：第 1 轮真实失败后，GPT-5.6 自主搜索网页，维护
-  Capability Gap，编写、注册并测试新 Tool；第 2 轮 Controller 实际调用该 Tool 后
-  sensor success。22/22 审计门通过且无工程接口错误；
-- 最近完成的 LIBERO-Spatial 10-task campaign 有 4 个任务进入 sealed evaluation，
-  evaluator 共成功 7/12 个 episode。task 8 的冻结 Skill 在 3 个 sealed states 上为
-  3/3，是当前唯一严格解决的任务；task 0 和 task 1 均为 2/3，task 6 为 0/3；
-- task 6 的后续自主探索保存到第 21 个真实 episode。Harness 自主搜索、注册并接入
-  bounds-scaled exterior-pinch Tool，但显式夹爪姿态在接触前以 2.07 rad 误差不可达，
-  该结果被保存为 unresolved reachability/grasp frontier；
-- 当前严格 LIBERO-Spatial 完整解决率为 1/10。该结果证明自主编程、搜索、Tool 注册、
-  Controller 修改、Skill 冻结和 sealed evaluator 链路真实运行，但尚未测得系统最终
-  能力上限。旧 v016-v019 或独立人工 Controller 的分数不属于本系统结果。
+- `python -m pytest -q`：97 passed；
+- `python -m pytest -q evaluation`：12 passed；
+- `compileall` 和 `git diff --check`：通过；
+- `roboforge doctor --adapter libero`：通过，LIBERO、robosuite、感知依赖、checkpoint、
+  Controller Runtime、Tool Runtime 和 sandbox 均完成真实 smoke test；
+- 使用 `FakeModel` 的真实 LIBERO Adapter episode 已执行，但因模型生成了不受 SDK 支持的
+  `set_value` 动作而失败。Harness 返回 `finished=false`、`completion_valid=false`、
+  `resumable=true`，因此这不是 LIBERO 任务成功证据。
+
+当前没有在本机完成真实 OpenAI/Apex 模型的 LIBERO 任务成功闭环，也没有完成完整 sealed
+campaign；两者都必须在相应模型凭据和评测资源可用后单独验证，不能用 FakeModel 或 doctor
+成功替代。
