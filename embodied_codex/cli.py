@@ -191,7 +191,10 @@ def doctor_command(args) -> int:
         except ProviderConfigurationError as exc:
             checks["model_provider"] = {"provider": args.provider, "endpoint": args.base_url,
                 "key_env": None, "configured": False, "error": str(exc)}
-    for dependency in ("jsonschema", "openai"):
+    required_dependencies = ["jsonschema"]
+    if not args.model:
+        required_dependencies.append("openai")
+    for dependency in required_dependencies:
         try: importlib.import_module(dependency); checks["dependencies"][dependency] = "available"
         except Exception as exc: checks["dependencies"][dependency] = f"unavailable: {exc}"
     smoke_dir = Path(args.run_dir or Path("runs/doctor") / args.adapter.replace(":", "_")); smoke_dir.mkdir(parents=True, exist_ok=True)
