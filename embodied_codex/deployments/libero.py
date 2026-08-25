@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 from jsonschema import Draft202012Validator, ValidationError
 
-from ..sdk_contract import validate_action,validate_verifier_request
+from ..adapters.libero_sdk import validate_action,validate_verifier_request
 
 
 PROPRIO = ("robot0_joint_pos","robot0_joint_vel","robot0_eef_pos",
@@ -124,6 +124,7 @@ class LiberoDeployment:
         self.verifiers=dict(verifiers or {});self.references={};self.trace=[];self.video=[]
         self.verified_attachments=set()
         self.step=0;self.frame=0;self.closed=False;self.last_verify=False
+        self.environment_generation=uuid.uuid4().hex
         self._controller_execution_sealed=False;self._evaluator_calls=0
         self.outcome_verifier=outcome_verifier;self._outcome_report=None
         self._outcome_after=None
@@ -148,6 +149,24 @@ class LiberoDeployment:
 
     @property
     def instruction(self): return self._instruction
+
+    def execution_identity(self):
+        return {"adapter":"libero","episode_id":self.episode.case_handle or
+                f"{self.episode.suite}:{self.episode.task_index}:{self.episode.initial_state_index}",
+                "environment_generation":self.environment_generation}
+
+    def initial_observation(self):
+        arguments={"channel":"rgbd","request":{}}
+        return self.project_rpc_output("observe",arguments,self.dispatch("observe",arguments))
+
+    def resume_protocol(self):
+        # A fresh simulator instance does not preserve physical state across a
+        # Harness restart, so committed evidence is diagnostic only.
+        return {"supports_resume":False,"environment_generation":self.environment_generation,
+                "replay_allowed":True,"actions_idempotent":False}
+
+    def validate_execution_receipt(self, receipt):
+        return False
 
     def register_capability(self,tool_id,function,contract):
         if tool_id in self.capabilities: raise LiberoDeploymentError("duplicate Tool")
@@ -446,6 +465,17 @@ class LiberoDeployment:
                 # Consumed only by the Harness generalization gate.  Keys
                 # prefixed with _harness_ are removed from model evidence.
                 "_harness_case_id":self.episode.case_handle}
+
+    def verification_receipt(self, execution):
+        report=self.sensor_report(execution)
+        return {"verified":bool(execution.get("completed") is True
+                    and not execution.get("error")
+                    and execution.get("sensor_verification_observed") is True
+                    and report.get("sensor_verification_passed") is True),
+                "controller_sha256":execution.get("program_sha256"),
+                "environment_identity":self.execution_identity(),
+                "episode_id":self.execution_identity()["episode_id"],
+                "environment_generation":self.environment_generation}
 
     def seal_controller_execution(self):
         """Permanently close robot I/O before the evaluator barrier opens."""

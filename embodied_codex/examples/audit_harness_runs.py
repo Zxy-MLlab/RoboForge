@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from embodied_codex.conformance import audit_run
+from embodied_codex.legacy.conformance import audit_run
 
 
 def main() -> int:

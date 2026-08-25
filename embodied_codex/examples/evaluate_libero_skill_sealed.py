@@ -17,7 +17,7 @@ from embodied_codex.examples.evaluate_libero_skill import (
     _controller_capability_view, _load_class, _load_function,
     _relative_module_paths, _sensor_success, inspect_skill,
 )
-from embodied_codex.runtime import ControllerRuntime
+from embodied_codex.legacy.runtime import ControllerRuntime
 from embodied_codex.tool_runtime import ToolRuntime
 
 ROOT=Path(__file__).resolve().parents[2]

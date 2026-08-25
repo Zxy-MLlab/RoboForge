@@ -18,13 +18,13 @@ from typing import Any, Callable
 
 import cv2
 
-from ..assets import (CapabilityLibrary, ExperienceLibrary, SkillLibrary,
+from .assets import (CapabilityLibrary, ExperienceLibrary, SkillLibrary,
                      CapabilityGapLibrary, AssetError,
                      execution_evidence_assessment, bind_authoritative_validation)
 from .registry import FunctionRegistry
-from ..runtime import ControllerRuntime
+from .runtime import ControllerRuntime
 from ..web import download_public_file,fetch_web_page,search_web
-from ..workspace import TaskWorkspace
+from .workspace import TaskWorkspace
 
 
 def _obj(properties, required):

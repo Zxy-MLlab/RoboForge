@@ -46,7 +46,7 @@ class CapabilityManager:
 
     def load_tool_source(self, tool_id: str):
         if self.tool_library is None: raise CapabilityError("Tool library unavailable")
-        return self.tool_library.inspect(tool_id)
+        return self.tool_library.inspect(tool_id, include_source=True)
 
     def web_search(self, query: str, limit: int = 5): return search_web(query, limit)
     def fetch_page(self, url: str, max_chars: int = 30000): return fetch_web_page(url, max_chars)
@@ -78,9 +78,14 @@ class CapabilityManager:
         if (target != self.workspace.root and self.workspace.root not in target.parents) or not target.is_dir():
             raise CapabilityError("build directory is outside workspace")
         command = argv or ["python", "-m", "compileall", "-q", "."]
-        result = self.workspace.run_command(command, timeout_seconds=600)
-        if result.get("exit_code") != 0:
-            raise CapabilityError(f"capability build failed: {result.get('output', '')[-2000:]}")
+        snapshot = self.workspace.snapshot()
+        try:
+            result = self.workspace.run_command(command, timeout_seconds=600, cwd=target)
+            if result.get("exit_code") != 0:
+                raise CapabilityError(f"capability build failed: {result.get('output', '')[-2000:]}")
+        except Exception:
+            self.workspace.restore(snapshot.snapshot_id)
+            raise
         return {"directory": directory, "command": command, "build": result}
 
     def _extract(self, source: Path, destination: Path):
@@ -90,12 +95,16 @@ class CapabilityManager:
                 for member in archive.infolist():
                     target = (destination / member.filename).resolve()
                     if destination not in target.parents: raise CapabilityError("archive path traversal")
+                    if ((member.external_attr >> 16) & 0o170000) == 0o120000:
+                        raise CapabilityError("archive symlinks are not allowed")
                 archive.extractall(destination); return
         if tarfile.is_tarfile(source):
             with tarfile.open(source) as archive:
                 for member in archive.getmembers():
                     target = (destination / member.name).resolve()
                     if destination not in target.parents: raise CapabilityError("archive path traversal")
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise CapabilityError("archive links and devices are not allowed")
                 archive.extractall(destination); return
         shutil.copy2(source, destination / source.name)
 
@@ -106,6 +115,17 @@ class CapabilityManager:
         # A manifest is immutable at registration time but remains un-deployable
         # until contract tests pass. test_tool performs the actual binding.
         return {**result, "bound": False, "requires_test": True}
+
+    def register_package(self, **payload):
+        if self.tool_library is None:
+            raise CapabilityError("Tool library unavailable")
+        result = self.tool_library.register_package(**payload)
+        return {**result, "bound": False, "requires_test": True}
+
+    def revise_manual(self, **payload):
+        if self.tool_library is None:
+            raise CapabilityError("Tool library unavailable")
+        return self.tool_library.revise_manual(**payload)
 
     def test_tool(self, tool_id: str, cases: list[Mapping[str, Any]]):
         if self.tool_library is None: raise CapabilityError("Tool library unavailable")
@@ -120,15 +140,46 @@ class CapabilityManager:
 
     def register_skill(self, **payload):
         if self.skill_library is None: raise CapabilityError("Skill library unavailable")
-        return self.skill_library.freeze(**payload)
+        values = dict(payload)
+        controller = values.get("controller")
+        if controller is not None and not Path(str(controller)).is_absolute():
+            values["controller"] = str((self.workspace.root / str(controller)).resolve())
+        values["evidence_paths"] = [self._asset_path(item) for item in values.get("evidence_paths", [])]
+        values.setdefault("tools", self.tool_library)
+        return self.skill_library.freeze(**values)
 
     def register_experience(self, **payload):
         if self.experience_library is None: raise CapabilityError("Experience library unavailable")
-        return self.experience_library.register(**payload)
+        values = dict(payload)
+        values["evidence_paths"] = [self._asset_path(item) for item in values.get("evidence_paths", [])]
+        return self.experience_library.register(**values)
 
     def record_gap(self, **payload):
         if self.gap_library is None: raise CapabilityError("Gap library unavailable")
-        return self.gap_library.publish(**payload)
+        values = dict(payload)
+        values["evidence_paths"] = [self._asset_path(item) for item in values.get("evidence_paths", [])]
+        return self.gap_library.publish(**values)
+
+    def _asset_path(self, value: Any) -> str:
+        encoded = str(value)
+        if encoded.startswith("workspace://"):
+            path = self.workspace.root / encoded.removeprefix("workspace://")
+        elif encoded.startswith("run://"):
+            path = self.workspace.root.parent / encoded.removeprefix("run://")
+        elif encoded.startswith("artifact://adapter/"):
+            path = Path(getattr(self.adapter, "artifact_dir", "")) / encoded.removeprefix("artifact://adapter/")
+        else:
+            path = Path(encoded)
+            if not path.is_absolute():
+                path = self.workspace.root / path
+        path = path.resolve()
+        roots = [self.workspace.root, self.workspace.root.parent / "evidence"]
+        adapter_root = getattr(self.adapter, "artifact_dir", None)
+        if adapter_root:
+            roots.append(Path(adapter_root).resolve())
+        if not any(path == root or root in path.parents for root in roots):
+            raise CapabilityError("asset evidence must be inside a registered artifact root")
+        return str(path)
 
     def bind_shared_tools(self):
         if self.tool_library is None: return []

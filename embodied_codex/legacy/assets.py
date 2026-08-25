@@ -14,8 +14,8 @@ from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator, ValidationError
 
-from .tool_runtime import ToolRuntime
-from .retrieval import rank_records
+from ..tool_runtime import ToolRuntime
+from ..retrieval import rank_records
 
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]{2,63}$")

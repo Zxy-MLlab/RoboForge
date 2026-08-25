@@ -8,7 +8,7 @@ Experience/Gap 检索；任务策略、失败诊断和能力获取由模型决�
 
 `embodied_codex/kernel/` 是唯一运行底座：Agent Loop、workspace、sandbox runtime、
 function-calling tools、capability manager、context builder、event store 和恢复检查点。
-`embodied_codex/assets.py` 提供不可变 Tool
+`embodied_codex/kernel/assets.py` 提供不可变 Tool
 版本、Schema、manual-first 和资产库；`embodied_codex/deployments/` 是 Adapter 实现。
 LIBERO 只通过 `deployments/libero.py` 和 `evaluation/run_embodied_codex_libero.py`
 接入。反作弊、provenance、generalization 和 sealed evaluator 只属于 `evaluation/`
@@ -50,8 +50,10 @@ LIBERO perception checkpoints and third-party sources are intentionally external
 proprioception smoke checks before a run.
 
 Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` 开启资产检索和沉淀，
-`benchmark` 由外部评测 runner 额外加载研究 policy。自定义 Adapter 至少实现
-`instruction`、`dispatch`、`project_rpc_output`、`sensor_report` 和 `close`，详见
+`benchmark` 由外部评测 runner 额外加载研究 policy。自定义 Adapter 必须实现
+`instruction`、`initial_observation`、`dispatch`、`project_rpc_output`、`sensor_report`、
+`verification_receipt`、`execution_identity`、`resume_protocol`、
+`validate_execution_receipt`、`register_capability` 和 `close`，详见
 [`docs/adapter_authoring.md`](docs/adapter_authoring.md)。
 
 ## 安全与稳定性

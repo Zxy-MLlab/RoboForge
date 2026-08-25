@@ -12,7 +12,7 @@ import shutil
 from typing import Any, Callable
 
 from .agent import CodingAgent
-from ..assets import (AssetError, CapabilityLibrary, SkillLibrary, ExperienceLibrary,
+from .assets import (AssetError, CapabilityLibrary, SkillLibrary, ExperienceLibrary,
                      CapabilityGapLibrary)
 from .engineering import (EngineeringSurface, _compact_evidence_value,
                           _controller_semantic_sha256,_controller_strategy_sha256,
@@ -21,12 +21,12 @@ from .engineering import (EngineeringSurface, _compact_evidence_value,
                           _controller_tool_ids,
                           remap_controller_tool_ids,
                           transient_infrastructure_failure)
-from ..runtime import ControllerRuntime
+from .runtime import ControllerRuntime
 from .task_model import (build_task_model, canonical_sha256,
                          review_capability_integration, review_controller_binding,
                          review_controller_task_fidelity,
                          validate_task_model)
-from ..workspace import TaskWorkspace
+from .workspace import TaskWorkspace
 
 
 def _post_action_transient_replay_source(iterations):

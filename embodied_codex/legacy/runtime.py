@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any, Mapping
 
-from .interfaces import ALLOWED_RPC, RobotDeployment
+from ..interfaces import ALLOWED_RPC, RobotDeployment
 
 
 class ControllerRuntimeError(RuntimeError): pass

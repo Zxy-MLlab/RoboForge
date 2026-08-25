@@ -22,7 +22,7 @@ from typing import Any, Callable, Mapping
 ROOT=Path(__file__).resolve().parents[2]
 
 from embodied_codex.deployments import LiberoDeployment, LiberoEpisode
-from embodied_codex.runtime import ControllerRuntime
+from embodied_codex.legacy.runtime import ControllerRuntime
 from embodied_codex.tool_runtime import ToolRuntime
 
 

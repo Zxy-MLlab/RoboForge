@@ -14,7 +14,7 @@ import sys
 import time
 from typing import Callable, Sequence
 
-from embodied_codex.conformance import audit_run
+from embodied_codex.legacy.conformance import audit_run
 
 
 def build_task_command(args: argparse.Namespace, task: int, run_dir: Path,

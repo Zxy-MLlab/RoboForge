@@ -27,7 +27,12 @@ embodied_codex = "embodied_codex.cli:main"
 roboforge = "embodied_codex.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["embodied_codex*", "evaluation"]
+include = ["embodied_codex", "embodied_codex.*", "evaluation", "evaluation.*"]
+exclude = ["embodied_codex.legacy", "embodied_codex.legacy.*",
+           "embodied_codex.examples", "embodied_codex.examples.*"]
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "evaluation"]

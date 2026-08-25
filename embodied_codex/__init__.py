@@ -1,24 +1,14 @@
-"""RoboForge Embodied Coding Agent Harness.
-
-The lightweight kernel is the default surface. The historical EvolutionEngine
-is exposed lazily for the compatibility LIBERO runner and is not imported by
-normal kernel users.
-"""
+"""RoboForge Embodied Coding Agent Harness canonical public API."""
 
 from .interfaces import RobotDeployment
-from .runtime import ControllerRuntime
-from .workspace import TaskWorkspace
-from .assets import (CapabilityGapLibrary, CapabilityLibrary, ExperienceLibrary,
-                     SkillLibrary)
+from .kernel.runtime import ControllerRuntime
+from .kernel.workspace import PersistentWorkspace
+from .kernel.assets import (CapabilityGapLibrary, CapabilityLibrary, ExperienceLibrary,
+                            SkillLibrary)
+from .kernel.agent_loop import AgentLoop, LoopBudget
 
 __version__ = "0.5.0"
 
-def __getattr__(name):
-    if name == "EvolutionEngine":
-        from .evolution import EvolutionEngine
-        return EvolutionEngine
-    raise AttributeError(name)
-
-__all__ = ["RobotDeployment", "ControllerRuntime", "TaskWorkspace",
+__all__ = ["RobotDeployment", "ControllerRuntime", "PersistentWorkspace",
            "CapabilityLibrary", "SkillLibrary", "ExperienceLibrary",
-           "CapabilityGapLibrary", "EvolutionEngine"]
+           "CapabilityGapLibrary", "AgentLoop", "LoopBudget"]

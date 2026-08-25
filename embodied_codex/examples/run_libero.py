@@ -14,9 +14,9 @@ from embodied_codex.capabilities import (GraspNetRGBD,OpenVocabularyRGBD,
                                          VLMVisualRelationGrounder,
                                          VLMVisualTaskOutcomeVerifier)
 from embodied_codex.deployments import LiberoDeployment,LiberoEpisode
-from embodied_codex.evolution import EvolutionEngine
+from embodied_codex.legacy.evolution import EvolutionEngine
 from embodied_codex.model import OpenAIModel
-from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 
 ROOT=Path(__file__).resolve().parents[2]
 LIBERO_REQUIRE_TASK_MODEL=False

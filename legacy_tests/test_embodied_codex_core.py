@@ -6,25 +6,25 @@ import sys
 
 import pytest
 
-from embodied_codex.runtime import ControllerRuntime
+from embodied_codex.legacy.runtime import ControllerRuntime
 from embodied_codex.examples.evaluate_libero_skill import inspect_skill, _sensor_success
 from embodied_codex.capabilities.open_vocab_rgbd import OpenVocabularyRGBD
-from embodied_codex.agent import CodingAgent
-from embodied_codex.assets import (CapabilityLibrary, ExperienceLibrary, SkillLibrary,
+from embodied_codex.legacy.agent import CodingAgent
+from embodied_codex.legacy.assets import (CapabilityLibrary, ExperienceLibrary, SkillLibrary,
                                    CapabilityGapLibrary, AssetError)
-from embodied_codex.engineering import (EngineeringSurface, _controller_semantic_sha256,
+from embodied_codex.legacy.engineering import (EngineeringSurface, _controller_semantic_sha256,
                                          _controller_strategy_sha256,
                                          _controller_strategy_prefix_sha256,
                                          _controller_tool_ids,
                                          _controller_tool_ids_before_robot_event,
                                          transient_infrastructure_failure)
-from embodied_codex.evolution import (EvolutionEngine,
+from embodied_codex.legacy.evolution import (EvolutionEngine,
                                       _post_action_transient_replay_source)
-from embodied_codex.registry import FunctionRegistry
-from embodied_codex.workspace import TaskWorkspace, WorkspaceError
+from embodied_codex.legacy.registry import FunctionRegistry
+from embodied_codex.legacy.workspace import TaskWorkspace, WorkspaceError
 from embodied_codex.web import _bing_results
-from embodied_codex.conformance import audit_run
-from embodied_codex.task_model import TaskModelError, review_capability_integration
+from embodied_codex.legacy.conformance import audit_run
+from embodied_codex.legacy.task_model import TaskModelError, review_capability_integration
 
 
 PYTHON = sys.executable
@@ -907,7 +907,7 @@ def test_generalization_gate_requires_same_controller_on_every_case(tmp_path):
 
 def test_generalization_coverage_is_invalidated_when_evidence_protocol_changes(tmp_path):
     import json
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
     root=tmp_path/"protocol-change";root.mkdir()
     (root/"state.json").write_text(json.dumps({
         "task":"task","skill_name":"skill","status":"evolving","iterations":[],
@@ -1659,7 +1659,7 @@ def test_structured_queries_accept_hash_validated_experience_evidence(tmp_path):
 
 def test_robot_failure_summary_keeps_full_evidence_on_disk_but_bounds_model_context(tmp_path):
     import json
-    from embodied_codex.engineering import _agent_robot_summary
+    from embodied_codex.legacy.engineering import _agent_robot_summary
 
     candidates=[{"rank":index,"score":index/1000,"matrix":[float(index)]*16}
                 for index in range(1000)]
@@ -2943,7 +2943,7 @@ def test_libero_dynamically_binds_generated_tool_with_its_contract():
 
 def test_conformance_audits_deployment_owned_tool_validation_record(tmp_path):
     import json
-    from embodied_codex.conformance import _tool_assets
+    from embodied_codex.legacy.conformance import _tool_assets
     source=tmp_path/"adapter_tool.py";source.write_text("def deployed(payload): return payload\n")
     workspace=tmp_path/"workspace";workspace.mkdir()
     tools=tmp_path/"tools";library=CapabilityLibrary(tools,workspace,python=PYTHON)
@@ -3278,7 +3278,7 @@ def test_tool_json_schemas_are_enforced_at_registration_test_and_runtime(tmp_pat
         library.test_tool(tool_id,[{"input":{"value":"wrong"},"expected":{"value":"wrong"}}])
     failed=library.inspect(tool_id)["manifest"]
     assert failed["status"]=="test_failed"
-    from embodied_codex.conformance import _tool_assets
+    from embodied_codex.legacy.conformance import _tool_assets
     run=tmp_path/"run";run.mkdir()
     (run/"harness_configuration.json").write_text(__import__("json").dumps({
         "capability_root":str((tmp_path/"tools").resolve())}))
@@ -3739,7 +3739,7 @@ def test_frozen_class_loader_resolves_only_declared_relative_dependency(tmp_path
 
 def test_bootstrap_tool_ids_are_rebound_by_python_ast_only():
     import ast
-    from embodied_codex.evolution import remap_controller_tool_ids
+    from embodied_codex.legacy.evolution import remap_controller_tool_ids
 
     source = (
         'PERCEPT = "perception:v002"\n'
@@ -3758,7 +3758,7 @@ def test_bootstrap_tool_ids_are_rebound_by_python_ast_only():
 
 
 def test_invalid_persistent_controller_rebinds_string_tokens_before_agent_repair():
-    from embodied_codex.evolution import remap_controller_tool_ids
+    from embodied_codex.legacy.evolution import remap_controller_tool_ids
     source=(
         'TOOL = "perception:v002"\n'
         '# perception:v002 must not be rewritten in comments\n'
@@ -3785,7 +3785,7 @@ def test_invalid_persistent_controller_rebinds_string_tokens_before_agent_repair
 def test_resumed_bootstrap_preserves_evolved_controller(tmp_path):
     import hashlib
     import json
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
 
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -3810,7 +3810,7 @@ def test_resumed_bootstrap_preserves_evolved_controller(tmp_path):
 
 
 def test_kernel_prompt_delegates_domain_reasoning_to_the_engineering_agent():
-    from embodied_codex.evolution import SYSTEM_PROMPT
+    from embodied_codex.legacy.evolution import SYSTEM_PROMPT
 
     assert "no task template" in SYSTEM_PROMPT
     assert "externally supplied failure" in SYSTEM_PROMPT
@@ -3893,7 +3893,7 @@ def test_benchmark_neutral_kernel_adapters_have_distinct_machine_contracts(tmp_p
 
 
 def _causal_task_model():
-    from embodied_codex.task_model import canonical_sha256
+    from embodied_codex.legacy.task_model import canonical_sha256
     value={
         "protocol":"embodied-codex-task-model-v1",
         "instruction":"retrieve the object from a container and place it on a support",
@@ -3921,7 +3921,7 @@ def _causal_task_model():
 
 
 def test_task_model_rejects_uncovered_language_requirement():
-    from embodied_codex.task_model import TaskModelError,validate_task_model
+    from embodied_codex.legacy.task_model import TaskModelError,validate_task_model
     value=_causal_task_model();value.pop("task_model_sha256")
     value["requirements"].append(
         {"id":"identity","kind":"source_relation","description":"specific source instance"})
@@ -4082,7 +4082,7 @@ def test_exhausted_frontier_does_not_build_task_model_on_resume(tmp_path):
 
 
 def test_robot_contract_preflight_rejects_action_typo_and_null_ref(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
     robot.act({"type":"move_pose", "pose_ref":"p"})
@@ -4099,7 +4099,7 @@ def test_robot_contract_preflight_rejects_action_typo_and_null_ref(tmp_path):
 
 
 def test_robot_contract_preflight_rejects_missing_or_invalid_run_before_deployment(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     deployments=[]
     surface=EngineeringSurface(workspace=workspace,capabilities=object(),runtime=object(),
@@ -4127,7 +4127,7 @@ def test_robot_contract_preflight_rejects_missing_or_invalid_run_before_deployme
 
 
 def test_robot_sdk_contract_is_available_as_sectioned_on_demand_manual(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     surface=EngineeringSurface(workspace=TaskWorkspace(tmp_path/"workspace"),
         capabilities=object(),runtime=object(),deployment_factory=lambda:None,
         artifact_dir=tmp_path/"iterations"/"iteration_001",
@@ -4141,7 +4141,7 @@ def test_robot_sdk_contract_is_available_as_sectioned_on_demand_manual(tmp_path)
 
 
 def test_libero_osc_contract_distinguishes_commands_from_metric_displacement():
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 
     contract=LIBERO_ROBOT_SDK_CONTRACT["actions"]["osc_delta"]
     assert "NOT metres" in contract["field_semantics"]["translation"]
@@ -4324,7 +4324,7 @@ def test_execution_evidence_gate_prevents_failed_rollout_success_promotion(tmp_p
 
 
 def test_bootstrap_asset_retrieval_is_a_bounded_index():
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
     long="x"*5000
     experiences,skills,gaps=EvolutionEngine._retrieved_asset_index(
         experiences=[{"experience_id":"lesson:v001","name":"lesson","summary":long,
@@ -4410,7 +4410,7 @@ def test_previous_evidence_prompt_does_not_turn_precompacted_lists_into_keys():
 
 
 def test_deployment_guidance_prompt_uses_compact_sdk_index():
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     guidance={"adapter":"LIBERO","robot_sdk_contract":LIBERO_ROBOT_SDK_CONTRACT,
               "seed_tool_ids":["detector:v001"]}
     compact=EvolutionEngine._prompt_deployment_guidance(guidance)
@@ -4493,7 +4493,7 @@ def test_uncommitted_recovery_keeps_short_command_correction_output(tmp_path):
 
 
 def test_previous_outcome_surfaces_task_level_conflict_ahead_of_local_verifier():
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
     summary=EvolutionEngine._authoritative_outcome({
         "sensor_success_candidate":False,
         "controller_result":{"verified":True,"sensor_failure":False},
@@ -4512,7 +4512,7 @@ def test_previous_outcome_surfaces_task_level_conflict_ahead_of_local_verifier()
 
 
 def test_correction_coding_passes_use_tighter_evidence_to_action_deadline():
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
     assert EvolutionEngine._coding_pass_limits(1)=={
         "max_evidence_deliveries":18,"post_evidence_pause_max_turns":4,
         "post_mutation_max_turns":8}
@@ -4527,7 +4527,7 @@ def test_correction_coding_passes_use_tighter_evidence_to_action_deadline():
 
 
 def test_coding_pass_handoff_is_compact_and_preserves_actionable_failure():
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
     handoff=EvolutionEngine._coding_pass_handoff({
         "completed":False,"error":"engineering action deadline",
         "tool_results":[
@@ -4559,7 +4559,7 @@ def test_coding_pass_handoff_preserves_bounded_command_correction_output():
 
 
 def test_coding_pass_handoff_preserves_persisted_plan_without_bulk_content():
-    from embodied_codex.evolution import EvolutionEngine
+    from embodied_codex.legacy.evolution import EvolutionEngine
     handoff=EvolutionEngine._coding_pass_handoff({
         "completed":False,"error":"turn budget exhausted",
         "tool_results":[
@@ -4745,7 +4745,7 @@ def test_single_sdk_contract_matches_adapter_and_all_examples_validate():
     import inspect
     import textwrap
     from embodied_codex.deployments.libero import LiberoDeployment
-    from embodied_codex.sdk_contract import (LIBERO_ROBOT_SDK_CONTRACT,
+    from embodied_codex.adapters.libero_sdk import (LIBERO_ROBOT_SDK_CONTRACT,
         SDKContractError,validate_action,validate_verifier_request)
 
     tree=ast.parse(textwrap.dedent(inspect.getsource(LiberoDeployment._act)))
@@ -4773,7 +4773,7 @@ def test_single_sdk_contract_matches_adapter_and_all_examples_validate():
 
 
 def test_sdk_linter_rejects_missing_required_literal_fields(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
     robot.act({"type":"move_to_pose", "offset":[0,0,0]})
@@ -4800,7 +4800,7 @@ def test_sdk_linter_rejects_missing_required_literal_fields(tmp_path):
 ])
 def test_contract_failure_never_constructs_robot_deployment(tmp_path, controller, message):
     """Typed SDK mistakes are compilation failures, not robot experiments."""
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",controller)
@@ -4837,7 +4837,7 @@ def test_robot_execution_tool_disappears_after_one_episode_lifecycle(tmp_path):
 
 def test_complete_literal_libero_sdk_controller_passes_lint_and_executes(tmp_path):
     """A GPT-style controller consumes the exact public SDK without aliases."""
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
@@ -4890,7 +4890,7 @@ def test_complete_literal_libero_sdk_controller_passes_lint_and_executes(tmp_pat
 
 
 def test_contract_linter_rejects_fabricated_opaque_reference_literals(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
     robot.act({"type":"move_to_pose", "pose_ref":"made-up-pose"})
@@ -4907,7 +4907,7 @@ def test_contract_linter_rejects_fabricated_opaque_reference_literals(tmp_path):
 
 
 def test_contract_linter_rejects_unresolved_runtime_name_before_robot_episode(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
     event = {"phase": "attempt"}
@@ -4923,7 +4923,7 @@ def test_contract_linter_rejects_unresolved_runtime_name_before_robot_episode(tm
 
 
 def test_contract_linter_allows_imports_builtins_closures_and_initialized_names(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''import math
 
@@ -4942,7 +4942,7 @@ def run(robot):
 
 
 def test_contract_linter_rejects_branch_local_read_before_assignment(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
     if robot.instruction:
@@ -4958,7 +4958,7 @@ def test_contract_linter_rejects_branch_local_read_before_assignment(tmp_path):
 
 
 def test_contract_linter_accepts_locals_assigned_on_every_continuing_branch(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     workspace.write_file("controller.py",'''def run(robot):
     if robot.instruction:
@@ -4978,7 +4978,7 @@ def test_contract_linter_accepts_locals_assigned_on_every_continuing_branch(tmp_
 
 
 def test_contract_linter_understands_nonempty_loop_assignment_and_early_break(tmp_path):
-    from embodied_codex.sdk_contract import LIBERO_ROBOT_SDK_CONTRACT
+    from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
     workspace=TaskWorkspace(tmp_path/"run"/"workspace")
     surface=EngineeringSurface(workspace=workspace,capabilities=object(),runtime=object(),
         deployment_factory=lambda:None,
@@ -5456,7 +5456,7 @@ def test_agent_asset_registration_requires_hashed_research_evidence(tmp_path,mon
     surface=EngineeringSurface(workspace=workspace,capabilities=library,
         runtime=object(),deployment_factory=lambda:None,artifact_dir=artifact,gaps=gaps)
     observed="https://example.org/public-algorithm"
-    monkeypatch.setattr("embodied_codex.engineering.search_web",lambda query,limit:{
+    monkeypatch.setattr("embodied_codex.legacy.engineering.search_web",lambda query,limit:{
         "query":query,"provider":"fixture","results":[{
             "title":"Public algorithm","url":observed,"source":"fixture"}],
         "provider_errors":[]})
@@ -5478,7 +5478,7 @@ def test_agent_asset_registration_requires_hashed_research_evidence(tmp_path,mon
         import hashlib
         return {"url":url,"path":str(destination),"bytes":17,
                 "sha256":hashlib.sha256(b"public checkpoint").hexdigest()}
-    monkeypatch.setattr("embodied_codex.engineering.download_public_file",fake_download)
+    monkeypatch.setattr("embodied_codex.legacy.engineering.download_public_file",fake_download)
     downloaded=surface.download_public_asset(observed,"assets/checkpoint.bin",1024,"")
     assert downloaded["bytes"]==17 and (workspace.root/"assets"/"checkpoint.bin").is_file()
     registered=surface.register_tool(source_urls=[observed],**common)

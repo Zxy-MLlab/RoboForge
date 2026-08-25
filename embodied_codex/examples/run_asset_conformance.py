@@ -7,11 +7,11 @@ import os
 from pathlib import Path
 import sys
 
-from embodied_codex.assets import CapabilityLibrary, ExperienceLibrary
-from embodied_codex.conformance import audit_run
-from embodied_codex.evolution import EvolutionEngine
+from embodied_codex.legacy.assets import CapabilityLibrary, ExperienceLibrary
+from embodied_codex.legacy.conformance import audit_run
+from embodied_codex.legacy.evolution import EvolutionEngine
 from embodied_codex.model import OpenAIModel
-from embodied_codex.workspace import TaskWorkspace
+from embodied_codex.legacy.workspace import TaskWorkspace
 from embodied_codex.examples import run_kernel_conformance as kernel
 
 

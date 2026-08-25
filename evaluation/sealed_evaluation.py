@@ -11,4 +11,5 @@ class SealedEvaluationPolicy(BenchmarkPolicy):
         if callable(seal): seal()
         report = evaluate() if callable(evaluate) else None
         result["sealed_evaluation"] = report
+        result["evaluation_passed"] = report is True
         loop.event_store.commit("evaluation_policy", {"policy": self.name, "phase": "after_run", "result": report})

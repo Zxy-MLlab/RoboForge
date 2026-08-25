@@ -169,7 +169,7 @@ def _experience_assets(configuration: dict):
         except Exception as exc:
             errors.append(f"invalid_experience:{manifest_path}:{type(exc).__name__}");continue
         for evidence in item.get("evidence") or []:
-            path=Path(str(evidence.get("path") or ""))
+            path=Path(str(evidence.get("artifact_uri") or evidence.get("path") or ""))
             if not path.is_absolute():path=manifest_path.parent/path
             if (not path.is_file()
                     or hashlib.sha256(path.read_bytes()).hexdigest()!=evidence.get("sha256")):
@@ -188,7 +188,7 @@ def _gap_assets(configuration: dict):
         if item.get("protocol")!="embodied-codex-capability-gap-v1":
             errors.append(f"invalid_capability_gap_protocol:{manifest_path}")
         for evidence in item.get("evidence") or []:
-            path=manifest_path.parent/str(evidence.get("path") or "")
+            path=manifest_path.parent/str(evidence.get("artifact_uri") or evidence.get("path") or "")
             if (not path.is_file()
                     or hashlib.sha256(path.read_bytes()).hexdigest()!=evidence.get("sha256")):
                 errors.append(f"capability_gap_evidence_mismatch:{item.get('gap_id')}")

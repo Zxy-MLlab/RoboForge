@@ -36,7 +36,7 @@ class TaskWorkspace:
         result["PYTHONNOUSERSITE"]="1"
         return result
 
-    def _sandbox_command(self,argv,process_env):
+    def _sandbox_command(self,argv,process_env,working_directory=None):
         if not self.bwrap:return list(argv),process_env
         prefix=Path(sys.prefix).resolve();runtime="/runtime"
         command=list(argv)
@@ -46,11 +46,13 @@ class TaskWorkspace:
         sandbox_env=dict(process_env)
         sandbox_env["PATH"]=runtime+"/bin:/usr/local/bin:/usr/bin:/bin"
         sandbox_env["HOME"]="/workspace";sandbox_env["TMPDIR"]="/tmp"
+        relative = Path(working_directory or self.root).resolve().relative_to(self.root)
+        sandbox_cwd = "/workspace" if str(relative) == "." else "/workspace/" + relative.as_posix()
         wrapped=[self.bwrap,"--die-with-parent","--new-session","--unshare-pid",
                  "--unshare-ipc","--unshare-uts","--unshare-net",*self._system_binds(),
                  "--ro-bind",str(prefix),runtime,"--dev","/dev","--proc","/proc",
                  "--tmpfs","/tmp","--bind",str(self.root),"/workspace",
-                 "--chdir","/workspace","--",*command]
+                 "--chdir",sandbox_cwd,"--",*command]
         return wrapped,sandbox_env
 
     def _path(self, relative: str) -> Path:
@@ -134,6 +136,7 @@ class TaskWorkspace:
     def run_command(
         self, argv: list[str], *, timeout_seconds: float = 120,
         env: Mapping[str, str] | None = None,
+        cwd: str | Path | None = None,
     ) -> dict[str, Any]:
         if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
             raise WorkspaceError("argv must be a nonempty string list")
@@ -144,11 +147,14 @@ class TaskWorkspace:
             if not key.startswith(("PYTHON", "CUDA", "MUJOCO", "HF_", "TRANSFORMERS_")):
                 raise WorkspaceError(f"environment key not allowed: {key}")
             process_env[str(key)] = str(value)
+        working_directory = self.root if cwd is None else Path(cwd).resolve()
+        if working_directory != self.root and self.root not in working_directory.parents:
+            raise WorkspaceError("command cwd escapes task workspace")
         before=self._engineering_snapshot()
         try:
-            command,process_env=self._sandbox_command(argv,process_env)
+            command,process_env=self._sandbox_command(argv,process_env,working_directory)
             result = subprocess.run(
-                command, cwd=self.root, env=process_env, text=True,
+                command, cwd=working_directory, env=process_env, text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
             )
             receipt={"argv": argv, "exit_code": result.returncode,

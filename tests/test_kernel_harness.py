@@ -10,7 +10,7 @@ from embodied_codex.kernel.events import EventStore
 from embodied_codex.kernel.runtime import ControllerRuntime
 from embodied_codex.kernel.workspace import PersistentWorkspace
 from embodied_codex.kernel.assets import AssetRegistry
-from embodied_codex.assets import CapabilityLibrary
+from embodied_codex.kernel.assets import CapabilityLibrary
 from evaluation.anti_cheating import AntiCheatingPolicy
 from evaluation.generalization import GeneralizationPolicy
 from evaluation.provenance import ProvenancePolicy
@@ -19,17 +19,32 @@ from evaluation.sealed_evaluation import SealedEvaluationPolicy
 
 class FakeAdapter:
     instruction = "move the marker"
-    def __init__(self): self.value = 0
+    def __init__(self): self.value = 0; self.generation = "fake-generation-1"
     def dispatch(self, method, arguments):
-        if method == "act": self.value = arguments["action"]["value"]
+        if method == "act": self.value = arguments["action"]["value"]; return {"ok": True}
         if method == "verify": return {"verified": self.value == 1}
         if method == "observe": return {"value": self.value}
         if method == "record": return {"recorded": True}
         if method == "use": return {"tool_id": arguments["tool_id"], "result": {"value": 1}}
         raise ValueError(method)
+    def initial_observation(self): return {"value": self.value}
     def project_rpc_output(self, method, arguments, result): return dict(result)
     def sensor_report(self, execution):
         return {"sensor_success": self.value == 1, "value": self.value}
+    def execution_identity(self):
+        return {"episode_id": "fake-episode", "environment_generation": self.generation}
+    def resume_protocol(self):
+        return {"supports_resume": True, "resume_token": "fake-resume-1",
+                "environment_generation": self.generation, "actions_idempotent": False,
+                "replay_allowed": True}
+    def verification_receipt(self, execution):
+        return {"verified": bool(self.value == 1 and execution.get("completed") is True
+                                 and execution.get("sensor_verification_observed") is True),
+                "controller_sha256": execution.get("program_sha256"),
+                "environment_identity": self.execution_identity(),
+                "episode_id": "fake-episode", "environment_generation": self.generation}
+    def validate_execution_receipt(self, receipt):
+        return receipt.get("verified") is True and receipt.get("environment_identity") == self.execution_identity()
     def close(self): pass
 
 

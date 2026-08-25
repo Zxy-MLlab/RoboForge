@@ -15,8 +15,8 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from embodied_codex.conformance import audit_run
-from embodied_codex.evolution import EvolutionEngine
+from embodied_codex.legacy.conformance import audit_run
+from embodied_codex.legacy.evolution import EvolutionEngine
 from embodied_codex.model import OpenAIModel
 
 

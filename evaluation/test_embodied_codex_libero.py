@@ -24,7 +24,7 @@ def test_resumed_campaign_recovers_legacy_task_capability_library(tmp_path):
     (task/"harness_configuration.json").write_text(json.dumps({
         "capability_root":str(configured)}))
     assert _resolve_campaign_capability_library(
-        output=campaign,requested=None)==configured.resolve()
+        output=campaign,requested=None)==configured.resolve().parent
 
 
 def test_explicit_campaign_capability_library_overrides_legacy_inference(tmp_path):
@@ -100,9 +100,10 @@ def test_canonical_command_exposes_only_complete_program_controller():
     )
     assert "embodied_codex" in command
     assert "EvolutionEngine" not in " ".join(command)
-    assert command[command.index("--adapter")+1] == "libero@23"
+    assert command[command.index("--adapter")+1] == "libero"
     assert command[command.index("--asset-root")+1] == "tools"
-    assert command[command.index("--profile")+1] == "benchmark"
+    assert command[command.index("--profile")+1] == "autonomous"
+    assert command[command.index("--states")+1:] == ["23", "7", "9"]
 
 
 def test_development_command_can_decouple_verifier_reasoning_effort():
@@ -114,7 +115,7 @@ def test_development_command_can_decouple_verifier_reasoning_effort():
         groundingdino_checkpoint="groundingdino.pth",
         base_url="https://api.example/v1")
     assert command[command.index("--reasoning-effort")+1]=="high"
-    assert command[command.index("--adapter")+1]=="libero@0"
+    assert command[command.index("--adapter")+1]=="libero"
 
 
 def test_validation_command_requires_three_state_runner_inputs():
@@ -128,4 +129,5 @@ def test_validation_command_requires_three_state_runner_inputs():
     assert "evaluate_libero_skill_sealed" not in " ".join(command)
     assert command[command.index("--adapter")+1] == "libero"
     assert command[command.index("--states")+1:command.index("--model-name")] == ["1", "2", "3"]
-    assert "--controller-source" in command
+    assert "--controller-source" in command and "--frozen-controller" in command
+    assert command[command.index("--asset-root")+1] == str(Path("skills/learned_transfer/v001").resolve().parents[2])

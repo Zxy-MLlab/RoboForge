@@ -67,22 +67,25 @@ def _resolve_campaign_capability_library(*, output: Path,
     and made every otherwise-valid task fail before coding could resume.
     """
     if requested is not None:return requested.resolve()
+    def legacy_asset_root(value):
+        path=Path(str(value)).resolve()
+        return path.parent if path.name=="tools" else path
     campaign_path=output/"campaign.json"
     if campaign_path.is_file():
         campaign=json.loads(campaign_path.read_text())
         declared=campaign.get("capability_library")
-        if declared:return Path(str(declared)).resolve()
+        if declared:return legacy_asset_root(declared)
         roots=set()
         for path in output.glob("task_*/development/harness_configuration.json"):
             try:configuration=json.loads(path.read_text())
             except (OSError,json.JSONDecodeError):continue
             root=configuration.get("capability_root")
-            if root:roots.add(str(Path(str(root)).resolve()))
+            if root:roots.add(str(legacy_asset_root(root)))
         if len(roots)>1:
             raise RuntimeError(
                 "resumed campaign tasks reference multiple capability libraries")
         if roots:return Path(next(iter(roots)))
-    return (output/"assets"/"tools").resolve()
+    return (output/"assets").resolve()
 
 
 def _ranked_states(*,task: int,anchor: int,state_count: int,seed: int):
@@ -118,33 +121,91 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
                         python: str,groundingdino_checkpoint: str,base_url: str,
                         retry_locked_validation: bool=False,
                         verifier_reasoning_effort: str="low"):
-    # Every episode now enters the same canonical Kernel via the Adapter plugin.
-    # The campaign runner remains responsible for partitioning development and sealed cases.
-    state = states[0]
-    command=([python,"-m","embodied_codex","run","--adapter",f"libero@{state}",
-        "--task",str(task),"--profile","benchmark","--run-dir",str(output),
+    # Development uses the autonomous Harness over every predeclared case.  No
+    # sealed result is exposed while the model can still change the Controller.
+    command=([python,"-m","embodied_codex","run","--adapter","libero",
+        "--task",str(task),"--profile","autonomous","--run-dir",str(output),
         "--asset-root",str(capabilities),"--model-name",model,
         "--reasoning-effort",reasoning_effort,"--base-url",base_url,
-        "--max-steps",str(max_iterations),"--controller-timeout","600"])
+        "--max-steps",str(max_iterations),"--controller-timeout","600",
+        "--states",*[str(state) for state in states]])
     return command
 
 
 def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output: Path,
                        model: str,reasoning_effort: str,device: str,python: str,
-                       groundingdino_checkpoint: str,base_url: str):
+                       groundingdino_checkpoint: str,base_url: str,
+                       capabilities: str|Path|None=None):
+    skill_dir=Path(skill_dir).resolve()
+    controller=skill_dir/"controller.py"
+    if capabilities is None:
+        if len(skill_dir.parents)<3 or skill_dir.parents[1].name!="skills":
+            raise ValueError("capabilities is required for a non-Skill Controller")
+        capabilities=skill_dir.parents[2]
     return ([python,"-m","embodied_codex","run","--adapter","libero",
         "--task",str(task),"--profile","benchmark","--run-dir",str(output),
-        "--asset-root",str(Path(skill_dir).resolve().parent / "assets"),
-        "--controller-source",str(Path(skill_dir).resolve() / "controller.py"),
+        "--asset-root",str(Path(capabilities).resolve()),
+        "--controller-source",str(controller),"--frozen-controller",
         "--states",*[str(state) for state in states],
         "--model-name",model,"--reasoning-effort",reasoning_effort,
         "--base-url",base_url,"--max-steps","8"])
 
 
-def _development_status(root: Path):
-    path=root/"state.json";state=json.loads(path.read_text()) if path.is_file() else {}
-    return {"status":state.get("status") or "process_failed",
-            "iterations":len(state.get("iterations") or []),"skill":state.get("skill")}
+def _matching_skill(asset_root: Path, controller_sha256: str|None):
+    if not controller_sha256:
+        return None
+    candidates=[]
+    for path in asset_root.glob("skills/*/v*/manifest.json"):
+        try:manifest=json.loads(path.read_text())
+        except (OSError,json.JSONDecodeError):continue
+        if manifest.get("controller_sha256")==controller_sha256:
+            candidates.append((float(manifest.get("created_unix",0)),path.parent,manifest))
+    if not candidates:return None
+    _created,path,manifest=max(candidates,key=lambda row:(row[0],str(row[1])))
+    return {"skill_id":manifest.get("skill_id"),"path":str(path)}
+
+
+def _development_status(root: Path,asset_root: Path|None=None):
+    path=root/"result.json"
+    if not path.is_file():
+        return {"status":"process_failed","iterations":0,"skill":None,
+                "controller_path":None}
+    try:result=json.loads(path.read_text())
+    except (OSError,json.JSONDecodeError):
+        return {"status":"process_failed","iterations":0,"skill":None,
+                "controller_path":None}
+    cases=list(result.get("cases") or [result])
+    hashes={case.get("latest_evidence",{}).get("controller_sha256") for case in cases}
+    hashes.discard(None)
+    controller_sha256=next(iter(hashes)) if len(hashes)==1 else None
+    controller_paths=[]
+    for case in cases:
+        state=case.get("case")
+        workspace=root/"workspace" if state is None else root/f"state_{state}"/"workspace"
+        controller=workspace/"controller.py"
+        if (controller.is_file() and controller_sha256
+                and _file_sha256(controller)==controller_sha256):
+            controller_paths.append(controller)
+    finished=bool(result.get("finished") is True and len(hashes)==1
+                  and len(controller_paths)==len(cases))
+    return {"status":"sensor_success" if finished else "evolving",
+            "iterations":sum(int(case.get("steps",0)) for case in cases),
+            "skill":_matching_skill(asset_root,controller_sha256) if asset_root else None,
+            "controller_path":str(controller_paths[0]) if controller_paths else None,
+            "controller_sha256":controller_sha256}
+
+
+def _sealed_status(root: Path,*,skill_id: str|None,states: list[int]):
+    path=root/"result.json"
+    if not path.is_file():return None
+    result=json.loads(path.read_text());cases=list(result.get("cases") or [result])
+    successes=sum(bool(case.get("finished") is True
+        and case.get("evaluation_passed") is True) for case in cases)
+    return {"protocol":"roboforge-libero-sealed-v1","skill_id":skill_id,
+            "states":list(states),"episodes":len(cases),
+            "evaluator_successes":successes,
+            "controller_sha256":result.get("cross_case_controller_sha256")
+                or cases[0].get("latest_evidence",{}).get("controller_sha256")}
 
 
 def _resolve_packaging_skill(skill_dir: str|Path):
@@ -259,13 +320,15 @@ def main():
                 actual={int(k):v for k,v in (actual or {}).items()}
             if actual!=value:raise RuntimeError(f"resumed campaign mismatch: {key}")
         declared=campaign.get("capability_library")
-        if (declared is not None
-                and Path(str(declared)).resolve()!=capabilities.resolve()):
+        declared_path=Path(str(declared)).resolve() if declared is not None else None
+        declared_root=(declared_path.parent if declared_path is not None
+                       and declared_path.name=="tools" else declared_path)
+        if declared_root is not None and declared_root!=capabilities.resolve():
             raise RuntimeError("resumed campaign capability library mismatch")
-        if declared is None:
+        if declared_path is None or declared_path!=capabilities.resolve():
             campaign["capability_library"]=str(capabilities)
             campaign.setdefault("configuration_migrations",[]).append({
-                "kind":"recover_capability_library_from_task_configuration",
+                "kind":"normalize_shared_asset_root",
                 "value":str(capabilities)})
         campaign["resumed"]=True
     elif preexisting_nonempty:
@@ -273,9 +336,12 @@ def main():
     else:campaign={**expected,"capability_library":str(capabilities),
                    "task_results":[],"resumed":False}
     _write_json(output/"campaign.json",campaign)
+    runtime_env=os.environ.copy()
+    runtime_env.update({"ROBOFORGE_DEVICE":args.device,
+        "ROBOFORGE_GROUNDINGDINO_CHECKPOINT":str(Path(args.groundingdino_checkpoint).resolve())})
     for task in args.tasks:
         task_root=output/f"task_{task:02d}";development=task_root/"development"
-        status=_development_status(development)
+        status=_development_status(development,capabilities)
         frontier_path=task_root/"frontier_failure.json"
         if status["status"]!="sensor_success":
             # A prior process failure or a deliberately resumed frontier must
@@ -288,8 +354,8 @@ def main():
                 base_url=args.base_url,
                 retry_locked_validation=args.retry_locked_validation,
                 verifier_reasoning_effort=args.verifier_reasoning_effort)
-            completed=subprocess.run(command,cwd=ROOT,env=os.environ.copy())
-            status=_development_status(development);development_returncode=completed.returncode
+            completed=subprocess.run(command,cwd=ROOT,env=runtime_env)
+            status=_development_status(development,capabilities);development_returncode=completed.returncode
         else:
             development_returncode=0
             frontier_path.unlink(missing_ok=True)
@@ -315,13 +381,22 @@ def main():
             print(json.dumps(campaign,indent=2))
             return 1
         skill=status.get("skill") or {};skill_dir=skill.get("path")
-        if status["status"]=="sensor_success" and skill_dir:
-            skill_dir,evaluated_skill=_resolve_packaging_skill(skill_dir)
+        controller_path=status.get("controller_path")
+        if status["status"]=="sensor_success" and controller_path:
+            if skill_dir:
+                skill_dir,evaluated_skill=_resolve_packaging_skill(skill_dir)
+                controller_path=skill_dir/"controller.py"
+            else:
+                evaluated_skill={"skill_id":None,
+                    "controller_sha256":status.get("controller_sha256")}
+                skill_dir=Path(controller_path).parent
             row["evaluated_skill"]={"skill_id":evaluated_skill.get("skill_id"),
-                                    "path":str(skill_dir)}
+                                    "path":str(skill_dir),
+                                    "controller_sha256":evaluated_skill.get("controller_sha256")}
             sealed=task_root/"sealed_evaluation"
-            if (sealed/"summary.json").is_file():
-                summary=json.loads((sealed/"summary.json").read_text())
+            if (sealed/"result.json").is_file():
+                summary=_sealed_status(sealed,skill_id=evaluated_skill.get("skill_id"),
+                                       states=plans[task])
                 if summary.get("skill_id")!=evaluated_skill.get("skill_id"):
                     row["sealed_returncode"]=1
                     row["sealed_error"]="sealed summary Skill id does not match resolved frozen Skill"
@@ -336,11 +411,14 @@ def main():
                     states=plans[task],output=sealed,model=args.model,
                     reasoning_effort=args.reasoning_effort,device=args.device,
                     python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
-                    base_url=args.base_url),
-                    cwd=ROOT,env=os.environ.copy())
+                    base_url=args.base_url,capabilities=capabilities),
+                    cwd=ROOT,env=runtime_env)
                 row["sealed_returncode"]=evaluated.returncode
-                if (sealed/"summary.json").is_file():
-                    row["sealed_evaluation"]=json.loads((sealed/"summary.json").read_text())
+                summary=_sealed_status(sealed,skill_id=evaluated_skill.get("skill_id"),
+                                       states=plans[task])
+                if summary:
+                    row["sealed_evaluation"]=summary
+                    _write_json(sealed/"summary.json",summary)
         else:
             _write_json(frontier_path,{
                 "task":task,"development_status":status["status"],

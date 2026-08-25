@@ -1,0 +1,10 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+runs
+checkpoints/*.pth
+checkpoints/*.tar
+third_party
+legacy_tests
+embodied_codex/legacy

@@ -9,6 +9,9 @@ Embodied Codex 的任务学习内核与 benchmark/真机解耦。新环境只需
 class MyRobotDeployment:
     instruction: str
 
+    def initial_observation(self) -> dict:
+        """返回任务启动时的传感器观察或 artifact reference。"""
+
     def dispatch(self, method: str, arguments: dict) -> dict:
         """实现 observe/use/act/verify/record。"""
 
@@ -20,7 +23,19 @@ class MyRobotDeployment:
         """原子绑定 Harness 新增 Tool 的隔离调用函数及 input/output Schema。"""
 
     def sensor_report(self, execution: dict) -> dict:
-        """返回 sensor-only 结果、trace_path、rollout_path；不得包含 evaluator label。"""
+        """返回独立于 Controller 自述的传感器验证和诊断证据。"""
+
+    def verification_receipt(self, execution: dict) -> dict:
+        """绑定 verified、Controller SHA、episode 和 environment generation。"""
+
+    def execution_identity(self) -> dict:
+        """返回 episode_id 和 environment_generation。"""
+
+    def resume_protocol(self) -> dict:
+        """声明 resume token、重放和动作幂等能力；不支持恢复时明确返回 false。"""
+
+    def validate_execution_receipt(self, receipt: dict) -> bool:
+        """仅在当前物理状态仍与收据一致时返回 true。"""
 
     def close(self) -> None:
         """释放机器人/仿真资源并落盘 trace。"""
@@ -29,10 +44,9 @@ class MyRobotDeployment:
 Adapter factory 每次调用必须创建一个新 episode。Harness 只保存 factory，不持有
 benchmark 内部对象。
 
-`project_rpc_output()` 不是字段黑名单：它必须按 method 正向选择公开字段。投影后，
-Harness 核心还会递归拒绝 reward、done、success、BDDL、simulator state、
-episode/state ID 等 evaluator-only 字段并拒绝非严格 JSON 值。这是防止第三方 Adapter
-配错的第二道门，不能替代 Adapter 自身的明确 allowlist。
+`project_rpc_output()` 不是字段黑名单：它必须按 method 正向选择公开字段。Kernel 只验证
+RPC 是严格 JSON 和字段符合通用 RPC envelope，不知道 benchmark 字段。reward、done、
+benchmark state 等泄漏检查必须由独立 Evaluation Policy 执行。
 
 ## SDK 合同
 
@@ -73,7 +87,7 @@ reference。Adapter 保存 reference 到本 episode 传感器/Tool provenance �
 ## Tool 绑定
 
 Adapter 可注册环境部署已有的 seed Tool，例如相机感知服务或真机 MoveIt 服务。每个
-Tool 必须提供 input/output JSON Schema、manual 和 provenance。Agent 自主注册的
+Tool 必须提供 input/output JSON Schema、manual、内容哈希、依赖和测试状态。Agent 自主注册的
 analytic Tool/Capability Package 由 Harness 以隔离 worker 执行，再通过同一个
 `robot.use` RPC 暴露；Adapter 不需要为每个新 Python 算法写特殊分支。
 
@@ -81,6 +95,8 @@ analytic Tool/Capability Package 由 Harness 以隔离 worker 执行，再通过
 版本；Harness 只结构化替换完全相等的 Tool ID 字符串，不改 Controller 控制流。
 
 ## Evaluator barrier
+
+以下规则只属于外部 Evaluation Policy，不是通用 Adapter 或 Kernel 合同。
 
 开发阶段：
 

@@ -4,9 +4,11 @@ from .agent_loop import AgentLoop, LoopBudget, ProtocolError
 from .capability_manager import CapabilityManager
 from .assets import AssetRegistry
 from .context import ContextBuilder, MinimalSystemPrompt
+from .context_window import ContextWindowManager
 from .events import EventStore
 from .workspace import PersistentWorkspace
 from .tools import ToolRegistry
+from .sandbox import SandboxBackend, BubblewrapBackend, SandboxUnavailable, default_sandbox
 
 __all__ = [
     "AgentLoop",
@@ -16,7 +18,12 @@ __all__ = [
     "CapabilityManager",
     "ToolRegistry",
     "ContextBuilder",
+    "ContextWindowManager",
     "EventStore",
     "MinimalSystemPrompt",
     "PersistentWorkspace",
+    "BubblewrapBackend",
+    "SandboxBackend",
+    "SandboxUnavailable",
+    "default_sandbox",
 ]
