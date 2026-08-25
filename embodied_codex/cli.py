@@ -150,8 +150,10 @@ def run_command(args) -> int:
                 timeout_seconds=args.controller_timeout, sandbox=sandbox,
                 protected_paths=[asset_root]),
             event_store=EventStore(run_dir / "events", protect=True),
-            budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions),
-            root=run_dir, web_search=manager.web_search, policies=policies, resume=True)
+            budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions,
+                              timeout_seconds=args.session_timeout),
+            root=run_dir, web_search=manager.web_search, policies=policies,
+            resume=bool(getattr(args, "resume", False)))
         output = loop.run(getattr(adapter, "instruction", str(args.task)))
     finally:
         close = getattr(adapter, "close", None) if adapter is not None else None
@@ -308,17 +310,25 @@ def doctor_command(args) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="roboforge"); sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run"); run.add_argument("--adapter", required=True); run.add_argument("--task", required=True)
-    run.add_argument("--profile", choices=("dev", "autonomous", "benchmark"), default="dev")
-    run.add_argument("--sandbox", choices=("auto", "posix", "bubblewrap", "unsafe"), default="auto")
-    run.add_argument("--run-dir"); run.add_argument("--asset-root"); run.add_argument("--model"); run.add_argument("--model-name", default="gpt-5.6-sol")
-    run.add_argument("--controller-source", help="load a frozen controller into the workspace before running")
-    run.add_argument("--frozen-controller", action="store_true",
-                     help="evaluation-owned immutable Controller mode")
-    run.add_argument("--states", type=int, nargs="+", help="run the same Kernel over multiple Adapter cases")
-    run.add_argument("--provider", choices=("openai", "apex")); run.add_argument("--base-url"); run.add_argument("--reasoning-effort", default="high")
-    run.add_argument("--max-steps", type=int, default=60); run.add_argument("--max-executions", type=int, default=20); run.add_argument("--controller-timeout", type=float, default=600)
-    run.set_defaults(handler=run_command)
+    def add_run_arguments(command, *, resume: bool):
+        command.add_argument("--adapter", required=True); command.add_argument("--task", required=True)
+        command.add_argument("--profile", choices=("dev", "autonomous", "benchmark"), default="dev")
+        command.add_argument("--sandbox", choices=("auto", "posix", "bubblewrap", "unsafe"), default="auto")
+        command.add_argument("--run-dir"); command.add_argument("--asset-root")
+        command.add_argument("--model"); command.add_argument("--model-name", default="gpt-5.6-sol")
+        command.add_argument("--controller-source", help="load a frozen controller into the workspace before running")
+        command.add_argument("--frozen-controller", action="store_true",
+                             help="evaluation-owned immutable Controller mode")
+        command.add_argument("--states", type=int, nargs="+", help="run the same Kernel over multiple Adapter cases")
+        command.add_argument("--provider", choices=("openai", "apex")); command.add_argument("--base-url")
+        command.add_argument("--reasoning-effort", default="high")
+        command.add_argument("--max-steps", type=int, default=60)
+        command.add_argument("--max-executions", type=int, default=20)
+        command.add_argument("--session-timeout", type=float, default=3600)
+        command.add_argument("--controller-timeout", type=float, default=600)
+        command.set_defaults(handler=run_command, resume=resume)
+    add_run_arguments(sub.add_parser("run"), resume=False)
+    add_run_arguments(sub.add_parser("resume"), resume=True)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--adapter", required=True); doctor.add_argument("--task"); doctor.add_argument("--run-dir"); doctor.add_argument("--checkpoint")
     doctor.add_argument("--sandbox", choices=("auto", "posix", "bubblewrap", "unsafe"), default="auto")
     doctor.add_argument("--checkpoint-sha256")

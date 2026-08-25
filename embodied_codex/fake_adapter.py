@@ -281,7 +281,7 @@ class FakeModel:
         self._consume_result(messages)
         context = self._current_context(documents)
         latest = context.get("latest_evidence") or {}
-        sensor = latest.get("sensor_report") or {}
+        verified = (latest.get("verification_receipt") or {}).get("verified")
         campaign = (context.get("state") or {}).get("campaign") or {}
         workspace_files = {item.get("path") for item in context.get("workspace", [])}
         last_call = self._last_call(messages)
@@ -299,7 +299,7 @@ class FakeModel:
                 return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
             if campaign and not campaign.get("all_cases_verified"):
                 return _call(self.turn, "run_controller", {})
-            if sensor.get("sensor_success") is not True:
+            if verified is not True:
                 return _call(self.turn, "run_controller", {})
             return _call(self.turn, "finish", {"summary": "reused promoted shared Tool"})
 
@@ -308,7 +308,7 @@ class FakeModel:
             return _call(self.turn, "write_file", {"path": "controller.py", "content": bad})
         if last_call == "write_file" and "controller.py" in last_changed:
             return _call(self.turn, "run_controller", {})
-        if sensor.get("sensor_success") is False:
+        if verified is False:
             if not self.execution_inspected:
                 return _call(self.turn, "inspect_execution", {})
             if not self.image_viewed:
@@ -331,7 +331,7 @@ class FakeModel:
             return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
         if campaign and not campaign.get("all_cases_verified"):
             return _call(self.turn, "run_controller", {})
-        if sensor.get("sensor_success") is not True:
+        if verified is not True:
             return _call(self.turn, "run_controller", {})
         evidence_paths = self._evidence_paths(context)
         if not self.tool_promoted:

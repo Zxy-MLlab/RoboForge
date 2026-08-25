@@ -276,12 +276,17 @@ class CapabilityLibrary:
         name = _name(name)
         records = []
         try:
-            for path in sorted(item for item in bundle.rglob("*") if item.is_file()):
+            paths = sorted(item for item in bundle.rglob("*") if item.is_file())
+            expected_by_path: dict[Path, str | None] = {}
+            relatives: list[str] = []
+            for path in paths:
                 if path.is_symlink():
                     raise AssetError("capability package symlinks are not allowed")
                 relative = path.relative_to(bundle).as_posix()
-                stored = self.cas.put(path,
-                    expected_sha256=checkpoint_hashes.get(relative))
+                relatives.append(relative)
+                expected_by_path[path] = checkpoint_hashes.get(relative)
+            stored_files = self.cas.put_many(expected_by_path)
+            for path, relative, stored in zip(paths, relatives, stored_files):
                 records.append({"path": relative, **stored,
                                 "executable": bool(path.stat().st_mode & 0o111)})
         except ContentAddressedStoreError as exc:

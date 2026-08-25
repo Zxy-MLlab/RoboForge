@@ -84,11 +84,17 @@ def _rpc_arguments(method: str, value: Any):
 class ControllerRuntime:
     def __init__(self, *, python: str | Path | None = None,
                  timeout_seconds: float = 600, max_rpc_calls: int = 10000,
+                 max_process_output_bytes: int = 1024 * 1024,
+                 max_rpc_event_bytes: int = 8 * 1024 * 1024,
                  sandbox: SandboxBackend | None = None,
                  protected_paths: list[str | Path] | None = None):
         self.python = str(python or sys.executable)
         self.timeout_seconds = float(timeout_seconds)
         self.max_rpc_calls = int(max_rpc_calls)
+        self.max_process_output_bytes = int(max_process_output_bytes)
+        self.max_rpc_event_bytes = int(max_rpc_event_bytes)
+        if min(self.max_process_output_bytes, self.max_rpc_event_bytes) < 1:
+            raise ValueError("Controller Runtime byte limits must be positive")
         self.sandbox = sandbox or default_sandbox()
         self.protected_paths = [Path(value).resolve()
                                 for value in (protected_paths or [])]
@@ -107,60 +113,93 @@ class ControllerRuntime:
             process = self.sandbox.popen([self.python, "-u", "-I", "-c", _CHILD,
                 str(path), json.dumps(str(deployment.instruction))], cwd=path.parent,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, env=self._safe_environment(),
+                bufsize=0, env=self._safe_environment(),
                 read_only_paths=[path.parent, Path(self.python).resolve().parents[1]],
                 read_write_paths=[temporary], temporary_dir=temporary,
                 timeout_seconds=self.timeout_seconds)
             assert process.stdin is not None and process.stdout is not None
-            selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
             deadline = time.monotonic() + self.timeout_seconds
             events = []; result = None; error = None; completed = False
+            stdout_buffer = bytearray(); stderr_buffer = bytearray(); event_bytes = 0
             try:
                 while time.monotonic() < deadline:
                     ready = selector.select(max(0.0, deadline - time.monotonic()))
                     if not ready:
                         break
-                    line = process.stdout.readline()
-                    if not line:
+                    for key, _mask in ready:
+                        data = os.read(key.fd, 64 * 1024)
+                        if not data:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if key.data == "stderr":
+                            remaining = self.max_process_output_bytes - len(stderr_buffer)
+                            stderr_buffer.extend(data[:max(0, remaining)])
+                            if len(data) > max(0, remaining):
+                                error = "controller process output exceeded the byte limit"
+                                break
+                            continue
+                        stdout_buffer.extend(data)
+                        if len(stdout_buffer) > self.max_process_output_bytes:
+                            error = "controller process output exceeded the byte limit"
+                            break
+                        while b"\n" in stdout_buffer:
+                            line, _, tail = stdout_buffer.partition(b"\n")
+                            stdout_buffer = bytearray(tail)
+                            try:
+                                message = json.loads(line.decode("utf-8"))
+                            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                                raise ControllerRuntimeError("invalid Controller protocol") from exc
+                            if message.get("kind") == "rpc":
+                                method = str(message.get("method") or "")
+                                if method not in ALLOWED_RPC:
+                                    raise ControllerRuntimeError(f"unsupported RPC: {method}")
+                                if len(events) >= self.max_rpc_calls:
+                                    raise ControllerRuntimeError("RPC budget exceeded")
+                                arguments = _rpc_arguments(method, message.get("arguments") or {})
+                                event = {"method": method, "arguments": arguments}
+                                try:
+                                    raw_result = deployment.dispatch(method, arguments)
+                                    projector = getattr(deployment, "project_rpc_output", None)
+                                    if not callable(projector):
+                                        raise ControllerRuntimeError("Adapter must implement project_rpc_output")
+                                    rpc_result = projector(method, arguments, raw_result)
+                                    _assert_json(rpc_result)
+                                    response = {"id": message.get("id"), "ok": True, "result": rpc_result}
+                                    event["result"] = rpc_result
+                                except Exception as exc:
+                                    response = {"id": message.get("id"), "ok": False,
+                                                "error": f"{type(exc).__name__}: {exc}"}
+                                    event["error"] = response["error"]
+                                encoded_event = json.dumps(event, default=str,
+                                                           separators=(",", ":")).encode()
+                                event_bytes += len(encoded_event)
+                                if event_bytes > self.max_rpc_event_bytes:
+                                    raise ControllerRuntimeError("RPC event log exceeded the byte limit")
+                                events.append(event)
+                                process.stdin.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
+                                process.stdin.flush()
+                            elif message.get("kind") == "finished":
+                                result = message.get("result"); completed = True; break
+                            elif message.get("kind") == "controller_error":
+                                error = str(message.get("error") or "controller failed"); break
+                            else:
+                                raise ControllerRuntimeError("invalid Controller protocol")
+                        if error is not None or completed:
+                            break
+                    if error is not None or completed:
                         break
-                    message = json.loads(line)
-                    if message.get("kind") == "rpc":
-                        method = str(message.get("method") or "")
-                        if method not in ALLOWED_RPC:
-                            raise ControllerRuntimeError(f"unsupported RPC: {method}")
-                        if len(events) >= self.max_rpc_calls:
-                            raise ControllerRuntimeError("RPC budget exceeded")
-                        arguments = _rpc_arguments(method, message.get("arguments") or {})
-                        event = {"method": method, "arguments": arguments}
-                        try:
-                            raw_result = deployment.dispatch(method, arguments)
-                            projector = getattr(deployment, "project_rpc_output", None)
-                            if not callable(projector):
-                                raise ControllerRuntimeError("Adapter must implement project_rpc_output")
-                            rpc_result = projector(method, arguments, raw_result)
-                            _assert_json(rpc_result)
-                            response = {"id": message.get("id"), "ok": True, "result": rpc_result}
-                            event["result"] = rpc_result
-                        except Exception as exc:
-                            response = {"id": message.get("id"), "ok": False,
-                                        "error": f"{type(exc).__name__}: {exc}"}
-                            event["error"] = response["error"]
-                        events.append(event)
-                        process.stdin.write(json.dumps(response, separators=(",", ":")) + "\n")
-                        process.stdin.flush()
-                    elif message.get("kind") == "finished":
-                        result = message.get("result"); completed = True; break
-                    elif message.get("kind") == "controller_error":
-                        error = str(message.get("error") or "controller failed"); break
-                    else:
-                        raise ControllerRuntimeError("invalid Controller protocol")
             finally:
+                selector.close()
                 self.sandbox.terminate(process)
                 try:
-                    _, stderr = process.communicate(timeout=3)
+                    process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     self.sandbox.terminate(process, grace_seconds=0)
-                    _, stderr = process.communicate()
+                    process.wait(timeout=3)
+                stderr = bytes(stderr_buffer).decode("utf-8", errors="replace")
         if not completed and error is None:
             error = "controller timed out" if time.monotonic() >= deadline else "controller exited"
         verified = any(event["method"] == "verify" and isinstance(event.get("result"), Mapping)

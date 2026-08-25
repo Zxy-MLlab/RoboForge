@@ -51,11 +51,37 @@ class ContextBuilder:
         return summary
 
     @staticmethod
+    def _bounded_diagnostic(value: Any, *, depth: int = 0):
+        if depth >= 3:
+            return "<nested diagnostic omitted>"
+        if isinstance(value, str):
+            return value if len(value) <= 512 else value[:512] + "..."
+        if isinstance(value, Mapping):
+            return {str(key): ContextBuilder._bounded_diagnostic(item, depth=depth + 1)
+                    for key, item in list(value.items())[:32]}
+        if isinstance(value, (list, tuple)):
+            return {"entries": len(value), "preview": [
+                ContextBuilder._bounded_diagnostic(item, depth=depth + 1)
+                for item in list(value)[:4]]}
+        return value
+
+    @staticmethod
     def _evidence_summary(value: Any):
         if not isinstance(value, Mapping):
             return value
+        if "summary" in value and "execution" not in value and "sensor_report" not in value:
+            return {key: value.get(key) for key in
+                    ("artifact_uri", "artifact_sha256", "controller_sha256",
+                     "execution_key", "environment_identity",
+                     "verification_receipt", "summary") if key in value}
         execution = value.get("execution") if isinstance(value.get("execution"), Mapping) else {}
         report = value.get("sensor_report") if isinstance(value.get("sensor_report"), Mapping) else {}
+        diagnostic = {key: ContextBuilder._bounded_diagnostic(item)
+                      for key, item in report.items()
+                      if key not in {"action_log", "rpc_events"}}
+        action_log = report.get("action_log")
+        if isinstance(action_log, list):
+            diagnostic["action_log_summary"] = {"entries": len(action_log)}
         return {"artifact_uri": value.get("artifact_uri"),
                 "controller_sha256": value.get("controller_sha256"),
                 "case_handle": value.get("case_handle"),
@@ -63,11 +89,7 @@ class ContextBuilder:
                 "verification_receipt": value.get("verification_receipt"),
                 "execution": {key: execution.get(key) for key in
                     ("completed", "error", "sensor_verification_observed", "program_sha256")},
-                "sensor_report": {key: report.get(key) for key in report
-                    if key in {"sensor_success", "sensor_success_candidate", "success", "verified",
-                               "sensor_verification_passed", "independent_task_outcome",
-                               "trace_path", "rollout_path", "final_step", "proprioception",
-                               "final_proprioception", "action_log"}}}
+                "sensor_report": diagnostic}
 
     def _controller_summary(self):
         if not self.workspace or not self.workspace.controller.is_file(): return None

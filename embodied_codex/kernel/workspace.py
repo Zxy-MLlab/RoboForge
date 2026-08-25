@@ -38,22 +38,27 @@ def _fingerprint(path: Path) -> tuple[int, int, int, int, int]:
 class PersistentWorkspace:
     """Canonical workspace separated from staging, snapshots and CAS blobs."""
 
-    # Large model/checkpoint files are immutable inputs while a command is
-    # running.  Materialising another full copy in every staged worktree would
-    # defeat the CAS and can exhaust disk space on long-lived runs.
-    _LARGE_FILE_THRESHOLD = 16 * 1024 * 1024
-
     def __init__(self, root: str | Path, *, sandbox: SandboxBackend | None = None,
                  require_sandbox: bool = True,
-                 cas: ContentAddressedStore | None = None):
+                 cas: ContentAddressedStore | None = None,
+                 max_files: int = 100_000,
+                 max_bytes: int = 100 * 1024 ** 3,
+                 max_process_output_bytes: int = 1024 * 1024):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         run_root = self.root.parent
         self.snapshot_root = run_root / "workspace_snapshots"
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
+        self.manifest_path = run_root / "workspace_manifest.json"
         self.stage_root = run_root / "staged_worktree"
         self.stage_root.mkdir(parents=True, exist_ok=True)
         self.cas = cas or ContentAddressedStore(run_root / "workspace_cas")
+        self.max_files = int(max_files)
+        self.max_bytes = int(max_bytes)
+        self.max_process_output_bytes = int(max_process_output_bytes)
+        if min(self.max_files, self.max_bytes, self.max_process_output_bytes) < 1:
+            raise ValueError("workspace resource limits must be positive")
+        self._manifest: dict[str, dict[str, Any]] = self._load_manifest()
         self._locked_files: dict[str, str] = {}
         self._protected_paths: set[Path] = set()
         self.sandbox = sandbox or default_sandbox()
@@ -76,26 +81,97 @@ class PersistentWorkspace:
     def controller(self) -> Path:
         return self._path("controller.py")
 
-    def _record(self, path: Path, relative: str | None = None,
-                known: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _load_manifest(self) -> dict[str, dict[str, Any]]:
+        try:
+            payload = json.loads(self.manifest_path.read_text())
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return {}
+        entries = payload.get("files") if isinstance(payload, Mapping) else None
+        if not isinstance(entries, list):
+            return {}
+        return {str(item["path"]): dict(item) for item in entries
+                if isinstance(item, Mapping) and item.get("path")}
+
+    def _save_manifest(self) -> None:
+        payload = {"protocol": "roboforge-workspace-manifest-v1",
+                   "files": [self._manifest[key] for key in sorted(self._manifest)]}
+        temporary = self.manifest_path.with_name(
+            f".{self.manifest_path.name}.tmp-{uuid.uuid4().hex}")
+        try:
+            with temporary.open("w") as stream:
+                json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.manifest_path)
+            descriptor = os.open(self.manifest_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _record(self, path: Path, relative: str | None = None) -> dict[str, Any]:
         key = relative or path.relative_to(self.root).as_posix()
         fingerprint = list(_fingerprint(path))
-        expected = (str(known["sha256"]) if known and
-                    list(known.get("fingerprint") or []) == fingerprint else None)
-        stored = self.cas.put(path, expected_sha256=expected)
         value = path.stat(follow_symlinks=False)
-        return {"path": key, "bytes": value.st_size, "sha256": stored["sha256"],
-                "mode": stat.S_IMODE(value.st_mode), "fingerprint": fingerprint,
-                "blob_uri": stored["blob_uri"]}
+        known = dict(self._manifest.get(key) or {})
+        same_fingerprint = list(known.get("fingerprint") or []) == fingerprint
+        blob_uri = str(known.get("blob_uri") or "") if same_fingerprint else ""
+        digest = str(known.get("sha256") or "") if same_fingerprint else ""
+        # Workspace inspection is intentionally metadata-only. CAS writes are
+        # reserved for snapshots, commits, and explicit asset registration.
+        return {"path": key, "bytes": value.st_size,
+                "sha256": digest or None, "mode": stat.S_IMODE(value.st_mode),
+                "fingerprint": fingerprint, "blob_uri": blob_uri or None}
 
-    def _all_files(self) -> list[dict[str, Any]]:
+    def _all_files(self, *, ensure_blob: bool = False) -> list[dict[str, Any]]:
         rows = []
         for path in sorted(self.root.rglob("*")):
             if path.is_symlink():
                 raise WorkspaceError(f"workspace symlinks are not allowed: {path}")
             if path.is_file():
                 rows.append(self._record(path))
+        if ensure_blob:
+            pending: list[tuple[dict[str, Any], Path, str | None]] = []
+            for row in rows:
+                uri = str(row.get("blob_uri") or "")
+                if uri:
+                    try:
+                        self.cas.resolve(uri)
+                        continue
+                    except Exception:
+                        pass
+                pending.append((row, self.root / str(row["path"]),
+                                str(row.get("sha256") or "") or None))
+            if pending:
+                stored = self.cas.put_many(
+                    {path: expected for _row, path, expected in pending})
+                for (row, _path, _expected), value in zip(pending, stored):
+                    row["sha256"] = str(value["sha256"])
+                    row["blob_uri"] = str(value["blob_uri"])
         return rows
+
+    def ensure_capacity(self, *, replacing: str | Path | None = None,
+                        new_file_count: int = 0, new_bytes: int = 0) -> None:
+        """Check a projected external write without reading file contents."""
+        excluded = Path(replacing).resolve() if replacing is not None else None
+        count = 0
+        total = 0
+        for path in self.root.rglob("*"):
+            if path.is_symlink():
+                raise WorkspaceError(f"workspace symlinks are not allowed: {path}")
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if excluded is not None and (resolved == excluded or excluded in resolved.parents):
+                continue
+            count += 1
+            total += path.stat().st_size
+        if count + int(new_file_count) > self.max_files \
+                or total + int(new_bytes) > self.max_bytes:
+            raise WorkspaceError("workspace exceeds the file or byte limit")
 
     def list_files(self, pattern: str = "**/*") -> list[dict[str, Any]]:
         rows = []
@@ -139,6 +215,7 @@ class PersistentWorkspace:
         return str(result.get("content") or "")[:max(1, int(max_chars))]
 
     def _clone_tree(self, source_root: Path, destination_root: Path) -> None:
+        records = {row["path"]: row for row in self._all_files(ensure_blob=True)}
         for source in source_root.rglob("*"):
             relative = source.relative_to(source_root)
             destination = destination_root / relative
@@ -148,9 +225,10 @@ class PersistentWorkspace:
                 destination.mkdir(parents=True, exist_ok=True)
                 shutil.copystat(source, destination, follow_symlinks=False)
             elif source.is_file():
-                row = self._record(source, relative.as_posix())
+                row = records[relative.as_posix()]
                 self.cas.materialize(row["blob_uri"], destination,
-                                     writable=source.stat().st_size < self._LARGE_FILE_THRESHOLD)
+                                     writable=True)
+                destination.chmod(stat.S_IMODE(source.stat().st_mode))
 
     def _commit_staged_tree(self, stage: Path) -> None:
         backup = self.root.parent / f".{self.root.name}.rollback-{uuid.uuid4().hex}"
@@ -168,10 +246,54 @@ class PersistentWorkspace:
             raise
         shutil.rmtree(backup)
 
+    def _commit_validated_stage(self, stage: Path,
+                                before: Mapping[str, Mapping[str, Any]],
+                                staged: Mapping[str, Mapping[str, Any]]) -> list[str]:
+        """Persist only changed staged files, then publish one manifest."""
+        records: dict[str, dict[str, Any]] = {}
+        pending: list[tuple[str, Path, str]] = []
+        for relative, item in staged.items():
+            old = before.get(relative) or {}
+            digest = str(item["sha256"])
+            blob_uri = str(old.get("blob_uri") or "")
+            if str(old.get("sha256") or "") != digest or not blob_uri:
+                pending.append((relative, stage / relative, digest))
+            records[relative] = {"path": relative, "bytes": int(item["bytes"]),
+                                 "sha256": digest, "mode": int(item["mode"]),
+                                 "fingerprint": list(item["fingerprint"]),
+                                 "blob_uri": blob_uri or None}
+        if pending:
+            stored = self.cas.put_many({source: digest for _, source, digest in pending})
+            for (relative, _source, _digest), value in zip(pending, stored):
+                records[relative]["blob_uri"] = str(value["blob_uri"])
+        changed = sorted(path for path in set(before) | set(records)
+                         if str((before.get(path) or {}).get("sha256") or "")
+                         != str((records.get(path) or {}).get("sha256") or ""))
+        self._commit_staged_tree(stage)
+        # The rename changes inode/ctime. Refresh only metadata; hashes and CAS
+        # URIs come from the validated staged records above.
+        manifest: dict[str, dict[str, Any]] = {}
+        for relative, item in records.items():
+            target = self.root / relative
+            value = target.stat(follow_symlinks=False)
+            manifest[relative] = {**item, "fingerprint": list(_fingerprint(target)),
+                                  "bytes": value.st_size,
+                                  "mode": stat.S_IMODE(value.st_mode)}
+        self._manifest = manifest
+        self._save_manifest()
+        return changed
+
     def _atomic_tree_update(self, operations: list[Mapping[str, Any]]) -> list[str]:
         stage = Path(tempfile.mkdtemp(prefix="edit-", dir=self.stage_root))
         try:
+            before_rows = self._all_files()
+            before = {row["path"]: row for row in before_rows}
             self._clone_tree(self.root, stage)
+            stage_before = {path.relative_to(stage).as_posix(): {
+                "fingerprint": list(_fingerprint(path)),
+                "sha256": before[path.relative_to(stage).as_posix()]["sha256"]}
+                for path in stage.rglob("*") if path.is_file()
+                and path.relative_to(stage).as_posix() in before}
             changed = []
             for operation in operations:
                 relative = str(operation.get("path") or "")
@@ -196,9 +318,9 @@ class PersistentWorkspace:
                         temporary.chmod(int(operation["mode"]) & 0o777)
                     os.replace(temporary, target)
                 changed.append(relative)
-            self._validate_staged_tree(stage)
-            self._commit_staged_tree(stage)
-            return sorted(set(changed))
+            staged = self._validate_staged_tree(stage, known=stage_before)
+            committed = self._commit_validated_stage(stage, before, staged)
+            return sorted(set(changed) | set(committed))
         finally:
             shutil.rmtree(stage, ignore_errors=True)
 
@@ -276,7 +398,8 @@ class PersistentWorkspace:
                 command.append(value)
             completed = self.sandbox.run(command, cwd=stage_working, env=safe_env,
                 read_write_paths=[stage],
-                timeout_seconds=min(max(float(timeout_seconds), 0.1), 600))
+                timeout_seconds=min(max(float(timeout_seconds), 0.1), 600),
+                max_output_bytes=self.max_process_output_bytes)
             changed = []
             if completed.returncode == 0 and not completed.timed_out:
                 staged = self._validate_staged_tree(stage, known=stage_before)
@@ -284,14 +407,12 @@ class PersistentWorkspace:
                     item = staged.get(locked)
                     if item is None or item["sha256"] != expected:
                         raise WorkspaceError(f"workspace command changed immutable file: {locked}")
-                changed = sorted(path for path in set(before) | set(staged)
-                                 if before.get(path, {}).get("sha256")
-                                 != staged.get(path, {}).get("sha256"))
-                self._commit_staged_tree(stage)
+                changed = self._commit_validated_stage(stage, before, staged)
                 self.snapshot()
             output = (completed.stdout + completed.stderr)[-30000:]
             return {"argv": argv, "exit_code": completed.returncode,
-                    "timed_out": completed.timed_out, "output": output,
+                    "timed_out": completed.timed_out,
+                    "output_limited": completed.output_limited, "output": output,
                     "sandbox": f"{self.sandbox.name}-workspace-v2",
                     "cwd": str(relative) or ".", "changed": changed,
                     "committed": completed.returncode == 0 and not completed.timed_out}
@@ -312,14 +433,15 @@ class PersistentWorkspace:
             relative = path.relative_to(stage).as_posix()
             size = path.stat().st_size
             total += size
-            if len(files) >= 100_000 or total > 8 * 1024 ** 4:
+            if len(files) >= self.max_files or total > self.max_bytes:
                 raise WorkspaceError("staged worktree exceeds the file or byte limit")
             fingerprint = list(_fingerprint(path))
             old = (known or {}).get(relative)
             digest = (str(old["sha256"]) if old and old.get("fingerprint") == fingerprint
                       else self.cas.digest(path))
             files[relative] = {"bytes": size, "sha256": digest,
-                               "fingerprint": fingerprint}
+                               "fingerprint": fingerprint,
+                               "mode": stat.S_IMODE(mode)}
         return files
 
     def _changed_since_snapshot(self):
@@ -333,7 +455,9 @@ class PersistentWorkspace:
                       if current.get(key) != old.get(key))
 
     def snapshot(self) -> WorkspaceSnapshot:
-        files = self._all_files()
+        files = self._all_files(ensure_blob=True)
+        self._manifest = {item["path"]: dict(item) for item in files}
+        self._save_manifest()
         entries = [{key: item[key] for key in ("path", "bytes", "sha256", "mode", "blob_uri")}
                    for item in files]
         controller = next((item["sha256"] for item in entries

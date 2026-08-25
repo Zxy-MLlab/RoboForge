@@ -69,7 +69,7 @@ def test_completion_gate_rejects_model_claim_failure_and_stale_controller(tmp_pa
         loop._finish("stale")
 
 
-def test_completion_gate_rejects_explicit_sensor_report_failure(tmp_path):
+def test_completion_gate_uses_receipt_not_legacy_sensor_success_field(tmp_path):
     class FailedReportAdapter(FakeAdapter):
         def sensor_report(self, execution):
             return {"sensor_success": False, "reason": "independent sensor rejected"}
@@ -77,9 +77,10 @@ def test_completion_gate_rejects_explicit_sensor_report_failure(tmp_path):
     loop = loop_at(tmp_path, adapter)
     loop.workspace.write_file("controller.py",
         "def run(robot):\n    robot.act({'type':'set_value','value':1})\n    return robot.verify('target', {})\n")
-    loop._run_controller()
-    with pytest.raises(ProtocolError, match="sensor report"):
-        loop._finish("receipt alone is insufficient")
+    evidence = loop._run_controller()
+    assert evidence["sensor_report"]["sensor_success"] is False
+    assert evidence["verification_receipt"]["verified"] is True
+    assert loop._finish("canonical receipt wins")["finished"] is True
 
 
 def test_reset_adapter_invalidates_checkpoint_and_forces_new_execution(tmp_path):
@@ -479,7 +480,7 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
     model = "embodied_codex.fake_adapter:FakeModel"
     base = [sys.executable, "-m", "embodied_codex", "run", "--adapter", adapter,
             "--profile", "autonomous", "--model", model,
-            "--max-steps", "20"]
+            "--max-steps", "30"]
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1]),
                XDG_DATA_HOME=str(tmp_path / "shared-data"))
     assets = tmp_path / "shared-data/roboforge/assets"
@@ -495,11 +496,14 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
     assert (assets / "skills/verified_target_skill/v001/controller.py").is_file()
     assert (assets / "experiences/verified_target_repair/v001/manifest.json").is_file()
 
-    resumed = subprocess.run([*base, "--task", "task A", "--run-dir", str(tmp_path / "run-a"),
+    resume_base = [*base[:3], "resume", *base[4:]]
+    resumed = subprocess.run([*resume_base, "--task", "task A", "--run-dir", str(tmp_path / "run-a"),
         "--states", "0", "1"],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
     assert resumed.returncode == 0, resumed.stdout
-    assert json.loads(resumed.stdout)["executions"] == 3
+    resumed_result = json.loads(resumed.stdout)
+    assert resumed_result["executions"] == 0
+    assert resumed_result["cumulative"]["executions"] == 3
 
     second = subprocess.run([*base, "--task", "task B", "--run-dir", str(tmp_path / "run-b")],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)

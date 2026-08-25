@@ -48,7 +48,9 @@ class AgentLoop:
                  runtime: Any = None, event_store: EventStore | None = None,
                  budget: LoopBudget | None = None, root: str | Path | None = None,
                  web_search: Any = None, policies: list[Any] | None = None,
-                 resume: bool = True):
+                 resume: bool = True,
+                 context_window: ContextWindowManager | None = None,
+                 max_evidence_bytes: int = 20 * 1024 * 1024 * 1024):
         self.model, self.workspace, self.adapter = model, workspace, adapter
         self.context_builder, self.capability_manager = context_builder, capability_manager
         self.runtime = runtime; self.root = Path(root or workspace.root.parent).resolve()
@@ -56,19 +58,35 @@ class AgentLoop:
         self.budget = budget or LoopBudget()
         self.web_search = web_search; self.policies = list(policies or [])
         self.latest_evidence = None; self.retrieved_assets = None; self.messages: list[dict[str, Any]] = []
-        self.context_window = ContextWindowManager()
+        self.context_window = context_window or ContextWindowManager()
         self.max_context_chars = self.context_window.max_message_chars
         self.max_tool_result_chars = self.context_window.max_tool_result_chars
+        self.max_evidence_bytes = int(max_evidence_bytes)
+        self._evidence_bytes = sum(path.stat().st_size for path in
+            (self.root / "evidence").glob("*.json")) if (self.root / "evidence").is_dir() else 0
         self.checkpoint_task = None
+        self.session_index = 1
+        self.cumulative_steps = 0
+        self.cumulative_executions = 0
+        self.cumulative_elapsed = 0.0
+        self.research_state: dict[str, Any] = {"summary": "", "attempts": []}
         self.state: dict[str, Any] = {"finished": False, "last_tool_call": None,
                                       "completion_valid": False, "successful_cases": 0}
         if resume:
             checkpoint = load_checkpoint(self.root)
             if checkpoint:
-                self.budget.steps = int(checkpoint.get("steps", 0)); self.budget.executions = int(checkpoint.get("executions", 0))
-                self.budget.elapsed_before = float(checkpoint.get("elapsed_seconds", 0.0))
+                cumulative = dict(checkpoint.get("cumulative") or {})
+                self.cumulative_steps = int(cumulative.get("steps", checkpoint.get("steps", 0)))
+                self.cumulative_executions = int(cumulative.get("executions", checkpoint.get("executions", 0)))
+                self.cumulative_elapsed = float(cumulative.get("elapsed_seconds",
+                    checkpoint.get("elapsed_seconds", 0.0)))
+                self.session_index = int((checkpoint.get("session") or {}).get("index", 1)) + 1
                 self.checkpoint_task = checkpoint.get("task")
-                self.latest_evidence = checkpoint.get("latest_evidence"); self.state.update(checkpoint.get("state") or {})
+                self.latest_evidence = self._load_evidence_reference(
+                    checkpoint.get("latest_evidence"))
+                self.state.update(checkpoint.get("state") or {})
+                self.research_state = self._bound_research_state(
+                    checkpoint.get("research_state") or self.research_state)
                 if checkpoint.get("snapshot_id"):
                     self.workspace.restore(checkpoint["snapshot_id"])
                 self.retrieved_assets = checkpoint.get("retrieved_assets")
@@ -92,6 +110,65 @@ class AgentLoop:
     def _schema(self, properties=None, required=()):
         return {"type": "object", "properties": dict(properties or {}),
                 "required": list(required), "additionalProperties": False}
+
+    def _artifact_path(self, uri: str) -> Path:
+        if not str(uri).startswith("run://"):
+            raise ProtocolError("evidence artifact URI must use run://")
+        relative = Path(str(uri).removeprefix("run://"))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ProtocolError("evidence artifact URI is invalid")
+        path = (self.root / relative).resolve()
+        if self.root not in path.parents:
+            raise ProtocolError("evidence artifact escapes the run root")
+        return path
+
+    def _load_evidence_reference(self, value: Any) -> Any:
+        if not isinstance(value, Mapping) or not value.get("artifact_uri"):
+            return value
+        path = self._artifact_path(str(value["artifact_uri"]))
+        if not path.is_file() or _file_sha256(path) != value.get("artifact_sha256"):
+            raise ProtocolError("checkpoint evidence artifact is missing or corrupt")
+        try:
+            evidence = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProtocolError("checkpoint evidence artifact cannot be decoded") from exc
+        return {**evidence, "artifact_uri": value["artifact_uri"],
+                "artifact_sha256": value["artifact_sha256"]}
+
+    def _evidence_reference(self, evidence: Mapping[str, Any]) -> dict[str, Any]:
+        summary = self.context_builder._evidence_summary(evidence)
+        encoded_summary = json.dumps(summary, sort_keys=True, default=str)
+        if len(encoded_summary) > self.context_window.budgets.max_evidence_chars:
+            summary = {"truncated": True,
+                       "original_chars": len(encoded_summary),
+                       "sha256": hashlib.sha256(encoded_summary.encode()).hexdigest(),
+                       "preview": encoded_summary[:8000]}
+        return {"artifact_uri": evidence.get("artifact_uri"),
+                "artifact_sha256": evidence.get("artifact_sha256"),
+                "controller_sha256": evidence.get("controller_sha256"),
+                "execution_key": evidence.get("execution_key"),
+                "environment_identity": evidence.get("environment_identity"),
+                "verification_receipt": evidence.get("verification_receipt"),
+                "resume_token": evidence.get("resume_token"),
+                "summary": summary}
+
+    @staticmethod
+    def _bound_research_state(value: Any) -> dict[str, Any]:
+        state = dict(value) if isinstance(value, Mapping) else {}
+        attempts = list(state.get("attempts") or [])[-32:]
+        summary = str(state.get("summary") or "")[:8000]
+        return {"summary": summary, "attempts": attempts}
+
+    def _record_attempt(self, name: str, arguments: Mapping[str, Any], ok: bool) -> None:
+        safe_arguments = {key: value for key, value in dict(arguments).items()
+                          if key in {"query", "path", "directory", "tool_id",
+                                     "asset_id", "name"}}
+        attempts = list(self.research_state.get("attempts") or [])
+        attempts.append({"session": self.session_index, "step": self.budget.steps,
+                         "tool": str(name), "ok": bool(ok),
+                         "arguments": safe_arguments})
+        self.research_state = {"summary": str(self.research_state.get("summary") or "")[:8000],
+                               "attempts": attempts[-32:]}
 
     def _build_tools(self):
         registry = ToolRegistry(); ws = self.workspace; cap = self.capability_manager
@@ -184,7 +261,10 @@ class AgentLoop:
             ["name", "task", "failure_summary", "evidence_paths", "attempted_methods",
              "missing_capability", "blocked_reason", "next_steps"]), cap.record_gap)
         registry.add("run_controller", "Execute the current controller once and return sensor evidence.", self._schema(), self._run_controller)
-        registry.add("inspect_execution", "Inspect the latest committed execution evidence.", self._schema(), lambda: self.latest_evidence or {})
+        registry.add("inspect_execution", "Inspect the latest committed execution evidence summary.",
+                     self._schema(), lambda: (self._evidence_reference(self.latest_evidence)
+                                              if isinstance(self.latest_evidence, Mapping)
+                                              else {}))
         registry.add("view_sensor_artifact", "Read a bounded sensor/evidence artifact path.", self._schema(
             {"path": string, "max_chars": {"type": "integer", "minimum": 1,
                 "maximum": 20000}, "offset_bytes": {"type": "integer", "minimum": 0}},
@@ -215,37 +295,76 @@ class AgentLoop:
             raise ProtocolError("artifact is outside registered evidence roots")
         relative = f"{owner[0]}://{candidate.relative_to(owner[1]).as_posix()}"
         suffix = candidate.suffix.casefold()
+        budgets = self.context_window.budgets
+        size = candidate.stat().st_size
         if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
-            data = candidate.read_bytes()
-            if len(data) > 4 * 1024 * 1024:
+            if size > budgets.max_image_bytes:
                 raise ProtocolError("image artifact exceeds the multimodal size limit")
+            data = candidate.read_bytes()
+            import cv2
+            import numpy as np
+            decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if decoded is None:
+                raise ProtocolError("image artifact cannot be decoded")
+            pixels = int(decoded.shape[0]) * int(decoded.shape[1])
+            if pixels > budgets.max_image_pixels or pixels > budgets.max_total_image_pixels:
+                raise ProtocolError("image artifact exceeds the pixel limit")
             mime = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
             return {"path": relative, "kind": "image", "bytes": len(data),
+                    "shape": list(decoded.shape), "pixels": pixels,
                     "sha256": hashlib.sha256(data).hexdigest(),
                     "image_url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}
         if suffix == ".npy":
+            if size > budgets.max_array_bytes:
+                raise ProtocolError("array artifact exceeds the byte limit")
             import numpy as np
             import cv2
             array = np.load(candidate, mmap_mode="r", allow_pickle=False)
-            minimum, maximum = float(np.nanmin(array)), float(np.nanmax(array))
+            if int(array.size) > budgets.max_array_elements:
+                raise ProtocolError("array artifact exceeds the element limit")
+            if array.ndim == 0:
+                sample = np.asarray(array)
+            elif array.ndim == 1:
+                stride = max(1, int(array.shape[0] / 1_000_000) + 1)
+                sample = np.asarray(array[::stride])
+            else:
+                target_pixels = min(budgets.max_image_pixels, 1_000_000)
+                stride = max(1, int((int(array.shape[0]) * int(array.shape[1])
+                                     / max(1, target_pixels)) ** 0.5) + 1)
+                sample = np.asarray(array[::stride, ::stride])
+            minimum, maximum = float(np.nanmin(sample)), float(np.nanmax(sample))
             result = {"path": relative, "kind": "depth" if array.ndim == 2 else "array",
                       "shape": list(array.shape), "dtype": str(array.dtype),
-                      "min": minimum, "max": maximum}
+                      "sampled_elements": int(sample.size),
+                      "sample_min": minimum, "sample_max": maximum}
             if array.ndim == 2 and maximum > minimum:
-                normalized = np.nan_to_num((array - minimum) / (maximum - minimum), nan=0.0)
+                normalized = np.nan_to_num((sample - minimum) / (maximum - minimum), nan=0.0)
                 preview = cv2.applyColorMap(np.asarray(normalized * 255, dtype=np.uint8), cv2.COLORMAP_TURBO)
                 ok, encoded = cv2.imencode(".png", preview)
                 if ok:
                     result["image_url"] = "data:image/png;base64," + base64.b64encode(encoded.tobytes()).decode()
             return result
         if suffix in {".mp4", ".avi", ".mov", ".mkv"}:
+            if size > budgets.max_video_bytes:
+                raise ProtocolError("video artifact exceeds the byte limit")
             import cv2
             capture = cv2.VideoCapture(str(candidate)); frames = []
             try:
                 total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-                for index in sorted(set([0, max(0, total // 2), max(0, total - 1)])):
+                indices = sorted(set([0, max(0, total // 3), max(0, 2 * total // 3),
+                                      max(0, total - 1)]))[:budgets.max_video_frames]
+                deadline = time.monotonic() + 10.0
+                total_pixels = 0
+                for index in indices:
+                    if time.monotonic() >= deadline:
+                        break
                     capture.set(cv2.CAP_PROP_POS_FRAMES, index); ok, frame = capture.read()
                     if ok:
+                        pixels = int(frame.shape[0]) * int(frame.shape[1])
+                        total_pixels += pixels
+                        if (pixels > budgets.max_image_pixels
+                                or total_pixels > budgets.max_total_image_pixels):
+                            raise ProtocolError("video keyframes exceed the pixel limit")
                         encoded_ok, encoded = cv2.imencode(".jpg", frame)
                         frames.append({"frame": index, "shape": list(frame.shape),
                             "image_url": ("data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode())
@@ -255,7 +374,8 @@ class AgentLoop:
             return {"path": relative, "kind": "video", "frames": frames, "frame_count": total,
                     "image_urls": [row["image_url"] for row in frames if row.get("image_url")]}
         if suffix in {".ply", ".pcd", ".las", ".laz"}:
-            data = candidate.read_bytes()[:65536]
+            with candidate.open("rb") as stream:
+                data = stream.read(budgets.max_point_cloud_header_bytes)
             header = data.decode("ascii", errors="ignore")
             points = None
             for pattern in (r"element\s+vertex\s+(\d+)", r"POINTS\s+(\d+)"):
@@ -263,11 +383,11 @@ class AgentLoop:
                 if match:
                     points = int(match.group(1)); break
             return {"path": relative, "kind": "point_cloud", "format": suffix[1:],
-                    "bytes": candidate.stat().st_size, "points": points,
-                    "sha256": _file_sha256(candidate)}
+                    "bytes": size, "points": points,
+                    "header_sha256": hashlib.sha256(data).hexdigest(),
+                    "header_bytes": len(data)}
         maximum = min(max(int(max_chars), 1), 20000)
         offset = max(int(offset_bytes), 0)
-        size = candidate.stat().st_size
         if offset > size:
             raise ProtocolError("artifact text offset exceeds file size")
         with candidate.open("rb") as stream:
@@ -290,11 +410,16 @@ class AgentLoop:
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / f"{digest}.json"
         if not target.exists():
+            encoded = json.dumps(dict(payload), sort_keys=True, default=str) + "\n"
+            added = len(encoded.encode())
+            current = sum(path.stat().st_size for path in
+                          (self.root / "artifacts").rglob("*") if path.is_file())
+            if current + added > self.context_window.budgets.max_artifact_bytes:
+                raise ProtocolError("run artifact disk quota exceeded")
             temporary = target.with_suffix(f".tmp-{time.time_ns()}")
             try:
                 with temporary.open("x") as stream:
-                    json.dump(dict(payload), stream, sort_keys=True, default=str)
-                    stream.write("\n")
+                    stream.write(encoded)
                     stream.flush()
                     import os
                     os.fsync(stream.fileno())
@@ -306,24 +431,17 @@ class AgentLoop:
 
     @staticmethod
     def _evidence_success(evidence: Mapping[str, Any]) -> bool:
-        report = evidence.get("sensor_report") if isinstance(evidence, Mapping) else None
-        execution = evidence.get("execution") if isinstance(evidence, Mapping) else None
         receipt = evidence.get("verification_receipt") if isinstance(evidence, Mapping) else None
-        if not isinstance(report, Mapping) or not isinstance(execution, Mapping):
+        if not isinstance(receipt, Mapping):
             return False
-        if execution.get("completed") is not True or execution.get("error"):
-            return False
-        if execution.get("sensor_verification_observed") is not True:
-            return False
-        report_keys = ("sensor_success", "sensor_success_candidate", "success", "verified",
-                       "sensor_verification_passed")
-        declared = [report.get(key) for key in report_keys if key in report]
-        if not declared or not any(value is True for value in declared):
-            return False
-        return bool(isinstance(receipt, Mapping)
-                    and receipt.get("verified") is True
+        identity = evidence.get("environment_identity")
+        return bool(receipt.get("verified") is True
                     and receipt.get("controller_sha256") == evidence.get("controller_sha256")
-                    and receipt.get("environment_identity") == evidence.get("environment_identity"))
+                    and receipt.get("environment_identity") == identity
+                    and isinstance(identity, Mapping)
+                    and receipt.get("episode_id") == identity.get("episode_id")
+                    and receipt.get("environment_generation")
+                        == identity.get("environment_generation"))
 
     def _execution_identity(self) -> dict[str, Any]:
         provider = getattr(self.adapter, "execution_identity", None)
@@ -366,7 +484,7 @@ class AgentLoop:
             if evidence.get("controller_sha256") != current_sha:
                 errors.append("latest evidence belongs to an older Controller")
             if not self._evidence_success(evidence):
-                errors.append("latest execution has no successful Adapter verification or sensor report")
+                errors.append("latest execution has no successful Adapter verification receipt")
             identity = self._execution_identity()
             recorded = evidence.get("environment_identity") or {}
             if identity and recorded and identity != recorded:
@@ -398,11 +516,13 @@ class AgentLoop:
                     and payload.get("environment_identity") == identity
                     and payload.get("resume_token") == protocol.get("resume_token")
                     and validator(payload.get("verification_receipt") or {}) is True):
-                candidate = {"reused_committed_execution": True, **payload}
+                candidate = self._load_evidence_reference(payload)
+                candidate = {"reused_committed_execution": True, **candidate}
                 self.latest_evidence = candidate
                 self.state["restored_evidence_unverified"] = False
                 return candidate
         self.budget.executions += 1
+        self.cumulative_executions += 1
         result = self.runtime.execute(self.workspace.controller, self.adapter)
         report = self.adapter.sensor_report(result)
         verifier = getattr(self.adapter, "verification_receipt", None)
@@ -427,22 +547,42 @@ class AgentLoop:
                     "environment_generation": (protocol or {}).get("environment_generation")}
         evidence_dir = self.root / "evidence"
         if not evidence_dir.exists(): evidence_dir.mkdir(parents=True)
-        evidence_path = evidence_dir / f"execution-{self.budget.executions:06d}-{execution_key[:12]}.json"
+        evidence_path = evidence_dir / f"execution-{self.cumulative_executions:06d}-{execution_key[:12]}.json"
         temporary = evidence_path.with_suffix(".tmp")
         try:
-            temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n")
+            encoded = json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n"
+            added = len(encoded.encode())
+            if self._evidence_bytes + added > self.max_evidence_bytes:
+                raise ProtocolError("execution evidence disk quota exceeded")
+            with temporary.open("w") as stream:
+                stream.write(encoded); stream.flush()
+                import os
+                os.fsync(stream.fileno())
             temporary.replace(evidence_path)
+            directory = os.open(evidence_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            self._evidence_bytes += added
         finally:
             temporary.unlink(missing_ok=True)
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
+        evidence["artifact_sha256"] = _file_sha256(evidence_path)
         self.latest_evidence = evidence
         self.state["restored_evidence_unverified"] = False
-        self.event_store.commit("execution", evidence)
+        self.event_store.commit("execution", self._evidence_reference(evidence))
         return evidence
 
     def _messages(self, task: str):
-        context = self.context_builder.build(task=task, latest_evidence=self.latest_evidence,
-                                             retrieved_assets=self.retrieved_assets, state=self.state)
+        evidence = (self._evidence_reference(self.latest_evidence)
+                    if isinstance(self.latest_evidence, Mapping) else None)
+        context = self.context_builder.build(task=task, latest_evidence=evidence,
+                                             retrieved_assets=self.retrieved_assets,
+                                             state={**self.state,
+                                                    "research": self.research_state})
+        context = self.context_window.bound_context(
+            context, artifact_root=self.root / "artifacts")
         if not self.messages:
             self.messages = [{"role": "system", "content": context["system"]},
                              {"role": "user", "content": json.dumps(context, default=str)}]
@@ -471,6 +611,7 @@ class AgentLoop:
             if callable(before): before(self)
         while not self.budget.exhausted() and not self.state.get("finished"):
             self.budget.steps += 1
+            self.cumulative_steps += 1
             messages = self._messages(task)
             response = self.model.decide(messages=messages, tools=self.tools.schemas)
             calls = response.get("tool_calls") if isinstance(response, Mapping) else None
@@ -479,7 +620,8 @@ class AgentLoop:
                 self.messages.append({"role": "user", "content": "Protocol error: return a valid function call using the provided tools."})
                 self._checkpoint(); continue
             call_pairs = []
-            for index, call in enumerate(calls):
+            maximum_calls = self.context_window.budgets.max_tool_calls_per_turn
+            for index, call in enumerate(calls[:maximum_calls]):
                 if not isinstance(call, Mapping):
                     continue
                 function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
@@ -494,8 +636,10 @@ class AgentLoop:
             assistant = {"role": "assistant", "content": response.get("content", ""),
                          "tool_calls": normalized_calls}
             self.messages.append(assistant)
+            delivered_images = 0
             for call, normalized in call_pairs:
                 name = ""
+                arguments: dict[str, Any] = {}
                 try:
                     name = str(call.get("name") or call.get("function", {}).get("name") or "")
                     raw = call.get("arguments") or call.get("function", {}).get("arguments") or "{}"
@@ -517,20 +661,39 @@ class AgentLoop:
                             value["frames"] = [{k: v for k, v in row.items() if k != "image_url"}
                                                for row in value["frames"]]
                         payload = {**payload, "result": value, "multimodal_delivered": len(multimodal)}
+                remaining_images = max(0, self.context_window.budgets.max_images_per_turn
+                                       - delivered_images)
+                multimodal = multimodal[:remaining_images]
+                delivered_images += len(multimodal)
                 content, event_payload = self._bound_tool_result(payload)
                 self.messages.append({"role": "tool", "tool_call_id": normalized["id"],
                                       "content": content})
                 if multimodal:
                     parts = [{"type": "text", "text": "Selected sensor artifact."}]
-                    parts.extend({"type": "image_url", "image_url": {"url": url}} for url in multimodal[:4])
+                    parts.extend({"type": "image_url", "image_url": {"url": url}}
+                                 for url in multimodal)
                     self.messages.append({"role": "user", "content": parts})
                 self.event_store.commit("tool_result", {"name": name,
                                                         "payload": event_payload})
+                self._record_attempt(name, arguments, bool(payload.get("ok")))
             self._checkpoint()
+        exhausted = self.budget.exhausted()
+        finished = bool(self.state.get("finished", False))
         result = {"steps": self.budget.steps, "executions": self.budget.executions,
-                  "budget_exhausted": self.budget.exhausted(), "finished": self.state.get("finished", False),
+                  "budget_exhausted": exhausted, "finished": finished,
+                  "resumable": bool(exhausted and not finished),
+                  "session": {"index": self.session_index,
+                              "steps": self.budget.steps,
+                              "executions": self.budget.executions,
+                              "elapsed_seconds": self.budget.elapsed()},
+                  "cumulative": {"steps": self.cumulative_steps,
+                                 "executions": self.cumulative_executions,
+                                 "elapsed_seconds": self.cumulative_elapsed
+                                    + self.budget.elapsed()},
                   "completion_valid": self.state.get("completion_valid", False),
-                  "latest_evidence": self.latest_evidence}
+                  "latest_evidence": (self._evidence_reference(self.latest_evidence)
+                                      if isinstance(self.latest_evidence, Mapping)
+                                      else None)}
         for policy in self.policies:
             after = getattr(policy, "after_run", None)
             if callable(after): after(self, result)
@@ -541,8 +704,18 @@ class AgentLoop:
         save_checkpoint(self.root, {"protocol": "roboforge-checkpoint-v1",
             "steps": self.budget.steps, "executions": self.budget.executions,
             "task": getattr(self, "current_task", None), "elapsed_seconds": self.budget.elapsed(),
-            "latest_evidence": self.latest_evidence, "snapshot_id": snapshot.snapshot_id,
-            "retrieved_assets": self.retrieved_assets, "state": self.state})
+            "session": {"index": self.session_index, "steps": self.budget.steps,
+                        "executions": self.budget.executions,
+                        "elapsed_seconds": self.budget.elapsed()},
+            "cumulative": {"steps": self.cumulative_steps,
+                           "executions": self.cumulative_executions,
+                           "elapsed_seconds": self.cumulative_elapsed
+                              + self.budget.elapsed()},
+            "latest_evidence": (self._evidence_reference(self.latest_evidence)
+                                if isinstance(self.latest_evidence, Mapping) else None),
+            "snapshot_id": snapshot.snapshot_id,
+            "retrieved_assets": self.retrieved_assets, "state": self.state,
+            "research_state": self._bound_research_state(self.research_state)})
 
 
 __all__ = ["AgentLoop", "LoopBudget", "ProtocolError"]

@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import stat
 import uuid
+from collections.abc import Iterable, Mapping
 
 
 class ContentAddressedStoreError(RuntimeError):
@@ -131,11 +132,16 @@ class ContentAddressedStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.index_path)
+            descriptor = os.open(self.index_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         finally:
             temporary.unlink(missing_ok=True)
 
-    def put(self, source: str | Path, *, expected_sha256: str | None = None
-            ) -> dict[str, object]:
+    def _put_locked(self, source: str | Path, index: dict[str, dict[str, object]],
+                    *, expected_sha256: str | None = None) -> dict[str, object]:
         source = Path(source).resolve()
         if not source.is_file() or source.is_symlink():
             raise ContentAddressedStoreError("CAS source must be a regular file")
@@ -144,36 +150,54 @@ class ContentAddressedStore:
         # shared asset store never persists an author machine's absolute path.
         key = hashlib.sha256(str(source).encode()).hexdigest()
         expected = str(expected_sha256 or "").casefold() or None
-        with self._locked():
-            index = self._load_index()
-            cached = index.get(key) or {}
-            digest = (self.digest(source) if expected is not None else
-                      (str(cached.get("sha256"))
-                       if cached.get("fingerprint") == fingerprint else self.digest(source)))
-            if expected is not None and digest != expected:
-                raise ContentAddressedStoreError(
-                    f"CAS source checksum mismatch: {source.name}")
-            destination = self._path(digest)
-            if not destination.exists():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                temporary = destination.with_name(
-                    f".{destination.name}.tmp-{uuid.uuid4().hex}")
-                try:
-                    _copy_sparse(source, temporary)
-                    if self.digest(temporary) != digest:
-                        raise ContentAddressedStoreError("CAS copy checksum mismatch")
-                    temporary.chmod(0o444)
-                    os.replace(temporary, destination)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            elif destination.stat().st_size != source.stat().st_size:
-                raise ContentAddressedStoreError("CAS digest collision")
-            elif expected is not None and self.digest(destination) != digest:
-                raise ContentAddressedStoreError("existing CAS blob checksum mismatch")
-            index[key] = {"fingerprint": fingerprint, "sha256": digest}
-            self._save_index(index)
+        # A CAS write is correct by SHA-256, never by inode identity.  The
+        # fingerprint remains a non-authoritative path lookup hint only.
+        digest = self.digest(source)
+        if expected is not None and digest != expected:
+            raise ContentAddressedStoreError(
+                f"CAS source checksum mismatch: {source.name}")
+        destination = self._path(digest)
+        if not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(
+                f".{destination.name}.tmp-{uuid.uuid4().hex}")
+            try:
+                _copy_sparse(source, temporary)
+                if self.digest(temporary) != digest:
+                    raise ContentAddressedStoreError("CAS copy checksum mismatch")
+                temporary.chmod(0o444)
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        elif destination.stat().st_size != source.stat().st_size:
+            raise ContentAddressedStoreError("CAS digest collision")
+        elif self.digest(destination) != digest:
+            raise ContentAddressedStoreError("existing CAS blob checksum mismatch")
+        index[key] = {"fingerprint": fingerprint, "sha256": digest}
         return {"blob_uri": f"{self.prefix}{digest}", "sha256": digest,
                 "bytes": source.stat().st_size}
+
+    def put(self, source: str | Path, *, expected_sha256: str | None = None
+            ) -> dict[str, object]:
+        with self._locked():
+            index = self._load_index()
+            result = self._put_locked(source, index, expected_sha256=expected_sha256)
+            self._save_index(index)
+            return result
+
+    def put_many(self, sources: Iterable[str | Path] | Mapping[str | Path, str | None]
+                 ) -> list[dict[str, object]]:
+        """Store several files under one lock and one index fsync."""
+        entries = (list(sources.items()) if isinstance(sources, Mapping)
+                   else [(source, None) for source in sources])
+        if not entries:
+            return []
+        with self._locked():
+            index = self._load_index()
+            results = [self._put_locked(source, index, expected_sha256=expected)
+                       for source, expected in entries]
+            self._save_index(index)
+            return results
 
     def resolve(self, uri: str, *, verify: bool = False) -> Path:
         if not str(uri).startswith(self.prefix):

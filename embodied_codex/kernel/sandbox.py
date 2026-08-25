@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import resource
+import selectors
 import platform
 import shutil
 import signal
@@ -46,6 +47,7 @@ class SandboxResult:
     stderr: str
     timed_out: bool
     backend: str
+    output_limited: bool = False
 
 
 class SandboxBackend(Protocol):
@@ -64,7 +66,8 @@ class SandboxBackend(Protocol):
             env: Mapping[str, str] | None = None,
             read_only_paths: Sequence[str | Path] = (),
             read_write_paths: Sequence[str | Path] = (),
-            input_text: str | None = None, timeout_seconds: float = 120) -> SandboxResult: ...
+            input_text: str | None = None, timeout_seconds: float = 120,
+            max_output_bytes: int = 1024 * 1024) -> SandboxResult: ...
     def terminate(self, process: subprocess.Popen, grace_seconds: float = 2) -> None: ...
 
 
@@ -360,25 +363,66 @@ class PosixSandboxBackend:
             env: Mapping[str, str] | None = None,
             read_only_paths: Sequence[str | Path] = (),
             read_write_paths: Sequence[str | Path] = (),
-            input_text: str | None = None, timeout_seconds: float = 120) -> SandboxResult:
+            input_text: str | None = None, timeout_seconds: float = 120,
+            max_output_bytes: int = 1024 * 1024) -> SandboxResult:
+        maximum = max(1, int(max_output_bytes))
         with tempfile.TemporaryDirectory(prefix="roboforge-sandbox-") as temp_name:
             temporary = Path(temp_name)
             process = self.popen(argv, cwd=cwd, env=env, read_only_paths=read_only_paths,
                 read_write_paths=[*read_write_paths, temporary], timeout_seconds=timeout_seconds,
                 temporary_dir=temporary, stdin=subprocess.PIPE if input_text is not None else None,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if process.stdin is not None:
+                try:
+                    process.stdin.write(str(input_text).encode())
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            streams = {process.stdout.fileno(): ("stdout", process.stdout),
+                       process.stderr.fileno(): ("stderr", process.stderr)}
+            selector = selectors.DefaultSelector()
+            for descriptor in streams:
+                selector.register(descriptor, selectors.EVENT_READ)
+            chunks = {"stdout": bytearray(), "stderr": bytearray()}
+            deadline = time.monotonic() + float(timeout_seconds)
+            timed_out = False
+            output_limited = False
             try:
-                stdout, stderr = process.communicate(input=input_text, timeout=timeout_seconds)
-                timed_out = False
-            except subprocess.TimeoutExpired as exc:
-                stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-                stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-                timed_out = True
-                self.terminate(process)
-                tail_out, tail_err = process.communicate()
-                stdout += tail_out or ""; stderr += tail_err or ""
+                while selector.get_map():
+                    remaining_time = deadline - time.monotonic()
+                    if remaining_time <= 0:
+                        timed_out = True
+                        self.terminate(process)
+                        break
+                    ready = selector.select(remaining_time)
+                    if not ready:
+                        timed_out = True
+                        self.terminate(process)
+                        break
+                    for key, _mask in ready:
+                        name, stream = streams[key.fd]
+                        data = os.read(key.fd, 64 * 1024)
+                        if not data:
+                            selector.unregister(key.fd)
+                            stream.close()
+                            continue
+                        used = len(chunks["stdout"]) + len(chunks["stderr"])
+                        available = max(0, maximum - used)
+                        chunks[name].extend(data[:available])
+                        if len(data) > available:
+                            output_limited = True
+                            self.terminate(process)
+                            break
+                    if output_limited:
+                        break
+            finally:
+                selector.close()
+                self.terminate(process) if process.poll() is None else None
+                process.wait(timeout=3)
+            stdout = bytes(chunks["stdout"]).decode("utf-8", errors="replace")
+            stderr = bytes(chunks["stderr"]).decode("utf-8", errors="replace")
             return SandboxResult(tuple(str(item) for item in argv), process.returncode,
-                stdout, stderr, timed_out, self.name)
+                stdout, stderr, timed_out, self.name, output_limited)
 
     def terminate(self, process: subprocess.Popen, grace_seconds: float = 2) -> None:
         if process.poll() is not None:

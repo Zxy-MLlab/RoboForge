@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
 import shutil
+import stat
 import tarfile
 import tempfile
 import urllib.parse
+import uuid
 import zipfile
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ..web import download_public_file, fetch_web_page, search_web
@@ -18,16 +22,36 @@ class CapabilityError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class ExtractionLimits:
+    """Resource limits applied while unpacking untrusted archives."""
+
+    max_files: int = 10000
+    max_total_bytes: int = 8 * 1024 ** 3
+    max_file_bytes: int = 2 * 1024 ** 3
+    max_compression_ratio: float = 100.0
+
+    def __post_init__(self) -> None:
+        if int(self.max_files) < 1:
+            raise ValueError("max_files must be positive")
+        if int(self.max_total_bytes) < 1 or int(self.max_file_bytes) < 1:
+            raise ValueError("archive byte limits must be positive")
+        if float(self.max_compression_ratio) < 1.0:
+            raise ValueError("max_compression_ratio must be at least 1")
+
+
 class CapabilityManager:
     """Coordinates shared immutable assets and per-episode runtime binding."""
 
     def __init__(self, *, asset_root: str | Path, workspace: Any, adapter: Any,
                  tool_library: Any = None, skill_library: Any = None,
-                 experience_library: Any = None, gap_library: Any = None):
+                 experience_library: Any = None, gap_library: Any = None,
+                 extraction_limits: ExtractionLimits | None = None):
         self.asset_root = Path(asset_root).resolve(); self.asset_root.mkdir(parents=True, exist_ok=True)
         self.workspace, self.adapter = workspace, adapter
         self.tool_library, self.skill_library = tool_library, skill_library
         self.experience_library, self.gap_library = experience_library, gap_library
+        self.extraction_limits = extraction_limits or ExtractionLimits()
         self._bound: dict[str, Any] = {}
 
     def search(self, query: str, limit: int = 5, *, include_gaps: bool = False,
@@ -62,12 +86,19 @@ class CapabilityManager:
         destination = (self.workspace.root / filename).resolve()
         if self.workspace.root not in destination.parents: raise CapabilityError("download escapes workspace")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        download = download_public_file(url, destination)
+        staging = destination.with_name(f".{destination.name}.download-{uuid.uuid4().hex}")
+        try:
+            download = download_public_file(url, staging)
+            digest = str(download["sha256"])
+            if sha256 and digest.casefold() != str(sha256).casefold():
+                raise CapabilityError("download checksum mismatch")
+            self.workspace.ensure_capacity(replacing=destination, new_file_count=1,
+                                           new_bytes=int(download["bytes"]))
+            os.replace(staging, destination)
+        finally:
+            staging.unlink(missing_ok=True)
         # download_public_file hashes while streaming; do not read a model or
         # checkpoint back into memory just to verify the optional checksum.
-        digest = str(download["sha256"])
-        if sha256 and digest.casefold() != str(sha256).casefold():
-            destination.unlink(missing_ok=True); raise CapabilityError("download checksum mismatch")
         return {"path": str(destination.relative_to(self.workspace.root)), "sha256": digest,
                 "bytes": destination.stat().st_size}
 
@@ -95,25 +126,183 @@ class CapabilityManager:
             raise
         return {"directory": directory, "command": command, "build": result}
 
+    @staticmethod
+    def _archive_member_path(destination: Path, name: str) -> Path:
+        # Treat both separators as path separators so a Windows-authored archive
+        # cannot smuggle traversal through a Linux extractor.
+        normalized = str(name).replace("\\", "/")
+        if (not normalized or normalized.startswith("/")
+                or PureWindowsPath(normalized).is_absolute()):
+            raise CapabilityError("archive absolute paths are not allowed")
+        parts = tuple(part for part in normalized.split("/") if part not in {"" , "."})
+        if not parts or ".." in parts:
+            raise CapabilityError("archive path traversal")
+        target = (destination.joinpath(*parts)).resolve()
+        if target != destination and destination not in target.parents:
+            raise CapabilityError("archive path traversal")
+        return target
+
+    def _replace_directory(self, staging: Path, destination: Path) -> None:
+        """Atomically replace destination after a complete staging validation."""
+        def remove(path: Path) -> None:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        backup = destination.with_name(f".{destination.name}.rollback-{uuid.uuid4().hex}")
+        had_destination = destination.exists() or destination.is_symlink()
+        try:
+            if had_destination:
+                destination.rename(backup)
+            staging.rename(destination)
+            descriptor = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except Exception:
+            if destination.exists() or destination.is_symlink():
+                remove(destination)
+            if had_destination and backup.exists():
+                backup.rename(destination)
+            raise
+        if had_destination:
+            remove(backup)
+
     def _extract(self, source: Path, destination: Path):
-        destination.mkdir(parents=True, exist_ok=True)
-        if zipfile.is_zipfile(source):
-            with zipfile.ZipFile(source) as archive:
-                for member in archive.infolist():
-                    target = (destination / member.filename).resolve()
-                    if destination not in target.parents: raise CapabilityError("archive path traversal")
-                    if ((member.external_attr >> 16) & 0o170000) == 0o120000:
-                        raise CapabilityError("archive symlinks are not allowed")
-                archive.extractall(destination); return
-        if tarfile.is_tarfile(source):
-            with tarfile.open(source) as archive:
-                for member in archive.getmembers():
-                    target = (destination / member.name).resolve()
-                    if destination not in target.parents: raise CapabilityError("archive path traversal")
-                    if member.issym() or member.islnk() or member.isdev():
-                        raise CapabilityError("archive links and devices are not allowed")
-                archive.extractall(destination); return
-        shutil.copy2(source, destination / source.name)
+        destination = destination.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.staging-",
+                                         dir=destination.parent))
+        try:
+            if zipfile.is_zipfile(source):
+                self._extract_zip(source, staging)
+            elif tarfile.is_tarfile(source):
+                self._extract_tar(source, staging)
+            else:
+                # Non-archives still use the same atomic commit boundary.
+                if source.stat().st_size > self.extraction_limits.max_file_bytes:
+                    raise CapabilityError("file exceeds extraction limit")
+                shutil.copy2(source, staging / source.name)
+            files = [item for item in staging.rglob("*") if item.is_file()]
+            self.workspace.ensure_capacity(replacing=destination,
+                new_file_count=len(files),
+                new_bytes=sum(item.stat().st_size for item in files))
+            self._replace_directory(staging, destination)
+            staging = None  # ownership transferred to destination
+        except Exception:
+            raise
+        finally:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+
+    def _check_count_and_declared(self, count: int, total: int) -> None:
+        limits = self.extraction_limits
+        if count > limits.max_files:
+            raise CapabilityError("archive contains too many files")
+        if total > limits.max_total_bytes:
+            raise CapabilityError("archive expands beyond total byte limit")
+
+    def _write_stream(self, stream, target: Path, declared: int, total: list[int]) -> None:
+        limits = self.extraction_limits
+        if declared < 0 or declared > limits.max_file_bytes:
+            raise CapabilityError("archive member exceeds single-file limit")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        written = 0
+        with target.open("wb") as output:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                total[0] += len(chunk)
+                if written > limits.max_file_bytes:
+                    raise CapabilityError("archive member exceeds single-file limit")
+                if total[0] > limits.max_total_bytes:
+                    raise CapabilityError("archive expands beyond total byte limit")
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if written != declared:
+            raise CapabilityError("archive member size changed during extraction")
+
+    def _extract_zip(self, source: Path, staging: Path) -> None:
+        limits = self.extraction_limits
+        total_declared = 0
+        total = [0]
+        seen: set[str] = set()
+        with zipfile.ZipFile(source) as archive:
+            members = archive.infolist()
+            validated: list[tuple[zipfile.ZipInfo, Path, bool, int]] = []
+            for member in members:
+                target = self._archive_member_path(staging, member.filename)
+                key = target.relative_to(staging).as_posix()
+                if key in seen:
+                    raise CapabilityError("archive contains duplicate paths")
+                seen.add(key)
+                mode = (member.external_attr >> 16) & 0o170000
+                if mode and mode not in {stat.S_IFREG, stat.S_IFDIR}:
+                    raise CapabilityError("archive links and special files are not allowed")
+                is_directory = member.is_dir() or mode == stat.S_IFDIR or member.filename.endswith(("/", "\\"))
+                if len(seen) > limits.max_files:
+                    raise CapabilityError("archive contains too many files")
+                declared = int(member.file_size)
+                if declared < 0 or declared > limits.max_file_bytes:
+                    raise CapabilityError("archive member exceeds single-file limit")
+                compressed = int(member.compress_size)
+                if not is_directory:
+                    ratio = float("inf") if compressed == 0 and declared else (declared / max(1, compressed))
+                    if ratio > limits.max_compression_ratio:
+                        raise CapabilityError("archive member compression ratio exceeds limit")
+                    total_declared += declared
+                self._check_count_and_declared(len(seen), total_declared)
+                validated.append((member, target, is_directory, declared))
+            for member, target, is_directory, declared in validated:
+                if is_directory:
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    with archive.open(member, "r") as stream:
+                        self._write_stream(stream, target, declared, total)
+
+    def _extract_tar(self, source: Path, staging: Path) -> None:
+        limits = self.extraction_limits
+        total_declared = 0
+        total = [0]
+        seen: set[str] = set()
+        source_bytes = max(1, source.stat().st_size)
+        with tarfile.open(source, mode="r:*") as archive:
+            validated: list[tuple[tarfile.TarInfo, Path]] = []
+            while True:
+                member = archive.next()
+                if member is None:
+                    break
+                target = self._archive_member_path(staging, member.name)
+                key = target.relative_to(staging).as_posix()
+                if key in seen:
+                    raise CapabilityError("archive contains duplicate paths")
+                seen.add(key)
+                if not (member.isdir() or member.isreg()):
+                    raise CapabilityError("archive links and special files are not allowed")
+                declared = int(member.size)
+                if declared < 0 or declared > limits.max_file_bytes:
+                    raise CapabilityError("archive member exceeds single-file limit")
+                if member.isreg():
+                    total_declared += declared
+                    if total_declared / source_bytes > limits.max_compression_ratio:
+                        raise CapabilityError("archive compression ratio exceeds limit")
+                self._check_count_and_declared(len(seen), total_declared)
+                validated.append((member, target))
+            for member, target in validated:
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise CapabilityError("archive member cannot be read")
+                    with stream:
+                        self._write_stream(stream, target, int(member.size), total)
 
     def register_tool(self, **payload):
         if self.tool_library is None: raise CapabilityError("Tool library unavailable")
@@ -155,11 +344,6 @@ class CapabilityManager:
         evidence = self._verified_evidence(values["evidence_paths"])
         if not evidence:
             raise CapabilityError("Skill requires successful Adapter evidence for the current Controller")
-        identities = {json.dumps(item["environment_identity"], sort_keys=True)
-                      for item in evidence}
-        if len(identities) < 2:
-            raise CapabilityError(
-                "Skill requires successful evidence from at least two environment identities")
         tested = {item["tool_id"] for item in self.tool_library.tested()} \
             if self.tool_library is not None else set()
         missing = set(values.get("tool_ids") or []) - tested
@@ -178,23 +362,21 @@ class CapabilityManager:
                 evidence = json.loads(Path(value).read_text())
             except (OSError, json.JSONDecodeError):
                 continue
-            execution = evidence.get("execution") if isinstance(evidence, Mapping) else None
-            report = evidence.get("sensor_report") if isinstance(evidence, Mapping) else None
             receipt = evidence.get("verification_receipt") if isinstance(evidence, Mapping) else None
             if not isinstance(receipt, Mapping):
                 continue
-            declared = [report.get(key) for key in ("sensor_success", "success", "verified",
-                "sensor_verification_passed") if isinstance(report, Mapping) and key in report]
             identity = evidence.get("environment_identity")
             validator = getattr(self.adapter, "validate_historical_receipt", None)
             historical_valid = (validator(identity, receipt) is True if callable(validator)
                                 else receipt.get("environment_identity") == identity)
-            if (isinstance(execution, Mapping) and execution.get("completed") is True
-                    and not execution.get("error")
-                    and isinstance(receipt, Mapping) and receipt.get("verified") is True
+            if (receipt.get("verified") is True
                     and evidence.get("controller_sha256") == controller_sha
                     and receipt.get("controller_sha256") == controller_sha
-                    and historical_valid and declared and any(item is True for item in declared)):
+                    and receipt.get("environment_identity") == identity
+                    and receipt.get("episode_id") == (identity or {}).get("episode_id")
+                    and receipt.get("environment_generation")
+                        == (identity or {}).get("environment_generation")
+                    and historical_valid):
                 verified.append({"path": value, "controller_sha256": controller_sha,
                     "environment_identity": identity,
                     "verification_receipt": receipt,
@@ -282,4 +464,4 @@ class CapabilityManager:
         return sorted(bound)
 
 
-__all__ = ["CapabilityError", "CapabilityManager"]
+__all__ = ["CapabilityError", "CapabilityManager", "ExtractionLimits"]

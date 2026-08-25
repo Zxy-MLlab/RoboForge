@@ -90,7 +90,7 @@ def test_workspace_snapshot_uses_cas_for_one_gib_sparse_file(tmp_path):
         assert stream.read(6) == b"header"
 
 
-def test_workspace_command_stages_large_file_as_cas_hardlink(tmp_path):
+def test_workspace_command_stages_large_file_without_mutating_cas_blob(tmp_path):
     workspace = PersistentWorkspace(tmp_path / "run/workspace",
                                     sandbox=UnsafeSandboxBackend(),
                                     require_sandbox=False)
@@ -101,17 +101,23 @@ def test_workspace_command_stages_large_file_as_cas_hardlink(tmp_path):
         stream.write(b"\0")
     workspace.snapshot()
     blob = next(workspace.cas.blob_root.glob("*/*"))
+    original_digest = workspace.cas.digest(blob)
     script = ("import os\n"
               "st=os.stat('downloads/model.ckpt')\n"
               "print(f'{st.st_ino}:{st.st_size}', flush=True)\n"
+              "with open('downloads/model.ckpt','r+b') as f:\n"
+              "    f.seek(0); f.write(b'changed')\n"
               "open('small.txt','w').write('staged')\n")
     result = workspace.run_command([sys.executable, "-c", script], timeout_seconds=20)
     assert result["exit_code"] == 0 and result["committed"] is True
     inode, size = result["output"].strip().splitlines()[-1].split(":")
     assert int(size) == 1 << 30
-    # The command observed the immutable CAS inode directly; no 1 GiB staged
-    # copy was materialised.  The small edit still committed atomically.
-    assert int(inode) == blob.stat().st_ino
+    # Reflink/sparse copy is allowed, but a mutable staged worktree must never
+    # share an inode with or mutate the immutable CAS blob.
+    assert int(inode) != blob.stat().st_ino
+    assert workspace.cas.digest(blob) == original_digest
+    with large.open("rb") as stream:
+        assert stream.read(7) == b"changed"
     assert workspace.read("small.txt") == "staged"
     assert large.stat().st_size == 1 << 30
 
@@ -631,7 +637,7 @@ class _EvidenceReactiveCampaignModel:
         controller = context.get("controller")
         campaign = (context.get("state") or {}).get("campaign") or {}
         latest = context.get("latest_evidence") or {}
-        sensor = latest.get("sensor_report") or {}
+        receipt = latest.get("verification_receipt") or {}
         if controller is None:
             self.writes += 1
             return _decision("write_file", {"path": "controller.py", "content":
@@ -639,7 +645,7 @@ class _EvidenceReactiveCampaignModel:
                 "    return robot.verify('target', {})\n"})
         if last_call == "write_file":
             return _decision("run_controller", {})
-        if sensor.get("sensor_success") is False:
+        if receipt.get("verified") is False:
             if campaign.get("failure_focus") == "B":
                 self.saw_second_failure = True
             if last_call != "read_file":

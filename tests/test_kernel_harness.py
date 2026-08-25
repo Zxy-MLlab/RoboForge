@@ -129,7 +129,7 @@ def test_kernel_failure_evidence_edit_and_asset_persistence(tmp_path):
                        runtime=ControllerRuntime(timeout_seconds=10),
                        event_store=EventStore(tmp_path), root=str(tmp_path)).run()
     assert result["executions"] == 2
-    assert result["latest_evidence"]["sensor_report"]["sensor_success"] is True
+    assert result["latest_evidence"]["verification_receipt"]["verified"] is True
     assert result["finished"] is True
     assert len(EventStore(tmp_path).events()) >= 8
 

@@ -1,7 +1,7 @@
 """Small, environment-neutral Embodied Coding Agent kernel."""
 
 from .agent_loop import AgentLoop, LoopBudget, ProtocolError
-from .capability_manager import CapabilityManager
+from .capability_manager import CapabilityManager, ExtractionLimits
 from .assets import AssetRegistry
 from .context import ContextBuilder, MinimalSystemPrompt
 from .context_window import ContextWindowManager
@@ -18,6 +18,7 @@ __all__ = [
     "ProtocolError",
     "AssetRegistry",
     "CapabilityManager",
+    "ExtractionLimits",
     "ToolRegistry",
     "ContextBuilder",
     "ContextWindowManager",
