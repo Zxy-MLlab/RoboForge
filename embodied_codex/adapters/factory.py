@@ -21,6 +21,23 @@ def _load(spec: str):
     return getattr(importlib.import_module(module), name)
 
 
+def _adapter_module(spec: str):
+    if spec == "libero" or str(spec).startswith("libero@"):
+        return importlib.import_module("embodied_codex.adapters.libero")
+    module, separator, _name = str(spec).partition(":")
+    return importlib.import_module(module) if separator else None
+
+
+def adapter_preflight(spec: str):
+    """Run an optional Adapter-owned dependency/runtime preflight."""
+    module = _adapter_module(spec)
+    checker = getattr(module, "doctor_checks", None) if module is not None else None
+    result = checker() if callable(checker) else None
+    if result is not None and not isinstance(result, dict):
+        raise TypeError("Adapter doctor_checks() must return an object")
+    return result
+
+
 def load_adapter(spec: str, *, task: str, run_dir: str | Path, case: Any = None):
     if spec == "libero" or str(spec).startswith("libero@"):
         from .libero import create

@@ -51,8 +51,9 @@ class AgentLoop:
                  resume: bool = True):
         self.model, self.workspace, self.adapter = model, workspace, adapter
         self.context_builder, self.capability_manager = context_builder, capability_manager
-        self.runtime = runtime; self.event_store = event_store or EventStore(workspace.root)
-        self.budget = budget or LoopBudget(); self.root = Path(root or workspace.root).resolve()
+        self.runtime = runtime; self.root = Path(root or workspace.root.parent).resolve()
+        self.event_store = event_store or EventStore(self.root / "events", protect=True)
+        self.budget = budget or LoopBudget()
         self.web_search = web_search; self.policies = list(policies or [])
         self.latest_evidence = None; self.retrieved_assets = None; self.messages: list[dict[str, Any]] = []
         self.context_window = ContextWindowManager()
@@ -144,6 +145,8 @@ class AgentLoop:
         tool_schema = self._schema({"name": string, "source_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
             "source_urls": {"type": "array", "items": string},
+            "runtime_requirements": {"type": "array", "items": {
+                "type": "string", "pattern": "^[A-Za-z0-9_.-]+==[^\\s=]+$"}},
             "manual": manual_schema}, ["name", "source_path", "description", "input_schema", "output_schema"])
         package_spec_schema = {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["algorithm", "perception", "planner", "policy", "model"]},
@@ -379,11 +382,16 @@ class AgentLoop:
                     "resume_token": (protocol or {}).get("resume_token"),
                     "environment_generation": (protocol or {}).get("environment_generation")}
         evidence_dir = self.root / "evidence"
-        evidence_dir.mkdir(parents=True, exist_ok=True)
+        if not evidence_dir.exists(): evidence_dir.mkdir(parents=True)
+        evidence_dir.chmod(0o700)
         evidence_path = evidence_dir / f"execution-{self.budget.executions:06d}-{execution_key[:12]}.json"
         temporary = evidence_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n")
-        temporary.replace(evidence_path)
+        try:
+            temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n")
+            temporary.replace(evidence_path); evidence_path.chmod(0o400)
+        finally:
+            temporary.unlink(missing_ok=True)
+            evidence_dir.chmod(0o500)
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
         self.latest_evidence = evidence
         self.state["restored_evidence_unverified"] = False

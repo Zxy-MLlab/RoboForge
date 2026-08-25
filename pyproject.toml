@@ -18,8 +18,20 @@ dependencies = [
 test = ["pytest>=8"]
 libero = [
   "torch>=2.0",
+  "torchvision>=0.15",
   "robosuite>=1.4",
-  "libero @ git+https://github.com/Lifelong-Robot-Learning/LIBERO.git@master",
+  "transformers>=4.36",
+  "timm>=0.9",
+  "addict>=2.4",
+  "yapf>=0.40",
+  "supervision>=0.22",
+  "pycocotools>=2.0",
+  "Pillow>=9",
+  "scipy>=1.10",
+  "open3d>=0.18",
+  "tensorboard>=2.14",
+  "gdown>=5",
+  "libero @ https://github.com/Lifelong-Robot-Learning/LIBERO/archive/8f1084e3132a39270c3a13ebe37270a43ece2a01.tar.gz",
 ]
 
 [project.scripts]
@@ -28,8 +40,6 @@ roboforge = "embodied_codex.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["embodied_codex", "embodied_codex.*", "evaluation", "evaluation.*"]
-exclude = ["embodied_codex.legacy", "embodied_codex.legacy.*",
-           "embodied_codex.examples", "embodied_codex.examples.*"]
 
 [tool.setuptools]
 include-package-data = false

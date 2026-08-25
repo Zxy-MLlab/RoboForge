@@ -5,9 +5,8 @@ generic kernel does not need any checkpoint; only the optional LIBERO adapter
 does. Install the adapter dependencies first:
 
 ```bash
-python -m pip install -e '.[libero]'
-python -m pip install -e third_party/GroundingDINO
-python -m pip install -e third_party/segment-anything
+bash scripts/install_libero.sh
+python scripts/download_libero_checkpoints.py
 ```
 
 Download the public, task-independent models into this directory (or set the
@@ -25,13 +24,14 @@ ROBOFORGE_GROUNDINGDINO_CONFIG
 ROBOFORGE_GROUNDINGDINO_CHECKPOINT
 ROBOFORGE_SAM_ROOT
 ROBOFORGE_SAM_CHECKPOINT
+ROBOFORGE_GRASPNET_ROOT
 ROBOFORGE_GRASPNET_CHECKPOINT
 ```
 
 Before running LIBERO, verify the files and runtime without starting an episode:
 
 ```bash
-sha256sum checkpoints/*
+python scripts/download_libero_checkpoints.py --verify-only
 roboforge doctor --adapter libero
 ```
 

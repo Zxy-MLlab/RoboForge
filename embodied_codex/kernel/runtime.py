@@ -6,13 +6,14 @@ import json
 import os
 from pathlib import Path
 import selectors
-import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Mapping
 
 from ..interfaces import ALLOWED_RPC, RobotDeployment
+from .sandbox import ReadOnlyGuard, SandboxBackend, default_sandbox
 
 
 class ControllerRuntimeError(RuntimeError):
@@ -20,7 +21,8 @@ class ControllerRuntimeError(RuntimeError):
 
 
 _CHILD = r'''
-import importlib.util,json,os,sys
+import json,os,sys,types
+sys.dont_write_bytecode=True
 def emit(value):
     sys.stdout.write(json.dumps(value,separators=(",",":"))+"\n");sys.stdout.flush()
 class Robot:
@@ -42,9 +44,10 @@ class Robot:
     def verify(self,verifier,payload): return self._rpc("verify",{"verifier":verifier,"payload":payload})
     def record(self,event): return self._rpc("record",{"event":event})
 try:
-    sys.path.insert(0,os.path.dirname(os.path.abspath(sys.argv[1])))
-    spec=importlib.util.spec_from_file_location("task_controller",sys.argv[1])
-    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    path=os.path.abspath(sys.argv[1]);sys.path.insert(0,os.path.dirname(path))
+    module=types.ModuleType("task_controller");module.__file__=path
+    with open(path,"rb") as stream:source=stream.read()
+    exec(compile(source,path,"exec"),module.__dict__)
     if not hasattr(module,"run"): raise RuntimeError("controller must define run(robot)")
     emit({"kind":"finished","result":module.run(Robot(json.loads(sys.argv[2])))})
 except BaseException as exc:
@@ -80,32 +83,16 @@ def _rpc_arguments(method: str, value: Any):
 
 class ControllerRuntime:
     def __init__(self, *, python: str | Path | None = None,
-                 timeout_seconds: float = 600, max_rpc_calls: int = 10000):
+                 timeout_seconds: float = 600, max_rpc_calls: int = 10000,
+                 sandbox: SandboxBackend | None = None,
+                 protected_paths: list[str | Path] | None = None):
         self.python = str(python or sys.executable)
         self.timeout_seconds = float(timeout_seconds)
         self.max_rpc_calls = int(max_rpc_calls)
-
-    @staticmethod
-    def _system_binds():
-        arguments = []
-        for value in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
-            if Path(value).exists():
-                arguments.extend(["--ro-bind", value, value])
-        return arguments
-
-    def _isolated_command(self, path, deployment):
-        bwrap = shutil.which("bwrap")
-        if not bwrap:
-            raise ControllerRuntimeError("bubblewrap is required for Controller isolation")
-        executable = Path(self.python).resolve(); prefix = executable.parents[1]
-        runtime_executable = Path("/runtime") / executable.relative_to(prefix)
-        workspace = path.parent.resolve(); sandbox_path = Path("/workspace") / path.name
-        return [bwrap, "--die-with-parent", "--new-session", "--unshare-pid",
-            "--unshare-ipc", "--unshare-uts", "--unshare-net", *self._system_binds(),
-            "--ro-bind", str(prefix), "/runtime", "--dev", "/dev", "--proc", "/proc",
-            "--tmpfs", "/tmp", "--ro-bind", str(workspace), "/workspace",
-            "--chdir", "/workspace", "--", str(runtime_executable), "-u", "-I", "-c",
-            _CHILD, str(sandbox_path), json.dumps(str(deployment.instruction))]
+        self.sandbox = sandbox or default_sandbox()
+        self.protected_paths = [Path(value).resolve()
+                                for value in (protected_paths or [])]
+        self.sandbox.require()
 
     @staticmethod
     def _safe_environment():
@@ -116,66 +103,81 @@ class ControllerRuntime:
         if not path.is_file():
             raise FileNotFoundError(path)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        process = subprocess.Popen(self._isolated_command(path, deployment), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
-            env=self._safe_environment())
-        assert process.stdin is not None and process.stdout is not None
-        selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + self.timeout_seconds
-        events = []; result = None; error = None; completed = False
-        try:
-            while time.monotonic() < deadline:
-                ready = selector.select(max(0.0, deadline - time.monotonic()))
-                if not ready:
-                    break
-                line = process.stdout.readline()
-                if not line:
-                    break
-                message = json.loads(line)
-                if message.get("kind") == "rpc":
-                    method = str(message.get("method") or "")
-                    if method not in ALLOWED_RPC:
-                        raise ControllerRuntimeError(f"unsupported RPC: {method}")
-                    if len(events) >= self.max_rpc_calls:
-                        raise ControllerRuntimeError("RPC budget exceeded")
-                    arguments = _rpc_arguments(method, message.get("arguments") or {})
-                    event = {"method": method, "arguments": arguments}
-                    try:
-                        raw_result = deployment.dispatch(method, arguments)
-                        projector = getattr(deployment, "project_rpc_output", None)
-                        if not callable(projector):
-                            raise ControllerRuntimeError("Adapter must implement project_rpc_output")
-                        rpc_result = projector(method, arguments, raw_result)
-                        _assert_json(rpc_result)
-                        response = {"id": message.get("id"), "ok": True, "result": rpc_result}
-                        event["result"] = rpc_result
-                    except Exception as exc:
-                        response = {"id": message.get("id"), "ok": False,
-                                    "error": f"{type(exc).__name__}: {exc}"}
-                        event["error"] = response["error"]
-                    events.append(event)
-                    process.stdin.write(json.dumps(response, separators=(",", ":")) + "\n")
-                    process.stdin.flush()
-                elif message.get("kind") == "finished":
-                    result = message.get("result"); completed = True; break
-                elif message.get("kind") == "controller_error":
-                    error = str(message.get("error") or "controller failed"); break
-                else:
-                    raise ControllerRuntimeError("invalid Controller protocol")
-        finally:
-            if process.poll() is None:
-                process.terminate()
+        run_root = path.parent.parent
+        adapter_artifact = getattr(deployment, "artifact_dir", None)
+        excluded = [Path(adapter_artifact).resolve()] if adapter_artifact else []
+        guard = ReadOnlyGuard([run_root, *self.protected_paths], exclude=excluded)
+        with tempfile.TemporaryDirectory(prefix="roboforge-controller-") as temporary, guard:
             try:
-                _, stderr = process.communicate(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill(); _, stderr = process.communicate()
+                process = self.sandbox.popen([self.python, "-u", "-I", "-c", _CHILD,
+                    str(path), json.dumps(str(deployment.instruction))], cwd=path.parent,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1, env=self._safe_environment(),
+                    read_only_paths=[run_root, *self.protected_paths,
+                                     Path(self.python).resolve().parents[1]],
+                    read_write_paths=[temporary], temporary_dir=temporary,
+                    timeout_seconds=self.timeout_seconds)
+            except Exception:
+                guard.restore()
+                raise
+            assert process.stdin is not None and process.stdout is not None
+            selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
+            deadline = time.monotonic() + self.timeout_seconds
+            events = []; result = None; error = None; completed = False
+            try:
+                while time.monotonic() < deadline:
+                    ready = selector.select(max(0.0, deadline - time.monotonic()))
+                    if not ready:
+                        break
+                    line = process.stdout.readline()
+                    if not line:
+                        break
+                    message = json.loads(line)
+                    if message.get("kind") == "rpc":
+                        method = str(message.get("method") or "")
+                        if method not in ALLOWED_RPC:
+                            raise ControllerRuntimeError(f"unsupported RPC: {method}")
+                        if len(events) >= self.max_rpc_calls:
+                            raise ControllerRuntimeError("RPC budget exceeded")
+                        arguments = _rpc_arguments(method, message.get("arguments") or {})
+                        event = {"method": method, "arguments": arguments}
+                        try:
+                            raw_result = deployment.dispatch(method, arguments)
+                            projector = getattr(deployment, "project_rpc_output", None)
+                            if not callable(projector):
+                                raise ControllerRuntimeError("Adapter must implement project_rpc_output")
+                            rpc_result = projector(method, arguments, raw_result)
+                            _assert_json(rpc_result)
+                            response = {"id": message.get("id"), "ok": True, "result": rpc_result}
+                            event["result"] = rpc_result
+                        except Exception as exc:
+                            response = {"id": message.get("id"), "ok": False,
+                                        "error": f"{type(exc).__name__}: {exc}"}
+                            event["error"] = response["error"]
+                        events.append(event)
+                        process.stdin.write(json.dumps(response, separators=(",", ":")) + "\n")
+                        process.stdin.flush()
+                    elif message.get("kind") == "finished":
+                        result = message.get("result"); completed = True; break
+                    elif message.get("kind") == "controller_error":
+                        error = str(message.get("error") or "controller failed"); break
+                    else:
+                        raise ControllerRuntimeError("invalid Controller protocol")
+            finally:
+                self.sandbox.terminate(process)
+                try:
+                    _, stderr = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.sandbox.terminate(process, grace_seconds=0)
+                    _, stderr = process.communicate()
         if not completed and error is None:
             error = "controller timed out" if time.monotonic() >= deadline else "controller exited"
         verified = any(event["method"] == "verify" and isinstance(event.get("result"), Mapping)
                        and event["result"].get("verified") is True for event in events)
         return {"completed": completed, "program_sha256": digest, "result": result,
                 "error": error, "rpc_events": events, "sensor_verification_observed": verified,
-                "stderr": stderr[-2000:], "runtime_isolation": "bubblewrap-controller-v1",
+                "stderr": stderr[-2000:],
+                "runtime_isolation": f"{self.sandbox.name}-controller-v1",
                 "rpc_output_projection": "adapter-owned-v1",
                 "rpc_output_validation": "strict-json-v1"}
 

@@ -25,7 +25,7 @@ class FakeAdapter:
         self.root.mkdir(parents=True, exist_ok=True)
         self.artifact_dir = self.root / "adapter"
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.root / "fake_environment.json"
+        self.state_path = self.artifact_dir / "environment_state.json"
         if self.state_path.is_file():
             state = json.loads(self.state_path.read_text())
         else:

@@ -8,9 +8,10 @@ from __future__ import annotations
 import argparse, json, pathlib, sys
 import numpy as np
 
-ROOT=pathlib.Path(__file__).resolve().parents[2]/"third_party"/"graspnet-baseline"
-for sub in ("models","pointnet2","knn","utils"):
-    sys.path.insert(0,str(ROOT/sub))
+def configure_source_root(value):
+    root=pathlib.Path(value).resolve()
+    for sub in ("models","pointnet2","knn","utils"):
+        sys.path.insert(0,str(root/sub))
 
 def sample_cloud(depth, intrinsic, bbox, object_mask=None, count=20000):
     h,w=depth.shape; x0,y0,x1,y1=[int(v) for v in bbox]
@@ -174,9 +175,11 @@ def infer(npz_path, checkpoint, output, downward_min=.55, preferred_downward_min
 def main():
     ap=argparse.ArgumentParser();ap.add_argument("--input",required=True);ap.add_argument("--output",required=True)
     ap.add_argument("--checkpoint",default="checkpoints/graspnet-checkpoint-rs.tar")
+    ap.add_argument("--source-root",required=True)
     ap.add_argument("--downward-min",type=float,default=.55,
         help="Fallback robot reachability gate when no strongly downward grasp exists")
     ap.add_argument("--preferred-downward-min",type=float,default=.75,
         help="Preferred top-access compatibility tier")
-    a=ap.parse_args();infer(a.input,a.checkpoint,a.output,a.downward_min,a.preferred_downward_min)
+    a=ap.parse_args();configure_source_root(a.source_root)
+    infer(a.input,a.checkpoint,a.output,a.downward_min,a.preferred_downward_min)
 if __name__=="__main__":main()

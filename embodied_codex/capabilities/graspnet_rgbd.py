@@ -57,11 +57,14 @@ def _eef_rotation(grasp_rotation: np.ndarray) -> np.ndarray:
 
 class GraspNetRGBD:
     def __init__(self,*,backend_script: str|Path,checkpoint: str|Path,
-                 python: str|Path=sys.executable,timeout_seconds: int=300):
+                 source_root: str|Path|None=None, python: str|Path=sys.executable,
+                 timeout_seconds: int=300):
         self.backend_script=Path(backend_script).resolve()
         self.checkpoint=Path(checkpoint).resolve();self.python=str(Path(python).resolve())
+        self.source_root=Path(source_root or Path(__file__).resolve().parents[2]
+            /"third_party/graspnet-baseline").resolve()
         self.timeout_seconds=int(timeout_seconds)
-        for path in (self.backend_script,self.checkpoint):
+        for path in (self.backend_script,self.checkpoint,self.source_root/"models/graspnet.py"):
             if not path.is_file():raise FileNotFoundError(path)
         self._provenance=None
 
@@ -135,6 +138,7 @@ class GraspNetRGBD:
             source_xyz=source,mask_center_world=source)
         command=[self.python,str(self.backend_script),"--input",str(input_path),
                  "--output",str(output_path),"--checkpoint",str(self.checkpoint),
+                 "--source-root",str(self.source_root),
                  "--downward-min",str(float(payload.get("downward_min",.55))),
                  "--preferred-downward-min",str(float(payload.get("preferred_downward_min",.75)))]
         completed=subprocess.run(command,capture_output=True,text=True,timeout=self.timeout_seconds)
@@ -160,7 +164,7 @@ class GraspNetRGBD:
                 "calibrated_topdown_grasps":topdown,
                 "filter_thresholds":audit.get("filter_thresholds"),
                 "filter_diagnostics":audit.get("filter_diagnostics"),
-                "artifact_path":str(output_path),"provenance":self.provenance}
+                "artifact_path":str(output_path)}
 
 
 __all__=["GraspNetRGBD"]

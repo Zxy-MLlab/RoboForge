@@ -19,35 +19,39 @@ LIBERO 只通过 `deployments/libero.py` 和 `evaluation/run_embodied_codex_libe
 ## 安装与运行
 
 ```bash
-cd RoboForge
-python -m pip install -e '.[test]'
-# LIBERO adapter and robot simulation dependencies
-python -m pip install -e '.[libero]'
+python -m pip install -e ".[test]"
 
-# 快速调试自定义 Adapter
-embodied_codex run --adapter my_package:MyAdapter \
-  --task 'put the bowl on the plate' --profile dev \
-  --run-dir runs/task_b --asset-root assets/shared \
-  --model my_package:FakeModel
+roboforge doctor \
+  --adapter embodied_codex.fake_adapter:FakeAdapter \
+  --model embodied_codex.fake_adapter:FakeModel
 
-# 自主模式使用 API 模型
-export OPENAI_API_KEY=...
-embodied_codex run --adapter my_package:MyAdapter --task 'put the bowl on the plate' \
-  --profile autonomous
-
-# LIBERO 兼容 Adapter
-roboforge run --adapter libero --task 0 --profile autonomous \
-  --run-dir runs/libero_task0 --asset-root assets/shared
-
-# 运行环境检查
-roboforge doctor --adapter libero
+roboforge run \
+  --adapter embodied_codex.fake_adapter:FakeAdapter \
+  --model embodied_codex.fake_adapter:FakeModel \
+  --task "set target" --profile autonomous \
+  --run-dir runs/fake-task --asset-root assets/shared
 ```
 
-LIBERO perception checkpoints and third-party sources are intentionally external. Set
-`ROBOFORGE_GROUNDINGDINO_ROOT`, `ROBOFORGE_GROUNDINGDINO_CONFIG`,
-`ROBOFORGE_GROUNDINGDINO_CHECKPOINT`, `ROBOFORGE_SAM_ROOT`, `ROBOFORGE_SAM_CHECKPOINT` and
-`ROBOFORGE_GRASPNET_CHECKPOINT`; `roboforge doctor --adapter libero` performs adapter and
-proprioception smoke checks before a run.
+以上命令使用仓库内的确定性 Adapter/Model，但仍经过真实 CLI、Controller 子进程、Tool
+Runtime、事件事务、checkpoint 和恢复链。自定义 Adapter 使用相同的
+`package.module:AdapterClass` plugin 格式。
+
+LIBERO 是 optional Adapter。安装脚本固定 LIBERO、GroundingDINO、SAM 和 GraspNet
+上游 revision；checkpoint 下载脚本在原子替换前校验 SHA256：
+
+```bash
+bash scripts/install_libero.sh
+python scripts/download_libero_checkpoints.py
+roboforge doctor --adapter libero
+roboforge run --adapter libero --task 0 --profile autonomous \
+  --run-dir runs/libero-task-0 --asset-root assets/shared
+```
+
+也可通过 `ROBOFORGE_GROUNDINGDINO_ROOT`、`ROBOFORGE_GROUNDINGDINO_CONFIG`、
+`ROBOFORGE_GROUNDINGDINO_CHECKPOINT`、`ROBOFORGE_SAM_ROOT`、
+`ROBOFORGE_SAM_CHECKPOINT`、`ROBOFORGE_GRASPNET_ROOT` 和
+`ROBOFORGE_GRASPNET_CHECKPOINT` 使用外部安装目录。LIBERO 缺少依赖、源码、扩展、GPU
+或 checkpoint 时，preflight 会列出每项失败并以非零状态退出，正式 run 不会继续。
 
 Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` 开启资产检索和沉淀，
 `benchmark` 由外部评测 runner 额外加载研究 policy。自定义 Adapter 必须实现
@@ -58,10 +62,27 @@ Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` �
 
 ## 安全与稳定性
 
-Controller、工程命令和获取的 Tool 在断网 bubblewrap worker 中运行；RPC 使用正向字段
-投影和严格 JSON 校验。Tool 版本以 SHA256 标识且不可变，调用前后执行 JSON Schema。
-Workspace 事务、事件日志和执行快照支持幂等提交与中断恢复。Adapter 负责物理速度、力、
-工作空间和急停限制。
+默认 `posix-hardened` sandbox 不需要 root、Docker、setuid binary 或 user namespace。
+它实际启用 `no_new_privs`、libseccomp 网络/危险 syscall 阻断、rlimit、环境白名单、私有
+临时目录和进程组超时回收；支持 Landlock 的内核会额外启用路径规则。工程命令只写独立
+`staged_worktree/`，成功退出后由 Harness 检查文件类型、容量和冻结哈希并原子提交。
+canonical workspace、checkpoint、events 和 evidence 不直接暴露为可写目标。
+
+`--sandbox bubblewrap` 是探测成功后才可选择的 namespace 增强项，不是依赖。只有
+`--profile dev --sandbox unsafe` 能显式使用无 syscall 隔离的调试模式；autonomous 和
+benchmark 会拒绝 unsafe backend。
+
+可复现的无特权容器入口使用同一个 POSIX backend，不安装或依赖 bubblewrap：
+
+```bash
+docker build -t roboforge:0.5.0 .
+docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+  -v "$PWD/runs:/runs" -v "$PWD/assets:/assets" roboforge:0.5.0
+```
+
+RPC 使用正向字段投影和严格 JSON 校验。Tool 版本以 SHA256 标识且不可变，调用前后执行
+JSON Schema。Workspace 事务、事件日志和执行快照支持幂等提交与中断恢复。Adapter 负责
+物理速度、力、工作空间和急停限制。
 
 ## 测试
 
@@ -69,6 +90,7 @@ Workspace 事务、事件日志和执行快照支持幂等提交与中断恢复�
 python -m pytest -q tests evaluation
 python -m compileall -q embodied_codex evaluation
 git diff --check
+python tests/live_acquisition_acceptance.py
 ```
 
 确定性 kernel 测试不依赖 LIBERO、GPU 或真实 API，覆盖失败 Controller 读取证据、修改、

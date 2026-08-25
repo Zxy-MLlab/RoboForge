@@ -1,6 +1,8 @@
 """LIBERO Adapter plugin. All task execution still runs through kernel.AgentLoop."""
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -10,34 +12,200 @@ from ..capabilities import (GraspNetRGBD, OpenVocabularyRGBD,
 from ..deployments.libero import LiberoDeployment, LiberoEpisode
 
 
+_CHECKPOINT_SHA256 = {
+    "groundingdino": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+    "sam": "ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912",
+    "graspnet": "60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868",
+}
+
+
 def _path(env_name: str, default: str) -> Path:
     return Path(os.environ.get(env_name, default)).expanduser().resolve()
 
 
-def _contract():
-    any_object = {"type": "object", "additionalProperties": True}
-    return {"input_schema": any_object, "output_schema": any_object}
+def _array(item, length: int | None = None):
+    value = {"type": "array", "items": item}
+    if length is not None:
+        value.update(minItems=length, maxItems=length)
+    return value
+
+
+def _frame_schema():
+    number = {"type": "number"}
+    camera = {"type": "object", "properties": {
+        "rgb_path": {"type": "string"}, "rgb_sha256": {"type": "string"},
+        "depth_path": {"type": "string"}, "depth_sha256": {"type": "string"},
+        "shape": _array({"type": "integer"}), "depth_range_m": _array(number, 2),
+        "intrinsic": _array(_array(number, 3), 3),
+        "camera_to_world": _array(_array(number, 4), 4)},
+        "required": ["rgb_path", "depth_path", "intrinsic", "camera_to_world"],
+        "additionalProperties": False}
+    return {"type": "object", "properties": {
+        "frame_id": {"type": "string"}, "step": {"type": "integer"},
+        "cameras": {"type": "object", "additionalProperties": camera},
+        "proprioception": {"type": "object", "additionalProperties": {
+            "oneOf": [number, _array(number)]}},
+    }, "required": ["frame_id", "cameras"], "additionalProperties": False}
+
+
+def _detection_schema():
+    number = {"type": "number"}
+    return {"type": "object", "properties": {
+        "query": {"type": "string"}, "label": {"type": "string"},
+        "score": number, "box_xyxy": _array(number, 4), "sam_score": number,
+        "box_containment": number, "mask_pixels": {"type": "integer"},
+        "mask_path": {"type": "string"}, "world_xyz": _array(number, 3),
+        "world_bounds_10_90": _array(_array(number, 3), 2),
+        "projection_error": {"type": "string"}, "point_ref": {"type": "string"}},
+        "required": ["query", "label", "score", "box_xyxy"],
+        "additionalProperties": False}
+
+
+def _perception_contract():
+    number = {"type": "number"}; string = {"type": "string"}
+    detection = _detection_schema()
+    issue = {"type": "object", "properties": {
+        "kind": string, "query": string, "detail": string,
+        "candidate_index": {"type": "integer"},
+        "candidate_indices": _array({"type": "integer"}),
+        "queries": _array(string), "score_margin": number,
+        "box_iou": number, "world_distance_m": {"type": ["number", "null"]}},
+        "required": ["kind"], "additionalProperties": False}
+    reliability = {"type": "object", "properties": {
+        "protocol": string, "frame_id": string,
+        "status": {"type": "string", "enum": ["supported", "uncertain", "unusable"]},
+        "requires_independent_confirmation": {"type": "boolean"},
+        "issues": _array(issue), "query_candidate_counts": {
+            "type": "object", "additionalProperties": {"type": "integer"}},
+        "decision_boundary": string},
+        "required": ["protocol", "status", "requires_independent_confirmation",
+                     "issues", "query_candidate_counts", "decision_boundary"],
+        "additionalProperties": False}
+    return {"input_schema": {"type": "object", "properties": {
+            "frame": _frame_schema(), "queries": _array(string), "camera": string,
+            "box_threshold": number, "text_threshold": number,
+            "max_detections_per_query": {"type": "integer", "minimum": 1, "maximum": 12},
+            "distinct_query_pairs": _array(_array(string, 2))},
+            "required": ["frame", "queries"], "additionalProperties": False},
+        "output_schema": {"type": "object", "properties": {
+            "frame_id": string, "camera": string,
+            "detections": {"type": "object", "additionalProperties": _array(detection)},
+            "reliability": reliability},
+            "required": ["frame_id", "camera", "detections", "reliability"],
+            "additionalProperties": False}}
+
+
+def _grasp_contract():
+    number = {"type": "number"}; string = {"type": "string"}
+    vector = _array(number, 3); rotation = _array(_array(number, 3), 3)
+    candidate = {"type": "object", "properties": {
+        "rank_score": number, "model_score": number, "distance_to_target_m": number,
+        "width_m": number, "height_m": number, "depth_m": number,
+        "translation_camera": vector, "rotation_camera": rotation,
+        "translation_world": vector, "rotation_world": rotation,
+        "downward_score": number, "collision_iou": number, "inner_occupancy": number,
+        "orientation_override_required": {"type": "boolean"}, "world_xyz": vector,
+        "approach_world": vector, "eef_rotation_world": rotation,
+        "pose_kind": {"type": "string", "enum": ["full_6dof", "calibrated_topdown"]}},
+        "required": ["rank_score", "model_score", "distance_to_target_m", "width_m",
+                     "translation_world", "rotation_world", "world_xyz",
+                     "eef_rotation_world", "pose_kind"], "additionalProperties": False}
+    scalar_map = {"type": "object", "additionalProperties": {
+        "oneOf": [number, string, {"type": "boolean"}, _array(number),
+                  {"type": "object"}, _array({"type": "object"})]}}
+    return {"input_schema": {"type": "object", "properties": {
+            "frame": _frame_schema(), "detection": _detection_schema(), "camera": string,
+            "downward_min": number, "preferred_downward_min": number},
+            "required": ["frame", "detection"], "additionalProperties": False},
+        "output_schema": {"type": "object", "properties": {
+            "frame_id": string, "target_center_world": vector,
+            "full_6dof_grasps": _array(candidate),
+            "calibrated_topdown_grasps": _array(candidate),
+            "filter_thresholds": {"oneOf": [scalar_map, {"type": "null"}]},
+            "filter_diagnostics": {"oneOf": [scalar_map, {"type": "null"}]},
+            "artifact_path": string},
+            "required": ["target_center_world", "full_6dof_grasps",
+                         "calibrated_topdown_grasps", "filter_thresholds",
+                         "filter_diagnostics", "artifact_path"],
+            "additionalProperties": False}}
+
+
+def _sha256(path: Path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _paths():
+    package_root = Path(__file__).resolve().parents[2]
+    dino_root = _path("ROBOFORGE_GROUNDINGDINO_ROOT",
+                      str(package_root / "third_party/GroundingDINO"))
+    sam_root = _path("ROBOFORGE_SAM_ROOT", str(package_root / "third_party/segment-anything"))
+    grasp_root = _path("ROBOFORGE_GRASPNET_ROOT",
+                       str(package_root / "third_party/graspnet-baseline"))
+    return {"package_root": package_root, "groundingdino_root": dino_root,
+        "groundingdino_config": _path("ROBOFORGE_GROUNDINGDINO_CONFIG",
+            str(dino_root / "groundingdino/config/GroundingDINO_SwinT_OGC.py")),
+        "groundingdino_checkpoint": _path("ROBOFORGE_GROUNDINGDINO_CHECKPOINT",
+            str(package_root / "checkpoints/groundingdino_swint_ogc.pth")),
+        "sam_root": sam_root, "sam_checkpoint": _path("ROBOFORGE_SAM_CHECKPOINT",
+            str(package_root / "checkpoints/sam_vit_b_01ec64.pth")),
+        "graspnet_root": grasp_root, "graspnet_checkpoint": _path(
+            "ROBOFORGE_GRASPNET_CHECKPOINT",
+            str(package_root / "checkpoints/graspnet-checkpoint-rs.tar"))}
+
+
+def doctor_checks():
+    paths = _paths(); modules = {}
+    for name in ("torch", "torchvision", "transformers", "PIL", "scipy", "open3d",
+                 "libero", "robosuite", "cv2", "numpy", "timm", "addict", "yapf",
+                 "supervision", "pycocotools", "tensorboard"):
+        modules[name] = importlib.util.find_spec(name) is not None
+    sources = {"groundingdino": (paths["groundingdino_root"] / "groundingdino").is_dir(),
+               "segment_anything": (paths["sam_root"] / "segment_anything").is_dir(),
+               "graspnet": (paths["graspnet_root"] / "models/graspnet.py").is_file(),
+               "graspnet_pointnet2_extension": any(
+                   (paths["graspnet_root"] / "pointnet2/pointnet2").glob("_ext*.so")),
+               "graspnet_knn_extension": any(
+                   (paths["graspnet_root"] / "knn/knn_pytorch").glob("knn_pytorch*.so"))}
+    checkpoints = {}
+    for name, key in (("groundingdino", "groundingdino_checkpoint"),
+                      ("sam", "sam_checkpoint"), ("graspnet", "graspnet_checkpoint")):
+        path = paths[key]; actual = _sha256(path) if path.is_file() else None
+        checkpoints[name] = {"path": str(path), "available": path.is_file(),
+            "sha256": actual, "expected_sha256": _CHECKPOINT_SHA256[name],
+            "valid": actual == _CHECKPOINT_SHA256[name]}
+    device = os.environ.get("ROBOFORGE_DEVICE", "cuda")
+    accelerator = {"requested": device, "available": True}
+    if device.startswith("cuda") and modules["torch"]:
+        import torch
+        accelerator["available"] = bool(torch.cuda.is_available())
+        accelerator["device_count"] = int(torch.cuda.device_count())
+    ok = (all(modules.values()) and all(sources.values())
+          and all(item["valid"] for item in checkpoints.values())
+          and accelerator["available"] is True)
+    return {"ok": ok, "modules": modules, "sources": sources,
+            "checkpoints": checkpoints, "accelerator": accelerator}
 
 
 def create(*, task: str, state: int = 0, root: str | Path):
-    package_root = Path(__file__).resolve().parents[2]
+    paths = _paths(); package_root = paths["package_root"]
     config = os.environ.get("LIBERO_CONFIG_PATH")
     episode = LiberoEpisode("libero_spatial", int(task), int(state), config_path=config,
                             case_handle=f"libero-task-{task}-state-{state}")
     key = os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY")
     base_url = os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1")
     model_name = os.environ.get("ROBOFORGE_MODEL", "gpt-5.6-sol")
-    dino_root = _path("ROBOFORGE_GROUNDINGDINO_ROOT", str(package_root / "third_party/GroundingDINO"))
-    dino_config = _path("ROBOFORGE_GROUNDINGDINO_CONFIG", str(dino_root / "groundingdino/config/GroundingDINO_SwinT_OGC.py"))
-    dino_checkpoint = _path("ROBOFORGE_GROUNDINGDINO_CHECKPOINT", str(package_root / "checkpoints/groundingdino_swint_ogc.pth"))
-    sam_root = _path("ROBOFORGE_SAM_ROOT", str(package_root / "third_party/segment-anything"))
-    sam_checkpoint = _path("ROBOFORGE_SAM_CHECKPOINT", str(package_root / "checkpoints/sam_vit_b_01ec64.pth"))
-    grasp_checkpoint = _path("ROBOFORGE_GRASPNET_CHECKPOINT", str(package_root / "checkpoints/graspnet-checkpoint-rs.tar"))
-    perception = OpenVocabularyRGBD(groundingdino_root=dino_root, groundingdino_config=dino_config,
-        groundingdino_checkpoint=dino_checkpoint, sam_root=sam_root, sam_checkpoint=sam_checkpoint,
+    perception = OpenVocabularyRGBD(groundingdino_root=paths["groundingdino_root"],
+        groundingdino_config=paths["groundingdino_config"],
+        groundingdino_checkpoint=paths["groundingdino_checkpoint"],
+        sam_root=paths["sam_root"], sam_checkpoint=paths["sam_checkpoint"],
         device=os.environ.get("ROBOFORGE_DEVICE", "cuda"))
     grasp = GraspNetRGBD(backend_script=package_root / "embodied_codex/capabilities/graspnet_backend.py",
-                         checkpoint=grasp_checkpoint, python=sys.executable)
+                         checkpoint=paths["graspnet_checkpoint"],
+                         source_root=paths["graspnet_root"], python=sys.executable)
     verifiers = {"visual_attachment": perception.verify_attachment,
                  "visual_support_relation": perception.verify_support_relation}
     outcome = None
@@ -45,7 +213,8 @@ def create(*, task: str, state: int = 0, root: str | Path):
         outcome = VLMVisualTaskOutcomeVerifier(api_key=key, base_url=base_url, model=model_name).verify
     capabilities = {"libero.rgbd_perception:v001": perception.detect,
                     "libero.grasp_proposals:v001": grasp.infer}
-    contracts = {tool_id: _contract() for tool_id in capabilities}
+    contracts = {"libero.rgbd_perception:v001": _perception_contract(),
+                 "libero.grasp_proposals:v001": _grasp_contract()}
     deployment = LiberoDeployment(episode=episode, artifact_dir=Path(root) / "adapter",
         capabilities=capabilities, capability_contracts=contracts, verifiers=verifiers,
         outcome_verifier=outcome)

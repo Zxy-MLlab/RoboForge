@@ -145,8 +145,42 @@ class CapabilityManager:
         if controller is not None and not Path(str(controller)).is_absolute():
             values["controller"] = str((self.workspace.root / str(controller)).resolve())
         values["evidence_paths"] = [self._asset_path(item) for item in values.get("evidence_paths", [])]
+        if not self._verified_skill_evidence(values["evidence_paths"]):
+            raise CapabilityError(
+                "Skill requires successful Adapter evidence for the current Controller")
+        tested = {item["tool_id"] for item in self.tool_library.tested()} \
+            if self.tool_library is not None else set()
+        missing = set(values.get("tool_ids") or []) - tested
+        if missing:
+            raise CapabilityError(f"Skill references untested Tools: {sorted(missing)}")
         values.setdefault("tools", self.tool_library)
         return self.skill_library.freeze(**values)
+
+    def _verified_skill_evidence(self, paths: list[str]) -> bool:
+        if not self.workspace.controller.is_file():
+            return False
+        controller_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
+        identity_provider = getattr(self.adapter, "execution_identity", None)
+        identity = identity_provider() if callable(identity_provider) else identity_provider
+        for value in paths:
+            try:
+                evidence = json.loads(Path(value).read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            execution = evidence.get("execution") if isinstance(evidence, Mapping) else None
+            report = evidence.get("sensor_report") if isinstance(evidence, Mapping) else None
+            receipt = evidence.get("verification_receipt") if isinstance(evidence, Mapping) else None
+            declared = [report.get(key) for key in ("sensor_success", "success", "verified",
+                "sensor_verification_passed") if isinstance(report, Mapping) and key in report]
+            if (isinstance(execution, Mapping) and execution.get("completed") is True
+                    and not execution.get("error")
+                    and isinstance(receipt, Mapping) and receipt.get("verified") is True
+                    and evidence.get("controller_sha256") == controller_sha
+                    and receipt.get("controller_sha256") == controller_sha
+                    and receipt.get("environment_identity") == identity
+                    and declared and any(item is True for item in declared)):
+                return True
+        return False
 
     def register_experience(self, **payload):
         if self.experience_library is None: raise CapabilityError("Experience library unavailable")

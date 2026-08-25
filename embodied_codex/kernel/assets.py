@@ -104,13 +104,15 @@ class CapabilityLibrary:
 
     def __init__(self, root: str | Path, workspace_root: str | Path | None = None,
                  *, python: str | Path | None = None, scope_id: str | None = None,
-                 allowed_input_roots: list[str | Path] | None = None):
+                 allowed_input_roots: list[str | Path] | None = None,
+                 sandbox: Any = None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = Path(workspace_root or self.root).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.scope_id = str(scope_id or "shared")
-        self.runtime = ToolRuntime(python=python, allowed_input_roots=allowed_input_roots)
+        self.runtime = ToolRuntime(python=python, allowed_input_roots=allowed_input_roots,
+                                   sandbox=sandbox)
 
     def _workspace_file(self, path: str) -> Path:
         candidate = (self.workspace / str(path)).resolve()
@@ -164,21 +166,33 @@ class CapabilityLibrary:
     def register_tool(self, *, name: str, source_path: str, description: str,
                       input_schema: Mapping[str, Any], output_schema: Mapping[str, Any],
                       source_urls: list[str] | None = None,
-                      manual: Mapping[str, Any] | None = None, **_unused) -> dict[str, Any]:
+                      manual: Mapping[str, Any] | None = None,
+                      runtime_requirements: list[str] | None = None,
+                      **_unused) -> dict[str, Any]:
         source = self._workspace_file(source_path)
         text = source.read_text()
         compile(text, str(source), "exec")
         self._entrypoint(text)
         input_schema = _schema(input_schema, "input_schema")
         output_schema = _schema(output_schema, "output_schema")
+        requirements = [str(item) for item in runtime_requirements or []]
+        if any(not re.fullmatch(r"[A-Za-z0-9_.-]+==[^\s=]+", item)
+               for item in requirements):
+            raise AssetError("runtime requirements must be exact name==version pins")
         name = _name(name)
         digest = _sha256(source)
         for old in self.list_all():
-            if old.get("name") == name and old.get("source_sha256") == digest and old.get("input_schema") == input_schema:
+            if (old.get("name") == name and old.get("source_sha256") == digest
+                    and old.get("input_schema") == input_schema
+                    and old.get("output_schema") == output_schema
+                    and (old.get("dependencies") or {}).get("runtime_requirements", [])
+                        == requirements):
                 return {"tool_id": old["tool_id"], "status": old["status"], "duplicate_of": old["tool_id"]}
         manifest = {"protocol": "roboforge-tool-v1", "name": name, "description": str(description),
                     "input_schema": input_schema, "output_schema": output_schema,
                     "source_sha256": digest, "source_urls": list(source_urls or []),
+                    "dependencies": {"runtime": "isolated-python",
+                                     "runtime_requirements": requirements},
                     "visibility": "shared", "status": "registered", "tests": []}
         return self._write_manifest(name, manifest, source,
             _manual(description, input_schema, output_schema, manual))
@@ -365,7 +379,8 @@ class CapabilityLibrary:
 
     def list_summaries(self):
         return [{key: row.get(key) for key in ("tool_id", "name", "version", "description",
-            "input_schema", "output_schema", "status", "runtime_spec")} for row in self.list_all()]
+            "input_schema", "output_schema", "status", "runtime_spec", "dependencies")}
+            for row in self.list_all()]
 
     def search(self, query: str, limit: int = 8):
         return rank_records(query, self.list_summaries(),

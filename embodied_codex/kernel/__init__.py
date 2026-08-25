@@ -8,7 +8,9 @@ from .context_window import ContextWindowManager
 from .events import EventStore
 from .workspace import PersistentWorkspace
 from .tools import ToolRegistry
-from .sandbox import SandboxBackend, BubblewrapBackend, SandboxUnavailable, default_sandbox
+from .sandbox import (SandboxBackend, PosixSandboxBackend, BubblewrapBackend,
+                      UnsafeSandboxBackend, SandboxUnavailable, default_sandbox,
+                      select_sandbox)
 
 __all__ = [
     "AgentLoop",
@@ -23,7 +25,10 @@ __all__ = [
     "MinimalSystemPrompt",
     "PersistentWorkspace",
     "BubblewrapBackend",
+    "PosixSandboxBackend",
+    "UnsafeSandboxBackend",
     "SandboxBackend",
     "SandboxUnavailable",
     "default_sandbox",
+    "select_sandbox",
 ]

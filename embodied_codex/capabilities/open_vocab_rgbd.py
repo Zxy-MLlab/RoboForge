@@ -251,7 +251,7 @@ class OpenVocabularyRGBD:
             grouped[query] = projected
         result = {
             "frame_id": frame.get("frame_id"), "camera": camera_name,
-            "detections": grouped, "provenance": self.provenance,
+            "detections": grouped,
         }
         result["reliability"] = audit_detection_result(
             result,

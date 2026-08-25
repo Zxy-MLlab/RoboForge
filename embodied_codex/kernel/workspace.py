@@ -7,12 +7,13 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
-import subprocess
-import sys
 import tempfile
 import os
+import stat
 import uuid
 from typing import Any, Mapping
+
+from .sandbox import SandboxBackend, default_sandbox
 
 
 class WorkspaceError(RuntimeError):
@@ -30,13 +31,19 @@ class WorkspaceSnapshot:
 class PersistentWorkspace:
     """A workspace with bounded reads, atomic edits, snapshots and recovery."""
 
-    def __init__(self, root: str | Path, *, require_sandbox: bool = True):
+    def __init__(self, root: str | Path, *, sandbox: SandboxBackend | None = None,
+                 require_sandbox: bool = True):
         self.root = Path(root).resolve(); self.root.mkdir(parents=True, exist_ok=True)
-        self.snapshot_root = self.root / ".snapshots"; self.snapshot_root.mkdir(exist_ok=True)
+        self.snapshot_root = self.root.parent / "workspace_snapshots"
+        self.snapshot_root.mkdir(parents=True, exist_ok=True)
+        self.stage_root = self.root.parent / "staged_worktree"
+        self.stage_root.mkdir(parents=True, exist_ok=True)
         self._locked_files: dict[str, str] = {}
-        self.bwrap = shutil.which("bwrap")
-        if require_sandbox and not self.bwrap:
-            raise WorkspaceError("bubblewrap is required for workspace commands")
+        self._protected_paths: set[Path] = set()
+        self.sandbox = sandbox or default_sandbox()
+        if require_sandbox:
+            try: self.sandbox.require()
+            except Exception as exc: raise WorkspaceError(str(exc)) from exc
 
     def _path(self, relative: str) -> Path:
         candidate = Path(str(relative))
@@ -91,7 +98,7 @@ class PersistentWorkspace:
         backup = self.root.parent / f".{self.root.name}.rollback-{uuid.uuid4().hex}"
         try:
             for source in self.root.iterdir():
-                if source.name in {stage.name, ".snapshots"}: continue
+                if source.name == stage.name: continue
                 destination = stage / source.name
                 if source.is_dir(): shutil.copytree(source, destination)
                 else: shutil.copy2(source, destination)
@@ -109,13 +116,15 @@ class PersistentWorkspace:
                         target.write_bytes(base64.b64decode(str(operation["content_base64"]), validate=True))
                     else:
                         target.write_text(str(operation.get("content", "")))
+                    if "mode" in operation:
+                        target.chmod(int(operation["mode"]) & 0o777)
                 changed.append(relative)
             # Keep a recoverable rollback tree until every staged entry has
             # replaced its counterpart.  A failed commit restores the prior
             # workspace instead of leaving a half-applied controller.
             backup.mkdir(parents=True, exist_ok=False)
             for source in list(self.root.iterdir()):
-                if source.name not in {stage.name, ".snapshots"}:
+                if source.name != stage.name:
                     destination = backup / source.name
                     source.rename(destination)
             try:
@@ -124,8 +133,7 @@ class PersistentWorkspace:
                     source.rename(destination)
             except Exception:
                 for source in list(self.root.iterdir()):
-                    if source.name != ".snapshots":
-                        shutil.rmtree(source) if source.is_dir() else source.unlink()
+                    shutil.rmtree(source) if source.is_dir() else source.unlink()
                 for source in backup.iterdir():
                     source.rename(self.root / source.name)
                 raise
@@ -167,6 +175,13 @@ class PersistentWorkspace:
             raise WorkspaceError(f"cannot lock mismatched workspace file: {path}")
         self._locked_files[str(path)] = str(expected_sha256)
 
+    def add_protected_path(self, path: str | Path) -> None:
+        """Protect an external persistent tree during engineering commands."""
+        resolved = Path(path).resolve()
+        if not resolved.exists():
+            raise WorkspaceError(f"protected path does not exist: {resolved}")
+        self._protected_paths.add(resolved)
+
     def replace_file_lines(self, path: str, start_line: int, end_line: int,
                            new_content: str, expected_old_sha256: str | None = None) -> dict[str, Any]:
         target = self._path(path)
@@ -192,38 +207,109 @@ class PersistentWorkspace:
         working = self.root if cwd is None else Path(cwd).resolve()
         if working != self.root and self.root not in working.parents:
             raise WorkspaceError("command cwd escapes workspace")
-        if not self.bwrap:
-            raise WorkspaceError("bubblewrap is required for workspace commands")
-        prefix = Path(sys.prefix).resolve(); runtime = Path("/runtime")
-        command = list(argv)
-        executable = Path(command[0]) if Path(command[0]).is_absolute() else None
-        if executable is not None and (executable == prefix or prefix in executable.parents):
-            command[0] = str(runtime / executable.relative_to(prefix))
-        binds = []
-        for value in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
-            if Path(value).exists():
-                binds.extend(["--ro-bind", value, value])
         relative = working.relative_to(self.root)
-        sandbox_cwd = "/workspace" if str(relative) == "." else "/workspace/" + relative.as_posix()
-        wrapped = [self.bwrap, "--die-with-parent", "--new-session", "--unshare-pid",
-            "--unshare-ipc", "--unshare-uts", "--unshare-net", *binds,
-            "--ro-bind", str(prefix), str(runtime), "--dev", "/dev", "--proc", "/proc",
-            "--tmpfs", "/tmp", "--bind", str(self.root), "/workspace",
-            "--chdir", sandbox_cwd, "--", *command]
-        process_env = {"PATH": "/runtime/bin:/usr/local/bin:/usr/bin:/bin",
-                       "HOME": "/workspace", "TMPDIR": "/tmp", **safe_env}
+        stage = Path(tempfile.mkdtemp(prefix="command-", dir=self.stage_root))
+        for source in self.root.iterdir():
+            destination = stage / source.name
+            if source.is_symlink():
+                shutil.rmtree(stage, ignore_errors=True)
+                raise WorkspaceError("workspace symlinks are not allowed")
+            if source.is_dir(): shutil.copytree(source, destination)
+            elif source.is_file(): shutil.copy2(source, destination)
+        stage_working = stage / relative
+        command = []
+        for index, value in enumerate(argv):
+            candidate = Path(value)
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+                if resolved == self.root or self.root in resolved.parents:
+                    value = str(stage / resolved.relative_to(self.root))
+                elif index > 0:
+                    shutil.rmtree(stage, ignore_errors=True)
+                    raise WorkspaceError("absolute command arguments must reference the workspace")
+            command.append(value)
+        before = {item["path"]: item["sha256"] for item in self.list_files()}
         try:
-            completed = subprocess.run(wrapped, cwd=working, env=process_env, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=min(max(float(timeout_seconds), 0.1), 600))
+            modes = self._protect_run_state()
+            try:
+                completed = self.sandbox.run(command, cwd=stage_working, env=safe_env,
+                    read_write_paths=[stage],
+                    timeout_seconds=min(max(float(timeout_seconds), 0.1), 600))
+            finally:
+                self._restore_modes(modes)
+            changed = []
+            if completed.returncode == 0 and not completed.timed_out:
+                staged = self._validate_staged_tree(stage)
+                for locked, expected in self._locked_files.items():
+                    item = staged.get(locked)
+                    if item is None or item["sha256"] != expected:
+                        raise WorkspaceError(f"workspace command changed immutable file: {locked}")
+                operations = []
+                for relative_path in sorted(staged):
+                    if relative_path in self._locked_files:
+                        continue
+                    operations.append({"path": relative_path,
+                        "content_base64": base64.b64encode(
+                            (stage / relative_path).read_bytes()).decode("ascii"),
+                        "mode": stat.S_IMODE((stage / relative_path).stat().st_mode)})
+                operations.extend({"path": relative_path, "delete": True}
+                    for relative_path in sorted(set(before) - set(staged)))
+                self._atomic_tree_update(operations)
+                after = {item["path"]: item["sha256"] for item in self.list_files()}
+                changed = sorted(path for path in set(before) | set(after)
+                                 if before.get(path) != after.get(path))
+                self.snapshot()
+            output = (completed.stdout + completed.stderr)[-30000:]
             return {"argv": argv, "exit_code": completed.returncode,
-                    "output": completed.stdout[-30000:], "sandbox": "bubblewrap-workspace-v1",
-                    "cwd": str(working.relative_to(self.root)) or "."}
-        except subprocess.TimeoutExpired as exc:
-            output = exc.stdout if isinstance(exc.stdout, str) else ""
-            return {"argv": argv, "exit_code": None, "timed_out": True,
-                    "output": output[-30000:], "sandbox": "bubblewrap-workspace-v1",
-                    "cwd": str(working.relative_to(self.root)) or "."}
+                    "timed_out": completed.timed_out, "output": output,
+                    "sandbox": f"{self.sandbox.name}-workspace-v1",
+                    "cwd": str(relative) or ".", "changed": changed,
+                    "committed": completed.returncode == 0 and not completed.timed_out}
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def _protect_run_state(self) -> list[tuple[Path, int]]:
+        """Make canonical run state immutable for the lifetime of a command."""
+        protected = []
+        roots = [self.root.parent, *sorted(self._protected_paths)]
+        paths = []
+        for root in roots:
+            paths.extend([root, *sorted(root.rglob("*"),
+                                      key=lambda item: len(item.parts), reverse=True)])
+        for path in paths:
+            if path == self.stage_root or self.stage_root in path.parents or path.is_symlink():
+                continue
+            try:
+                mode = stat.S_IMODE(path.stat().st_mode)
+                protected.append((path, mode))
+                path.chmod(0o500 if path.is_dir() else 0o400)
+            except FileNotFoundError:
+                continue
+        return protected
+
+    @staticmethod
+    def _restore_modes(modes: list[tuple[Path, int]]) -> None:
+        for path, mode in reversed(modes):
+            try: path.chmod(mode)
+            except FileNotFoundError: pass
+
+    @staticmethod
+    def _validate_staged_tree(stage: Path) -> dict[str, dict[str, Any]]:
+        files = {}; total = 0
+        for path in stage.rglob("*"):
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise WorkspaceError(f"staged worktree contains unsupported file: {path}")
+            if not path.is_file(): continue
+            relative = path.relative_to(stage).as_posix()
+            if relative.startswith("staged_worktree/"):
+                raise WorkspaceError("staged worktree contains a reserved path")
+            size = path.stat().st_size; total += size
+            if len(files) >= 5000 or total > 512 * 1024 * 1024:
+                raise WorkspaceError("staged worktree exceeds the file or byte limit")
+            files[relative] = {"bytes": size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        return files
 
     def _changed_since_snapshot(self):
         current = {item["path"]: item["sha256"] for item in self.list_files()}

@@ -17,9 +17,13 @@ class Event:
 
 
 class EventStore:
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, protect: bool = False):
         self.root = Path(root).resolve(); self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "events.jsonl"; self._lock = threading.Lock()
+        self.protect = bool(protect)
+        if self.protect:
+            if self.path.is_file(): self.path.chmod(0o400)
+            self.root.chmod(0o500)
 
     def events(self) -> list[dict[str, Any]]:
         if not self.path.exists(): return []
@@ -34,8 +38,21 @@ class EventStore:
             sequence = len(rows) + 1
             record = {"event_id": identifier, "sequence": sequence, "kind": str(kind),
                       "payload": data, "committed_unix": time.time()}
-            with self.path.open("a") as stream:
-                stream.write(json.dumps(record, sort_keys=True, default=str) + "\n"); stream.flush(); os.fsync(stream.fileno())
+            encoded = "".join(json.dumps(row, sort_keys=True, default=str) + "\n"
+                              for row in [*rows, record])
+            if self.protect: self.root.chmod(0o700)
+            temporary = self.path.with_suffix(f".tmp-{uuid.uuid4().hex}")
+            try:
+                with temporary.open("w") as stream:
+                    stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+                temporary.replace(self.path)
+                if self.protect: self.path.chmod(0o400)
+                directory = os.open(self.root, os.O_RDONLY)
+                try: os.fsync(directory)
+                finally: os.close(directory)
+            finally:
+                temporary.unlink(missing_ok=True)
+                if self.protect: self.root.chmod(0o500)
         return Event(identifier, str(kind), data, sequence)
 
     def has_event(self, event_id: str) -> bool:

@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
-import subprocess
 import sys
 from typing import Any, Mapping
+
+from .kernel.sandbox import ReadOnlyGuard, SandboxBackend, default_sandbox
 
 
 class ToolRuntimeError(RuntimeError): pass
@@ -20,10 +20,14 @@ class ToolRuntimeError(RuntimeError): pass
 
 _CHILD = r'''
 import contextlib,importlib.util,importlib.metadata,io,json,os,sys,traceback
+sys.dont_write_bytecode=True
 try:
     payload=json.load(sys.stdin)
-    with open("/tool/manifest.json") as stream:manifest=json.load(stream)
-    for requirement in (manifest.get("runtime_spec") or {}).get("runtime_requirements",[]):
+    with open(sys.argv[2]) as stream:manifest=json.load(stream)
+    requirements=(manifest.get("runtime_spec") or {}).get("runtime_requirements")
+    if requirements is None:
+        requirements=(manifest.get("dependencies") or {}).get("runtime_requirements",[])
+    for requirement in requirements:
         name,expected=requirement.split("==",1)
         actual=importlib.metadata.version(name)
         if actual!=expected:raise RuntimeError(
@@ -51,19 +55,13 @@ except BaseException as exc:
 
 class ToolRuntime:
     def __init__(self, *, python: str|Path|None=None, timeout_seconds: float=120,
-                 allowed_input_roots: list[str|Path]|None=None):
+                 allowed_input_roots: list[str|Path]|None=None,
+                 sandbox: SandboxBackend|None=None):
         self.python=str(python or sys.executable)
         self.timeout_seconds=float(timeout_seconds)
         self.allowed_input_roots=[Path(value).resolve() for value in (allowed_input_roots or [])]
-        self.bwrap=shutil.which("bwrap")
-        if not self.bwrap:raise ToolRuntimeError("bubblewrap is required for Tool isolation")
-
-    @staticmethod
-    def _system_binds():
-        args=[]
-        for value in ("/usr","/bin","/lib","/lib64","/etc"):
-            if Path(value).exists():args.extend(["--ro-bind",value,value])
-        return args
+        self.sandbox=sandbox or default_sandbox()
+        self.sandbox.require()
 
     def _authorized_file(self,value: str):
         candidate=Path(value)
@@ -75,7 +73,7 @@ class ToolRuntime:
             raise ToolRuntimeError("Tool input file is outside the sensor-evidence roots")
         return resolved
 
-    def _rewrite_payload(self,value: Any,bindings: dict[Path,str]):
+    def _rewrite_payload(self,value: Any,bindings: set[Path]):
         if isinstance(value,Mapping):
             return {str(key):self._rewrite_payload(item,bindings) for key,item in value.items()}
         if isinstance(value,list):return [self._rewrite_payload(item,bindings) for item in value]
@@ -83,8 +81,8 @@ class ToolRuntime:
         if isinstance(value,str):
             source=self._authorized_file(value)
             if source is not None:
-                if source not in bindings:bindings[source]=f"/inputs/{len(bindings):04d}"
-                return bindings[source]
+                bindings.add(source)
+                return str(source)
         return value
 
     @staticmethod
@@ -117,27 +115,18 @@ class ToolRuntime:
             entrypoint=directory/"bundle"/relative
         else:entrypoint=directory/"tool.py"
         if not entrypoint.is_file():raise ToolRuntimeError("missing Tool entrypoint")
-        bindings={};rewritten=self._rewrite_payload(dict(payload),bindings)
-        executable=Path(self.python).resolve();prefix=executable.parents[1]
-        runtime_executable=Path("/runtime")/executable.relative_to(prefix)
-        command=[self.bwrap,"--die-with-parent","--new-session","--unshare-pid",
-                 "--unshare-ipc","--unshare-uts","--unshare-net",*self._system_binds(),
-                 "--ro-bind",str(prefix),"/runtime","--dev","/dev","--proc","/proc",
-                 "--tmpfs","/tmp","--ro-bind",str(directory),"/tool","--dir","/inputs"]
-        if runtime_spec.get("accelerator")=="cuda":command.extend(self._gpu_device_binds())
-        for source,target in bindings.items():command.extend(["--ro-bind",str(source),target])
-        sandbox_entry=(Path("/tool/bundle")/entrypoint.relative_to(directory/"bundle")
-                       if runtime_spec else Path("/tool/tool.py"))
-        command.extend(["--chdir","/tool","--",str(runtime_executable),"-u","-I","-c",
-                        _CHILD,str(sandbox_entry)])
-        try:
-            completed=subprocess.run(command,input=json.dumps(rewritten),text=True,
-                stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        bindings:set[Path]=set();rewritten=self._rewrite_payload(dict(payload),bindings)
+        timeout=min(max(float(runtime_spec.get("timeout_seconds",
+            self.timeout_seconds)),0.1),600)
+        with ReadOnlyGuard([directory,*self.allowed_input_roots]):
+            completed=self.sandbox.run([self.python,"-u","-I","-c",_CHILD,
+                str(entrypoint),str(manifest_path)],cwd=directory,
+                input_text=json.dumps(rewritten),
                 env=self._safe_environment(str(runtime_spec.get("accelerator") or "cpu")),
-                timeout=min(max(float(runtime_spec.get("timeout_seconds",
-                    self.timeout_seconds)),0.1),600))
-        except subprocess.TimeoutExpired as exc:
-            raise ToolRuntimeError("Tool execution timed out") from exc
+                read_only_paths=[directory,*bindings,Path(self.python).resolve().parents[1]],
+                timeout_seconds=timeout)
+        if completed.timed_out:
+            raise ToolRuntimeError("Tool execution timed out")
         if completed.returncode!=0:
             raise ToolRuntimeError(f"Tool sandbox failed: {completed.stderr[-2000:]}")
         lines=[line for line in completed.stdout.splitlines() if line.strip()]
