@@ -16,6 +16,17 @@ from evaluation.run_embodied_codex_libero import (
 )
 
 
+def test_libero_sdk_index_exposes_machine_action_and_verifier_contracts():
+    from embodied_codex.adapters.libero import _sdk_index
+
+    index = _sdk_index(["seed:v001"], ["visual_attachment"])
+    assert index["action_contracts"]["move_to_point"]["required"] == ["type", "target_ref"]
+    assert index["action_contracts"]["osc_delta"]["required"] == ["type", "translation", "rotation"]
+    assert index["verifier_contracts"]["visual_attachment"]["required"] == [
+        "frame", "object_query", "source_ref"]
+    assert index["seed_tools"] == ["seed:v001"]
+
+
 def test_anti_cheating_audits_deduplicated_execution_artifact(tmp_path):
     from embodied_codex.kernel.events import EventStore
     from evaluation.anti_cheating import AntiCheatingPolicy

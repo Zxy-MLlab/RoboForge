@@ -11,6 +11,7 @@ from ..capabilities import (GraspNetRGBD, OpenVocabularyRGBD,
                             VLMVisualRelationGrounder, VLMVisualTaskOutcomeVerifier)
 from ..deployments.libero import LiberoDeployment, LiberoEpisode
 from ..providers import resolve_provider
+from .libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 
 
 DOCTOR_TASK = "0"
@@ -21,6 +22,31 @@ _CHECKPOINT_SHA256 = {
     "sam": "ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912",
     "graspnet": "60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868",
 }
+
+
+def _sdk_index(capabilities, verifiers):
+    """Return the bounded SDK index needed to form valid RPC requests.
+
+    This is contract metadata, not a task policy: it describes the accepted
+    request shapes while leaving object selection and motion strategy to the
+    controller.
+    """
+    return {
+        "protocol": "embodied-codex-libero-robot-sdk-v1",
+        "operations": ["observe", "use", "act", "verify", "record"],
+        "action_contracts": {
+            name: {key: value for key, value in contract.items()
+                   if key in {"required", "any_of", "enum", "example"}}
+            for name, contract in LIBERO_ROBOT_SDK_CONTRACT["actions"].items()
+        },
+        "verifier_contracts": {
+            name: {key: value for key, value in contract.items()
+                   if key in {"required", "example"}}
+            for name, contract in LIBERO_ROBOT_SDK_CONTRACT["verifiers"].items()
+        },
+        "seed_tools": sorted(capabilities),
+        "verifiers": sorted(verifiers),
+    }
 
 
 def _path(env_name: str, default: str) -> Path:
@@ -227,10 +253,5 @@ def create(*, task: str, state: int = 0, root: str | Path,
     deployment = LiberoDeployment(episode=episode, artifact_dir=Path(root) / "adapter",
         capabilities=capabilities, capability_contracts=contracts, verifiers=verifiers,
         outcome_verifier=outcome)
-    deployment.sdk_index = {
-        "protocol": "embodied-codex-libero-robot-sdk-v1",
-        "operations": ["observe", "use", "act", "verify", "record"],
-        "seed_tools": sorted(capabilities),
-        "verifiers": sorted(verifiers),
-    }
+    deployment.sdk_index = _sdk_index(capabilities, verifiers)
     return deployment
