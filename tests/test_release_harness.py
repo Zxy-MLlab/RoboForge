@@ -537,4 +537,6 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
     assert report["sandbox"]["features"]["filesystem_isolation"] is True
     assert report["sandbox"]["features"]["unauthorized_read_denied"] is True
     assert report["sandbox"]["features"]["unauthorized_write_denied"] is True
-    assert report["controller_runtime"] == report["tool_runtime"] == "available"
+    assert report["controller_runtime"] == "available"
+    assert report["tool_runtime"]["status"] == "available"
+    assert report["tool_runtime"]["isolated_python"] != sys.executable

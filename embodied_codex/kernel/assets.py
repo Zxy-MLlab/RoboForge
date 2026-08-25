@@ -27,6 +27,8 @@ from jsonschema import Draft202012Validator, ValidationError
 from ..retrieval import rank_records
 from ..tool_runtime import ToolRuntime
 from .cas import ContentAddressedStore, ContentAddressedStoreError
+from .runtime_environment import (RuntimeEnvironmentError,
+                                  RuntimeEnvironmentManager)
 
 
 class AssetError(RuntimeError):
@@ -142,15 +144,31 @@ class CapabilityLibrary:
                  *, python: str | Path | None = None, scope_id: str | None = None,
                  allowed_input_roots: list[str | Path] | None = None,
                  sandbox: Any = None, require_runtime: bool = True,
-                 cas: ContentAddressedStore | None = None):
+                 cas: ContentAddressedStore | None = None,
+                 runtime_environment_manager: RuntimeEnvironmentManager | None = None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = Path(workspace_root or self.root).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.scope_id = str(scope_id or "shared")
         self.cas = cas or ContentAddressedStore(self.root / "_cas")
+        self.runtime_environments = runtime_environment_manager
+        if require_runtime and self.runtime_environments is None:
+            self.runtime_environments = RuntimeEnvironmentManager(
+                self.root.parent / "runtimes", cas=self.cas, python=python,
+                sandbox=sandbox)
         self.runtime = (ToolRuntime(python=python, allowed_input_roots=allowed_input_roots,
                                     sandbox=sandbox) if require_runtime else None)
+
+    def _seal_runtime(self, value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if self.runtime_environments is None:
+            if value is not None:
+                raise AssetError("Runtime Environment manager is unavailable")
+            return None
+        try:
+            return self.runtime_environments.seal(value, workspace_root=self.workspace)
+        except RuntimeEnvironmentError as exc:
+            raise AssetError(str(exc)) from exc
 
     def _workspace_file(self, path: str) -> Path:
         candidate = (self.workspace / str(path)).resolve()
@@ -207,6 +225,7 @@ class CapabilityLibrary:
                       source_urls: list[str] | None = None,
                       manual: Mapping[str, Any] | None = None,
                       runtime_requirements: list[str] | None = None,
+                      runtime_spec: Mapping[str, Any] | None = None,
                       provenance: Mapping[str, Any] | None = None,
                       **_unused) -> dict[str, Any]:
         source = self._workspace_file(source_path)
@@ -221,18 +240,21 @@ class CapabilityLibrary:
             raise AssetError("runtime requirements must be exact name==version pins")
         name = _name(name)
         digest = _sha256(source)
+        environment = self._seal_runtime(runtime_spec)
         for old in self.list_all():
             if (old.get("name") == name and old.get("source_sha256") == digest
                     and old.get("input_schema") == input_schema
                     and old.get("output_schema") == output_schema
                     and (old.get("dependencies") or {}).get("runtime_requirements", [])
-                        == requirements):
+                        == requirements
+                    and old.get("runtime_environment") == environment):
                 return {"tool_id": old["tool_id"], "status": old["status"], "duplicate_of": old["tool_id"]}
         manifest = {"protocol": "roboforge-tool-v2", "name": name, "description": str(description),
                     "input_schema": input_schema, "output_schema": output_schema,
                     "source_sha256": digest, "source_urls": list(source_urls or []),
                     "dependencies": {"runtime": "isolated-python",
                                      "runtime_requirements": requirements},
+                    "runtime_environment": environment,
                     "provenance": dict(provenance or {"origin": "workspace"}),
                     "visibility": "shared", "status": "candidate", "tests": []}
         return self._write_manifest(name, manifest, source,
@@ -273,6 +295,8 @@ class CapabilityLibrary:
             raise AssetError("runtime requirements must be exact name==version pins")
         input_schema = _schema(input_schema, "input_schema")
         output_schema = _schema(output_schema, "output_schema")
+        environment = self._seal_runtime(
+            spec.get("runtime") if isinstance(spec.get("runtime"), Mapping) else None)
         name = _name(name)
         records = []
         try:
@@ -307,6 +331,7 @@ class CapabilityLibrary:
                         "entrypoint": str(entry), "accelerator": accelerator,
                         "network": False, "timeout_seconds": float(spec.get("timeout_seconds", 120)),
                         "runtime_requirements": requirements},
+                    "runtime_environment": environment,
                     "source_urls": list(source_urls or []), "visibility": "shared",
                     "provenance": dict(provenance or {"origin": "workspace"}),
                     "status": "candidate", "tests": []}
@@ -338,10 +363,11 @@ class CapabilityLibrary:
         path = self._path(tool_id)
         manifest = json.loads((path / "manifest.json").read_text())
         runtime = dict(manifest.get("runtime_spec") or {})
-        source = path / "bundle" / str(runtime["entrypoint"]) if runtime else path / "tool.py"
+        is_package = manifest.get("protocol") == "roboforge-capability-package-v2"
+        source = path / "bundle" / str(runtime["entrypoint"]) if is_package else path / "tool.py"
         if not source.is_file() or _sha256(source) != manifest.get("source_sha256"):
             raise AssetError("Tool source hash mismatch")
-        if runtime:
+        if is_package:
             records = manifest.get("bundle_files")
             if isinstance(records, list):
                 digest = hashlib.sha256()
@@ -422,7 +448,22 @@ class CapabilityLibrary:
         inspected = self.inspect(tool_id)
         manifest = inspected["manifest"]
         _validate(dict(payload), manifest["input_schema"], "Tool input")
-        result = self.runtime.execute(self._path(tool_id), dict(payload))
+        legacy_requirements = list((manifest.get("dependencies") or {}).get(
+            "runtime_requirements") or [])
+        if legacy_requirements and manifest.get("runtime_environment") is None:
+            raise AssetError(
+                "legacy runtime requirements require a sealed wheel runtime spec")
+        runtime_python = None
+        environment_spec = manifest.get("runtime_environment")
+        if environment_spec is not None:
+            if self.runtime_environments is None:
+                raise AssetError("Runtime Environment manager is unavailable")
+            try:
+                runtime_python = self.runtime_environments.ensure(environment_spec).python
+            except RuntimeEnvironmentError as exc:
+                raise AssetError(str(exc)) from exc
+        result = self.runtime.execute(self._path(tool_id), dict(payload),
+                                      python=runtime_python)
         _validate(result, manifest["output_schema"], "Tool output")
         return result
 
@@ -492,7 +533,8 @@ class CapabilityLibrary:
 
     def list_summaries(self):
         return [{key: row.get(key) for key in ("tool_id", "name", "version", "description",
-            "input_schema", "output_schema", "status", "runtime_spec", "dependencies")}
+            "input_schema", "output_schema", "status", "runtime_spec",
+            "runtime_environment", "dependencies")}
             for row in self.list_all()]
 
     def search(self, query: str, limit: int = 8, statuses: set[str] | None = None):

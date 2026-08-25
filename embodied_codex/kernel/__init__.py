@@ -6,6 +6,8 @@ from .assets import AssetRegistry
 from .context import ContextBuilder, MinimalSystemPrompt
 from .context_window import ContextWindowManager
 from .events import EventStore
+from .runtime_environment import (RuntimeEnvironment, RuntimeEnvironmentError,
+                                  RuntimeEnvironmentManager)
 from .workspace import PersistentWorkspace
 from .tools import ToolRegistry
 from .sandbox import (SandboxBackend, PosixSandboxBackend, BubblewrapBackend,
@@ -23,6 +25,9 @@ __all__ = [
     "ContextBuilder",
     "ContextWindowManager",
     "EventStore",
+    "RuntimeEnvironment",
+    "RuntimeEnvironmentError",
+    "RuntimeEnvironmentManager",
     "MinimalSystemPrompt",
     "PersistentWorkspace",
     "BubblewrapBackend",

@@ -103,7 +103,8 @@ class ToolRuntime:
             result.pop("NVIDIA_VISIBLE_DEVICES",None)
         return result
 
-    def execute(self, tool_dir: str|Path, payload: Mapping[str,Any]):
+    def execute(self, tool_dir: str|Path, payload: Mapping[str,Any], *,
+                python: str | Path | None = None):
         directory=Path(tool_dir).resolve()
         manifest_path=directory/"manifest.json"
         manifest=json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
@@ -118,11 +119,12 @@ class ToolRuntime:
         bindings:set[Path]=set();rewritten=self._rewrite_payload(dict(payload),bindings)
         timeout=min(max(float(runtime_spec.get("timeout_seconds",
             self.timeout_seconds)),0.1),600)
-        completed=self.sandbox.run([self.python,"-u","-I","-c",_CHILD,
+        runtime_python = str(python or self.python)
+        completed=self.sandbox.run([runtime_python,"-u","-I","-c",_CHILD,
             str(entrypoint),str(manifest_path)],cwd=directory,
             input_text=json.dumps(rewritten),
             env=self._safe_environment(str(runtime_spec.get("accelerator") or "cpu")),
-            read_only_paths=[directory,*bindings,Path(self.python).resolve().parents[1]],
+            read_only_paths=[directory,*bindings,Path(runtime_python).resolve().parents[1]],
             timeout_seconds=timeout)
         if completed.timed_out:
             raise ToolRuntimeError("Tool execution timed out")

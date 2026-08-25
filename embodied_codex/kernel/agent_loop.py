@@ -194,6 +194,34 @@ class AgentLoop:
         test_case_schema = {"type": "object", "properties": {
             "input": {"type": "object"}, "expected": {}},
             "required": ["input", "expected"], "additionalProperties": False}
+        python_runtime_schema = {"type": "object", "properties": {
+            "implementation": string, "version": string, "abi": string},
+            "required": ["implementation", "version", "abi"],
+            "additionalProperties": False}
+        platform_runtime_schema = {"type": "object", "properties": {
+            "system": string, "machine": string},
+            "required": ["system", "machine"], "additionalProperties": False}
+        wheel_artifact_schema = {"type": "object", "properties": {
+            "path": string, "filename": {"type": "string", "pattern": "^[^/\\\\]+\\.whl$"},
+            "kind": {"type": "string", "enum": ["wheel"]},
+            "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}},
+            "required": ["path", "filename", "kind", "sha256"],
+            "additionalProperties": False}
+        runtime_dependency_schema = {"type": "object", "properties": {
+            "name": string, "version": string, "artifact": wheel_artifact_schema},
+            "required": ["name", "version", "artifact"],
+            "additionalProperties": False}
+        cuda_runtime_schema = {"type": "object", "properties": {
+            "toolkit": string, "minimum_driver": string},
+            "required": ["toolkit", "minimum_driver"],
+            "additionalProperties": False}
+        runtime_environment_schema = {"type": "object", "properties": {
+            "python": python_runtime_schema,
+            "dependencies": {"type": "array", "items": runtime_dependency_schema},
+            "accelerator": {"type": "string", "enum": ["cpu", "cuda"]},
+            "platform": platform_runtime_schema, "cuda": cuda_runtime_schema},
+            "required": ["python", "dependencies", "accelerator", "platform"],
+            "additionalProperties": False}
         registry.add("list_files", "List files in the persistent workspace.", self._schema({"pattern": string}),
                      lambda pattern="**/*": ws.list_files(pattern))
         registry.add("read_file", "Read a bounded line range from a workspace file.", self._schema(
@@ -222,14 +250,14 @@ class AgentLoop:
         tool_schema = self._schema({"name": string, "source_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
             "source_urls": {"type": "array", "items": string},
-            "runtime_requirements": {"type": "array", "items": {
-                "type": "string", "pattern": "^[A-Za-z0-9_.-]+==[^\\s=]+$"}},
+            "runtime_spec": runtime_environment_schema,
             "manual": manual_schema}, ["name", "source_path", "description", "input_schema", "output_schema"])
         package_spec_schema = {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["algorithm", "perception", "planner", "policy", "model"]},
             "entrypoint": string, "accelerator": {"type": "string", "enum": ["cpu", "cuda"]},
             "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600},
             "runtime_requirements": {"type": "array", "items": string},
+            "runtime": runtime_environment_schema,
             "checkpoint_sha256": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}}},
             "required": ["kind", "entrypoint"], "additionalProperties": False}
         package_schema = self._schema({"name": string, "bundle_path": string, "description": string,

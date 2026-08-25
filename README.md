@@ -60,6 +60,14 @@ Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` �
 `validate_execution_receipt`、`register_capability` 和 `close`，详见
 [`docs/adapter_authoring.md`](docs/adapter_authoring.md)。
 
+Tool 的可选运行环境使用普通用户可创建的 Python `venv`。runtime spec 必须固定当前
+Python implementation/version/ABI、平台、CPU（或宿主机兼容的 CUDA）以及每个依赖的
+wheel 文件名、精确版本和 SHA256；wheel 先进入已校验的本地 CAS，再使用 `pip --no-index`
+离线构建不可变 venv。未固定版本、缺少 wheel、SHA256 不匹配或需要 source build、root、
+系统包、ROS、宿主机 socket、驱动或后台服务的 runtime 会 fail closed，并应改由
+Adapter-owned deployment capability 提供。相同 runtime spec 的 Tool 共享同一个 runtime
+ID，Tool 执行使用该 venv 的 Python，Harness Python 环境不会被安装过程修改。
+
 ## 安全与稳定性
 
 默认 `auto` sandbox 先探测 rootless `posix-hardened`（Landlock + no_new_privs + seccomp +

@@ -237,6 +237,8 @@ def doctor_command(args) -> int:
             except Exception as exc: checks["adapter_close"] = f"unavailable: {type(exc).__name__}: {exc}"
     try:
         from .tool_runtime import ToolRuntime
+        from .kernel.cas import ContentAddressedStore
+        from .kernel.runtime_environment import RuntimeEnvironmentManager
         with tempfile.TemporaryDirectory(prefix="roboforge-doctor-") as temporary:
             bundle = Path(temporary)
             (bundle / "tool.py").write_text("def run(payload):\n    return {'echo': payload['value']}\n")
@@ -246,9 +248,19 @@ def doctor_command(args) -> int:
                 "output_schema": {"type": "object", "properties": {"echo": {"type": "integer"}},
                                    "required": ["echo"], "additionalProperties": False},
             }))
-            result = ToolRuntime(python=sys.executable, sandbox=sandbox).execute(bundle, {"value": 7})
+            cas = ContentAddressedStore(bundle / "cas")
+            runtime_manager = RuntimeEnvironmentManager(bundle / "runtimes", cas=cas,
+                python=sys.executable, sandbox=sandbox)
+            sealed = runtime_manager.seal(runtime_manager.default_spec(),
+                                          workspace_root=bundle)
+            environment = runtime_manager.ensure(sealed)
+            result = ToolRuntime(python=sys.executable, sandbox=sandbox).execute(
+                bundle, {"value": 7}, python=environment.python)
             if result == {"echo": 7}:
-                checks["tool_runtime"] = "available"
+                checks["tool_runtime"] = {"status": "available",
+                    "runtime_id": environment.runtime_id,
+                    "isolated_python": str(environment.python),
+                    "reused": environment.reused}
             else:
                 checks["tool_runtime"] = "unavailable: unexpected Tool result"
     except Exception as exc:
@@ -301,7 +313,9 @@ def doctor_command(args) -> int:
                          and checks.get("adapter_smoke") == "available"
                          and checks.get("controller_runtime") == "available"
                          and checks.get("command_smoke") == "available"
-                         and checks.get("tool_runtime") == "available"
+                         and (checks.get("tool_runtime") == "available"
+                              or (isinstance(checks.get("tool_runtime"), dict)
+                                  and checks["tool_runtime"].get("status") == "available"))
                          and checks.get("model") == "available"
                          and all(value == "available" for value in checks["dependencies"].values())
                          and (not args.checkpoint or checks["checkpoint"]["available"] is True))
