@@ -27,29 +27,29 @@ Harness 不使用固定 Graph、Stage Node 或抓取模板。Controller 可以�
 
 ## 2. 分层架构
 
-### 2.1 Evolution Engine
+### 2.1 Kernel Agent Loop
 
-`evolution.py` 管理实验生命周期，而不替 LLM 决定机器人策略：
+`kernel/agent_loop.py` 管理一次有界 session，而不替 LLM 决定机器人策略：
 
 - 持久 workspace 与 iteration；
 - 每轮最多一个真实 robot episode；
 - episode 先事务提交，再允许模型后处理；
 - 中断后从最后一份不可变证据恢复；
 - 资产 Top-K 检索；
-- 同一 Controller hash 的跨 case gate；
-- sensor success 后冻结 Skill；
-- sealed evaluator 不进入进化循环。
+- 跨 case 编排由可选的通用 `CampaignRunner` 负责；
+- Skill 保存通过显式资产工具完成；
+- sealed evaluator 只由 `evaluation/` 外部 policy 调用。
 
-Task Model/critic 是可选审计器，不是 canonical 阻塞门。主 LLM 直接获得完整任务语言和
-SDK 合同，自主决定前置阶段，例如是否必须先开抽屉。
+主 LLM 直接获得完整任务语言和 SDK 合同，自主决定前置阶段，例如是否必须先开抽屉。
 
 ### 2.2 Coding Agent
 
-`agent.py` 把 system prompt、当前任务 JSON 和工程函数 schema 发送给 GPT‑5.6。
+`kernel/agent_loop.py` 把最小 system prompt、当前任务 JSON 和正式 function-call schema
+发送给模型。
 模型返回 tool calls，Harness 执行后把结构化结果送回模型。
 
 工作记忆采用可重载压缩：图片在模型看过一次后保留路径/哈希而移除 base64；每次 Robot
-RPC 都有稳定 `event_index`，模型先读紧凑执行摘要，再用 `inspect_execution_event` 只展开
+RPC 都有稳定事件摘要，模型先读紧凑执行摘要，再用 `inspect_execution` 只展开
 相关事件；大候选数组保留数量与有界 head，完整内容仍在不可变 artifact 中。每次请求记录：
 
 - system prompt SHA256；
@@ -63,7 +63,7 @@ RPC 都有稳定 `event_index`，模型先读紧凑执行摘要，再用 `inspec
 
 ### 2.3 Engineering Surface
 
-`engineering.py` 是 LLM 的工程操作面：
+`kernel/agent_loop.py` 注册的通用 function tools 是 LLM 的工程操作面：
 
 - workspace：list/read/write/replace/run command；
 - evidence：读取分页日志、提取视频关键帧、查看传感器图片；
@@ -72,12 +72,12 @@ RPC 都有稳定 `event_index`，模型先读紧凑执行摘要，再用 `inspec
 - robot：静态 preflight 后运行一个完整 Controller。
 
 Tool 默认以 dedicated manual + JSON Schema 为调用依据。确定性 Tool 注册只要求实现、
-schema 和从 `list_research_sources` 复制的已授权 URL；Harness 自动生成 schema 一致的
-基础 manual、stdlib 依赖记录和非学习 provenance。学习模型则必须走 Capability Package
-并保留完整模型 provenance。`read_tool_source` 是独立、
+schema 和显式声明的公开来源 URL；Harness 自动生成 schema 一致的
+基础 manual、依赖记录和来源 provenance。需要额外依赖的模型则必须走 Capability Package
+并保留完整模型 provenance。`load_tool_source` 是独立、
 分页的异常路径；manual 与证据冲突时才能用于定位实现，并通过证据发布新 manual revision。
-资产检索由服务端限制为每类 Top-20；模型不能用大 limit 枚举资产库。Gap 更新使用
-`revise_capability_gap` 只提交变化字段，避免重复整份结构。`latest_robot_execution`、
+资产检索由服务端返回有界摘要；模型不能用大 limit 枚举资产库。Gap 由 `record_gap` 保存
+结构化失败记录。`latest_evidence`、
 `executed_controller`、传感器文件和 hash-validated Tool manifest 都能作为正式证据引用。
 
 ### 2.4 Controller Runtime 与 Robot Adapter
