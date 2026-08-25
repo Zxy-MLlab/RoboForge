@@ -1,13 +1,12 @@
-"""Canonical end-to-end Embodied Codex entry point for LIBERO.
+"""Canonical end-to-end LIBERO campaign for the free-coding Embodied Codex.
 
-One command owns the public workflow: autonomous sensor-only development,
-capability acquisition, frozen Task Skill creation, deterministic unseen-state
-validation, and post-batch sealed scoring.  Evaluator results are never passed
-back into development or used to modify a Skill.
+It freezes a sensor-developed Skill first, then runs all predeclared unseen
+episodes behind one sealed evaluator barrier.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,189 +14,351 @@ import subprocess
 import sys
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-PYTHON = "/data/zxy/envs/vla-report/bin/python"
+
+ROOT=Path(__file__).resolve().parents[1]
+PYTHON=sys.executable
 
 
-def _task_list(value: str) -> list[int]:
-    tasks: list[int] = []
+def _task_list(value: str)->list[int]:
+    tasks=[]
     for token in value.split(","):
-        token = token.strip()
-        if not token:
-            continue
+        token=token.strip()
+        if not token:continue
         if "-" in token:
-            start, end = (int(item) for item in token.split("-", 1))
-            tasks.extend(range(start, end + 1))
-        else:
-            tasks.append(int(token))
-    tasks = list(dict.fromkeys(tasks))
-    if not tasks or any(task < 0 or task > 9 for task in tasks):
-        raise argparse.ArgumentTypeError("tasks must be LIBERO-Spatial selectors 0..9")
+            start,end=(int(item) for item in token.split("-",1));tasks.extend(range(start,end+1))
+        else:tasks.append(int(token))
+    tasks=list(dict.fromkeys(tasks))
+    if not tasks or any(task<0 or task>9 for task in tasks):
+        raise argparse.ArgumentTypeError("tasks must be LIBERO task selectors 0..9")
     return tasks
 
 
-def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
+def _write_json(path: Path,value: Any):
+    path.parent.mkdir(parents=True,exist_ok=True);temporary=path.with_suffix(path.suffix+".tmp")
+    temporary.write_text(json.dumps(value,indent=2)+"\n");temporary.replace(path)
 
 
-def development_command(
-    *, task: int, state: int, seed: int, max_rounds: int,
-    max_turns_per_round: int, max_turns_acquisition: int,
-    acquisition_after_same_failure: int, output: Path,
-    controllers: Path, stage_nodes: Path, capabilities: Path, task_skills: Path,
-    force_acquisition: bool,
-) -> list[str]:
-    command = [
-        PYTHON, str(ROOT / "evaluation" / "run_autonomous_evolution.py"),
-        "--task", str(task), "--state", str(state), "--seed", str(seed),
-        "--max-rounds", str(max_rounds),
-        "--max-turns-per-round", str(max_turns_per_round),
-        "--max-turns-acquisition", str(max_turns_acquisition),
-        "--acquisition-after-same-failure", str(acquisition_after_same_failure),
-        "--output", str(output),
-        "--controller-workspace", str(controllers),
-        "--controller-interface", "graph",
-        "--stage-node-workspace", str(stage_nodes),
-        "--capability-workspace", str(capabilities),
-        "--task-skill-workspace", str(task_skills),
-    ]
-    if force_acquisition:
-        command.append("--force-acquisition-next-round")
+def _file_sha256(path: str|Path):
+    digest=hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b""):digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _prepare_campaign_root(output: Path)->bool:
+    """Create the root while remembering whether user content pre-existed.
+
+    The launcher itself creates the shared asset directory before writing the
+    campaign manifest.  New-run validation must therefore use the directory
+    state from before those Harness-owned paths are created.
+    """
+    preexisting_nonempty=output.exists() and any(output.iterdir())
+    output.mkdir(parents=True,exist_ok=True)
+    return preexisting_nonempty
+
+
+def _resolve_campaign_capability_library(*, output: Path,
+                                         requested: Path|None)->Path:
+    """Keep resumed tasks bound to the capability library they were born with.
+
+    Early campaign versions did not persist this root in ``campaign.json``.
+    Their per-task immutable Harness configuration did, however.  Falling back
+    to ``output/assets/tools`` on resume silently supplied a different library
+    and made every otherwise-valid task fail before coding could resume.
+    """
+    if requested is not None:return requested.resolve()
+    campaign_path=output/"campaign.json"
+    if campaign_path.is_file():
+        campaign=json.loads(campaign_path.read_text())
+        declared=campaign.get("capability_library")
+        if declared:return Path(str(declared)).resolve()
+        roots=set()
+        for path in output.glob("task_*/development/harness_configuration.json"):
+            try:configuration=json.loads(path.read_text())
+            except (OSError,json.JSONDecodeError):continue
+            root=configuration.get("capability_root")
+            if root:roots.add(str(Path(str(root)).resolve()))
+        if len(roots)>1:
+            raise RuntimeError(
+                "resumed campaign tasks reference multiple capability libraries")
+        if roots:return Path(next(iter(roots)))
+    return (output/"assets"/"tools").resolve()
+
+
+def _ranked_states(*,task: int,anchor: int,state_count: int,seed: int):
+    if anchor<0 or anchor>=state_count:raise ValueError("development state outside state range")
+    candidates=[state for state in range(state_count) if state!=anchor]
+    return sorted(candidates,key=lambda state:hashlib.sha256(
+        f"embodied-codex-case-partition-v1:{seed}:{task}:{state}".encode()).hexdigest())
+
+
+def _predeclared_partition(*,task: int,development_state: int,
+                           development_count: int,sealed_count: int,
+                           state_count: int,seed: int):
+    ranked=_ranked_states(task=task,anchor=development_state,state_count=state_count,seed=seed)
+    if development_count<1 or sealed_count<1 or development_count+sealed_count>state_count:
+        raise ValueError("invalid development/sealed state counts")
+    development=[development_state,*ranked[:development_count-1]]
+    sealed=ranked[development_count-1:development_count-1+sealed_count]
+    return {"development":development,"sealed":sealed}
+
+
+def _predeclared_states(*, task: int, development_state: int, count: int,
+                        state_count: int, seed: int):
+    """Backward-compatible sealed-only helper used by external callers."""
+    candidates=[state for state in range(state_count) if state!=development_state]
+    ranked=sorted(candidates,key=lambda state:hashlib.sha256(
+        f"embodied-codex-sealed-v1:{seed}:{task}:{state}".encode()).hexdigest())
+    if count<1 or count>len(ranked):raise ValueError("invalid unseen state count")
+    return ranked[:count]
+
+
+def development_command(*, task: int,states: list[int],max_iterations: int,output: Path,
+                        capabilities: Path,model: str,reasoning_effort: str,device: str,
+                        python: str,groundingdino_checkpoint: str,base_url: str,
+                        retry_locked_validation: bool=False,
+                        verifier_reasoning_effort: str="low"):
+    command=([python,"-m","embodied_codex.examples.run_libero",
+        "--run-dir",str(output),"--suite","libero_spatial","--task",str(task),
+        "--states",*[str(state) for state in states],"--max-iterations",str(max_iterations),
+        "--capability-library",str(capabilities),"--model",model,
+        "--reasoning-effort",reasoning_effort,
+        "--verifier-reasoning-effort",verifier_reasoning_effort,"--device",device]
+        +["--groundingdino-checkpoint",groundingdino_checkpoint,"--python",python,
+          "--base-url",base_url])
+    if retry_locked_validation:command.append("--retry-locked-validation")
     return command
 
 
-def validation_command(
-    *, skill_id: str, task: int, count: int, seed: int,
-    task_skills: Path, output: Path,
-) -> list[str]:
-    return [
-        PYTHON, str(ROOT / "evaluation" / "run_task_skill_validation.py"),
-        "--skill-workspace", str(task_skills), "--skill-id", skill_id,
-        "--suite", "libero_spatial", "--task", str(task),
-        "--count", str(count), "--seed", str(seed), "--output", str(output),
-    ]
+def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output: Path,
+                       model: str,reasoning_effort: str,device: str,python: str,
+                       groundingdino_checkpoint: str,base_url: str):
+    return ([python,"-m","embodied_codex.examples.evaluate_libero_skill_sealed",
+        "--skill-dir",str(skill_dir),"--output-dir",str(output),
+        "--suite","libero_spatial","--task",str(task),"--states",
+        *[str(state) for state in states],"--model",model,
+        "--reasoning-effort",reasoning_effort,"--device",device,
+        "--groundingdino-checkpoint",groundingdino_checkpoint,"--python",python]
+        +["--base-url",base_url])
 
 
-def _development_status(task_dir: Path) -> dict[str, Any]:
-    report_path = task_dir / "development" / "report.json"
-    state_path = task_dir / "development" / "evolution_state.json"
-    report = json.loads(report_path.read_text()) if report_path.is_file() else {}
-    state = json.loads(state_path.read_text()) if state_path.is_file() else {}
-    return {
-        "status": report.get("status") or state.get("status") or "process_failed",
-        "rounds": len((report or state).get("rounds") or []),
-        "authoring_failures": len((report or state).get("authoring_failures") or []),
-        "task_skill_candidate": report.get("task_skill_candidate"),
-        "last_sensor_evidence": (
-            ((report or state).get("rounds") or [{}])[-1].get("sensor_evidence") or {}
-        ),
-    }
+def _development_status(root: Path):
+    path=root/"state.json";state=json.loads(path.read_text()) if path.is_file() else {}
+    return {"status":state.get("status") or "process_failed",
+            "iterations":len(state.get("iterations") or []),"skill":state.get("skill")}
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--tasks", type=_task_list, default=[4])
-    parser.add_argument("--development-state", type=int, default=23)
-    parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--max-rounds", type=int, default=24)
-    parser.add_argument("--max-turns-per-round", type=int, default=22)
-    parser.add_argument("--max-turns-acquisition", type=int, default=24)
-    parser.add_argument("--acquisition-after-same-failure", type=int, default=2)
-    parser.add_argument("--unseen-state-count", type=int, default=3)
-    parser.add_argument("--force-acquisition-next-round", action="store_true")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--capability-workspace", type=Path,
-        default=ROOT / "capability_library" / "acquired_tools",
-    )
-    parser.add_argument(
-        "--task-skill-workspace", type=Path,
-        default=ROOT / "capability_library" / "task_skills",
-    )
-    args = parser.parse_args()
-    if not os.environ.get("APEX_API_KEY"):
-        raise OSError("APEX_API_KEY is required for autonomous development")
-    if args.unseen_state_count < 3:
-        raise ValueError("at least three unseen states are required")
-    args.output.mkdir(parents=True, exist_ok=True)
-    args.capability_workspace.mkdir(parents=True, exist_ok=True)
-    args.task_skill_workspace.mkdir(parents=True, exist_ok=True)
+def _resolve_packaging_skill(skill_dir: str|Path):
+    """Resolve the newest audited repackage of one immutable Controller."""
+    source=Path(skill_dir).resolve();manifest_path=source/"manifest.json"
+    if not manifest_path.is_file():raise FileNotFoundError(f"Skill manifest: {manifest_path}")
+    original=json.loads(manifest_path.read_text())
+    candidates=[]
+    for path in source.parent.glob("v*/manifest.json"):
+        item=json.loads(path.read_text());migration=dict(item.get("packaging_migration") or {})
+        if (migration.get("source_skill_id")==original.get("skill_id")
+                and migration.get("controller_sha256_unchanged") is True
+                and item.get("controller_sha256")==original.get("controller_sha256")):
+            candidates.append((int(item.get("version",0)),path.parent,item))
+    if not candidates:return source,original
+    _version,resolved,manifest=max(candidates,key=lambda row:row[0])
+    return resolved,manifest
 
-    campaign = {
-        "protocol": "embodied-codex-libero-campaign-v1",
-        "model": "gpt-5.6-sol",
-        "suite": "libero_spatial",
-        "tasks": args.tasks,
-        "development_state": args.development_state,
-        "seed": args.seed,
-        "agent_owns_controller_code": True,
-        "generic_capability_acquisition": True,
-        "evaluator_results_consumed_for_iteration": False,
-        "task_results": [],
-    }
-    _write_json(args.output / "campaign.json", campaign)
 
+def _campaign_exit_code(campaign: dict):
+    infrastructure=[]
+    incomplete=[]
+    for row in campaign.get("task_results") or []:
+        if row.get("development_returncode") not in {0,2,None}:
+            infrastructure.append({"task":row.get("task"),"phase":"development",
+                                   "returncode":row.get("development_returncode")})
+        if row.get("sealed_returncode") not in {0,2,None}:
+            infrastructure.append({"task":row.get("task"),"phase":"sealed",
+                                   "returncode":row.get("sealed_returncode")})
+        sealed=row.get("sealed_evaluation") or {}
+        if (row.get("status")!="sensor_success" or not sealed
+                or sealed.get("evaluator_successes")!=sealed.get("episodes")):
+            incomplete.append(row.get("task"))
+    campaign["infrastructure_failures"]=infrastructure
+    campaign["capability_incomplete_tasks"]=incomplete
+    if infrastructure:return 1
+    return 2 if incomplete else 0
+
+
+def _development_must_halt(returncode: int)->bool:
+    """Only learned (0) and exhausted-frontier (2) runs may advance a campaign."""
+    return int(returncode) not in {0,2}
+
+
+def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--tasks",type=_task_list,default=[0])
+    parser.add_argument("--development-state",type=int,default=0)
+    parser.add_argument("--development-state-count",type=int,default=3)
+    parser.add_argument("--max-iterations",type=int,default=16)
+    parser.add_argument("--unseen-state-count",type=int,default=3)
+    parser.add_argument("--state-count",type=int,default=50)
+    parser.add_argument("--seed",type=int,default=2909)
+    parser.add_argument("--model",default="gpt-5.6-sol")
+    parser.add_argument("--reasoning-effort",default="high")
+    parser.add_argument("--verifier-reasoning-effort",default=os.environ.get(
+        "EMBODIED_CODEX_VERIFIER_REASONING_EFFORT","low"))
+    parser.add_argument("--base-url",default=os.environ.get(
+        "EMBODIED_CODEX_BASE_URL","https://api.apexin.ai/v1"))
+    parser.add_argument("--device",default="cuda")
+    parser.add_argument("--python",default=sys.executable)
+    parser.add_argument("--groundingdino-checkpoint",default=os.environ.get(
+        "EMBODIED_CODEX_GROUNDINGDINO_CHECKPOINT","checkpoints/groundingdino_swint_ogc.pth"))
+    parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--capability-library",type=Path)
+    parser.add_argument("--retry-locked-validation",action="store_true",
+        help="Replay the current immutable Controller once after a verifier/Adapter correction")
+    args=parser.parse_args()
+    if not any(os.environ.get(name) for name in
+               ("EMBODIED_CODEX_API_KEY","OPENAI_API_KEY","APEX_API_KEY")):
+        raise OSError("set EMBODIED_CODEX_API_KEY, OPENAI_API_KEY, or APEX_API_KEY")
+    if not Path(args.python).is_file():raise FileNotFoundError(f"Python executable: {args.python}")
+    if not Path(args.groundingdino_checkpoint).is_file():
+        raise FileNotFoundError("GroundingDINO checkpoint; pass --groundingdino-checkpoint "
+            "or EMBODIED_CODEX_GROUNDINGDINO_CHECKPOINT")
+    output=args.output.resolve()
+    preexisting_nonempty=_prepare_campaign_root(output)
+    capabilities=_resolve_campaign_capability_library(
+        output=output,requested=args.capability_library)
+    capabilities.mkdir(parents=True,exist_ok=True)
+    partitions={task:_predeclared_partition(task=task,
+        development_state=args.development_state,
+        development_count=args.development_state_count,sealed_count=args.unseen_state_count,
+        state_count=args.state_count,seed=args.seed)
+        for task in args.tasks}
+    development_plans={task:value["development"] for task,value in partitions.items()}
+    plans={task:value["sealed"] for task,value in partitions.items()}
+    expected={"protocol":"embodied-codex-libero-campaign-v3",
+        "kernel":"embodied_codex.EvolutionEngine","historical_graph_harness_used":False,
+        "model":args.model,"base_url":args.base_url,"suite":"libero_spatial","tasks":args.tasks,
+        "coding_agent_reasoning_effort":args.reasoning_effort,
+        "outcome_verifier_reasoning_effort":args.verifier_reasoning_effort,
+        "groundingdino_checkpoint_sha256":_file_sha256(args.groundingdino_checkpoint),
+        "development_state":args.development_state,"sealed_states_predeclared":plans,
+        "development_states_predeclared":development_plans,
+        "sealed_results_consumed_for_iteration":False}
+    campaign_path=output/"campaign.json"
+    if campaign_path.is_file():
+        campaign=json.loads(campaign_path.read_text())
+        for key,value in expected.items():
+            if key not in campaign and key in {
+                    "coding_agent_reasoning_effort",
+                    "outcome_verifier_reasoning_effort"}:
+                campaign[key]=value
+                campaign.setdefault("configuration_migrations",[]).append({
+                    "kind":"bind_model_role_configuration_v1",
+                    "field":key,"value":value})
+                continue
+            # JSON object keys turn integer task IDs into strings on disk.
+            actual=campaign.get(key)
+            if key in {"sealed_states_predeclared","development_states_predeclared"}:
+                actual={int(k):v for k,v in (actual or {}).items()}
+            if actual!=value:raise RuntimeError(f"resumed campaign mismatch: {key}")
+        declared=campaign.get("capability_library")
+        if (declared is not None
+                and Path(str(declared)).resolve()!=capabilities.resolve()):
+            raise RuntimeError("resumed campaign capability library mismatch")
+        if declared is None:
+            campaign["capability_library"]=str(capabilities)
+            campaign.setdefault("configuration_migrations",[]).append({
+                "kind":"recover_capability_library_from_task_configuration",
+                "value":str(capabilities)})
+        campaign["resumed"]=True
+    elif preexisting_nonempty:
+        raise FileExistsError(f"nonempty output is not a resumable campaign: {output}")
+    else:campaign={**expected,"capability_library":str(capabilities),
+                   "task_results":[],"resumed":False}
+    _write_json(output/"campaign.json",campaign)
     for task in args.tasks:
-        task_dir = args.output / f"task_{task:02d}"
-        development = task_dir / "development"
-        controllers = task_dir / "controllers"
-        stage_nodes = task_dir / "stage_nodes"
-        command = development_command(
-            task=task, state=args.development_state, seed=args.seed,
-            max_rounds=args.max_rounds,
-            max_turns_per_round=args.max_turns_per_round,
-            max_turns_acquisition=args.max_turns_acquisition,
-            acquisition_after_same_failure=args.acquisition_after_same_failure,
-            output=development, controllers=controllers, stage_nodes=stage_nodes,
-            capabilities=args.capability_workspace,
-            task_skills=args.task_skill_workspace,
-            force_acquisition=args.force_acquisition_next_round,
-        )
-        completed = subprocess.run(command, cwd=ROOT, env=os.environ.copy())
-        status = _development_status(task_dir)
-        task_result: dict[str, Any] = {
-            "task": task, "development_process_returncode": completed.returncode,
-            **status,
-        }
-        candidate = status.get("task_skill_candidate") or {}
-        if status["status"] == "sensor_success" and candidate.get("skill_id"):
-            validation_output = task_dir / "unseen_validation"
-            if not (validation_output / "summary.json").is_file():
-                validated = subprocess.run(validation_command(
-                    skill_id=str(candidate["skill_id"]), task=task,
-                    count=args.unseen_state_count, seed=args.seed,
-                    task_skills=args.task_skill_workspace,
-                    output=validation_output,
-                ), cwd=ROOT, env=os.environ.copy())
-                task_result["validation_process_returncode"] = validated.returncode
-            summary_path = validation_output / "summary.json"
-            if summary_path.is_file():
-                task_result["unseen_validation"] = json.loads(summary_path.read_text())
+        task_root=output/f"task_{task:02d}";development=task_root/"development"
+        status=_development_status(development)
+        frontier_path=task_root/"frontier_failure.json"
+        if status["status"]!="sensor_success":
+            # A prior process failure or a deliberately resumed frontier must
+            # not leave a stale terminal marker while this task is active.
+            frontier_path.unlink(missing_ok=True)
+            command=development_command(task=task,states=development_plans[task],
+                max_iterations=args.max_iterations,output=development,capabilities=capabilities,
+                model=args.model,reasoning_effort=args.reasoning_effort,device=args.device,
+                python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
+                base_url=args.base_url,
+                retry_locked_validation=args.retry_locked_validation,
+                verifier_reasoning_effort=args.verifier_reasoning_effort)
+            completed=subprocess.run(command,cwd=ROOT,env=os.environ.copy())
+            status=_development_status(development);development_returncode=completed.returncode
         else:
-            frontier = {
-                "task": task,
-                "development_status": status["status"],
-                "rounds": status["rounds"],
-                "last_sensor_evidence": status["last_sensor_evidence"],
-                "evaluator_used": False,
-            }
-            _write_json(task_dir / "frontier_failure.json", frontier)
-        campaign["task_results"].append(task_result)
-        _write_json(args.output / "campaign.json", campaign)
+            development_returncode=0
+            frontier_path.unlink(missing_ok=True)
+        row={"task":task,"development_returncode":development_returncode,**status}
+        if _development_must_halt(development_returncode):
+            row["development_error"]=(
+                "development process failed before a valid learned/frontier terminal state; "
+                "campaign halted and this task remains resumable")
+            campaign["task_results"]=[item for item in campaign["task_results"]
+                                      if item.get("task")!=task]
+            campaign["task_results"].append(row)
+            campaign["task_results"].sort(key=lambda item:item["task"])
+            campaign["halted_on_task"]=task
+            campaign["halt_reason"]="development_infrastructure_failure"
+            campaign["development_sensor_successes"]=sum(
+                item["status"]=="sensor_success" for item in campaign["task_results"])
+            campaign["sealed_evaluator_successes"]=sum(
+                (item.get("sealed_evaluation") or {}).get("evaluator_successes",0)
+                for item in campaign["task_results"])
+            _campaign_exit_code(campaign)
+            _write_json(output/"campaign.json",campaign)
+            _write_json(output/"summary.json",campaign)
+            print(json.dumps(campaign,indent=2))
+            return 1
+        skill=status.get("skill") or {};skill_dir=skill.get("path")
+        if status["status"]=="sensor_success" and skill_dir:
+            skill_dir,evaluated_skill=_resolve_packaging_skill(skill_dir)
+            row["evaluated_skill"]={"skill_id":evaluated_skill.get("skill_id"),
+                                    "path":str(skill_dir)}
+            sealed=task_root/"sealed_evaluation"
+            if (sealed/"summary.json").is_file():
+                summary=json.loads((sealed/"summary.json").read_text())
+                if summary.get("skill_id")!=evaluated_skill.get("skill_id"):
+                    row["sealed_returncode"]=1
+                    row["sealed_error"]="sealed summary Skill id does not match resolved frozen Skill"
+                else:
+                    row["sealed_returncode"]=0
+                    row["sealed_evaluation"]=summary
+            elif sealed.exists() and any(sealed.iterdir()):
+                row["sealed_returncode"]=1
+                row["sealed_error"]="partial sealed batch cannot be resumed or exposed to evolution"
+            else:
+                evaluated=subprocess.run(validation_command(skill_dir=skill_dir,task=task,
+                    states=plans[task],output=sealed,model=args.model,
+                    reasoning_effort=args.reasoning_effort,device=args.device,
+                    python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
+                    base_url=args.base_url),
+                    cwd=ROOT,env=os.environ.copy())
+                row["sealed_returncode"]=evaluated.returncode
+                if (sealed/"summary.json").is_file():
+                    row["sealed_evaluation"]=json.loads((sealed/"summary.json").read_text())
+        else:
+            _write_json(frontier_path,{
+                "task":task,"development_status":status["status"],
+                "iterations":status["iterations"],"evaluator_used":False})
+        campaign["task_results"]=[item for item in campaign["task_results"]
+                                  if item.get("task")!=task]
+        campaign["task_results"].append(row)
+        campaign["task_results"].sort(key=lambda item:item["task"])
+        _write_json(output/"campaign.json",campaign)
+    campaign["development_sensor_successes"]=sum(
+        row["status"]=="sensor_success" for row in campaign["task_results"])
+    campaign["sealed_evaluator_successes"]=sum(
+        (row.get("sealed_evaluation") or {}).get("evaluator_successes",0)
+        for row in campaign["task_results"])
+    exit_code=_campaign_exit_code(campaign)
+    _write_json(output/"summary.json",campaign);print(json.dumps(campaign,indent=2))
+    return exit_code
 
-    campaign["tasks_with_development_sensor_success"] = sum(
-        item.get("status") == "sensor_success" for item in campaign["task_results"]
-    )
-    campaign["tasks_sensor_validated"] = sum(
-        (item.get("unseen_validation") or {}).get("skill_status") == "sensor_validated"
-        for item in campaign["task_results"]
-    )
-    _write_json(args.output / "summary.json", campaign)
-    print(json.dumps(campaign, indent=2))
 
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":raise SystemExit(main())

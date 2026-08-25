@@ -16,6 +16,7 @@ import uuid
 
 import cv2
 import numpy as np
+from jsonschema import Draft202012Validator, ValidationError
 
 from ..sdk_contract import validate_action,validate_verifier_request
 
@@ -63,11 +64,36 @@ class LiberoEpisode:
     suite: str; task_index: int; initial_state_index: int
     seed: int=7; image_size: int=256; horizon: int=1200
     config_path: str|None=None; warmup_steps: int=12
+    # Opaque Harness-owned identity.  The benchmark state index remains sealed
+    # deployment metadata and never becomes controller/model evidence.
+    case_handle: str|None=None
 
 
 class LiberoDeployment:
+    _OUTPUT_FIELDS={
+        "observe":{"frame_id","step","cameras","proprioception"},
+        "act":{"type","step","reached","eef_before","eef_after","gripper_qpos",
+               "target_xyz","target_quaternion_xyzw","final_position_error_m",
+               "final_orientation_error_rad"},
+        "use":{"tool_id","step","result"},"record":{"recorded"},
+        "verify":{"verified","reason","target_xy_error_m","vertical_offset_m",
+                  "source_vacated","nearest_source_detection_m","object_to_eef_distance_m",
+                  "gripper_width_m","retained_width","object_count","object","target",
+                  "eef_world_xyz","source_anchor_world_xyz","support_overlap_fraction",
+                  "object_coverage_fraction","target_coverage_fraction",
+                  "support_overlap_normalization","target_geometry_source",
+                  "minimum_support_overlap","support_gap_m","support_gap_range_m",
+                  "center_inside_target_bounds","criterion","target_count",
+                  "target_anchor_world_xyz","target_association_rank",
+                  "maximum_target_association_rank","support_height_source",
+                  "support_plane_height_m","target_surface_height_error_m",
+                  "maximum_target_surface_height_error_m",
+                  "selected_object_source_displacement_m","geometric_source_vacated",
+                  "source_transport_verified","source_vacancy_method"},
+    }
     def __init__(self, *, episode: LiberoEpisode, artifact_dir: str|Path,
                  capabilities: Mapping[str,Capability]|None=None,
+                 capability_contracts: Mapping[str,Mapping[str,Any]]|None=None,
                  verifiers: Mapping[str,Capability]|None=None,
                  outcome_verifier: Capability|None=None):
         if episode.config_path: os.environ["LIBERO_CONFIG_PATH"]=str(Path(episode.config_path).resolve())
@@ -85,10 +111,22 @@ class LiberoDeployment:
         self.env.seed(episode.seed);self.obs=self.env.reset()
         self.obs=self.env.set_init_state(states[episode.initial_state_index])
         self._instruction=str(task.language);self.capabilities=dict(capabilities or {})
+        self.capability_contracts={str(key):dict(value) for key,value in
+                                   (capability_contracts or {}).items()}
+        if set(self.capabilities)!=set(self.capability_contracts):
+            raise LiberoDeploymentError("every deployment Tool requires exactly one machine contract")
+        for tool_id,contract in self.capability_contracts.items():
+            try:
+                Draft202012Validator.check_schema(contract["input_schema"])
+                Draft202012Validator.check_schema(contract["output_schema"])
+            except Exception as exc:
+                raise LiberoDeploymentError(f"invalid deployment Tool contract {tool_id}: {exc}") from exc
         self.verifiers=dict(verifiers or {});self.references={};self.trace=[];self.video=[]
+        self.verified_attachments=set()
         self.step=0;self.frame=0;self.closed=False;self.last_verify=False
         self._controller_execution_sealed=False;self._evaluator_calls=0
         self.outcome_verifier=outcome_verifier;self._outcome_report=None
+        self._outcome_after=None
         # LIBERO init states can leave free objects several centimetres above
         # their support.  A generic no-motion settling period is part of the
         # deployment adapter, not learned task logic.  Reward/done/info remain
@@ -111,9 +149,15 @@ class LiberoDeployment:
     @property
     def instruction(self): return self._instruction
 
-    def register_capability(self,tool_id,function):
+    def register_capability(self,tool_id,function,contract):
         if tool_id in self.capabilities: raise LiberoDeploymentError("duplicate Tool")
+        value={key:dict(contract.get(key) or {}) for key in ("input_schema","output_schema")}
+        try:
+            for schema in value.values():Draft202012Validator.check_schema(schema)
+        except Exception as exc:
+            raise LiberoDeploymentError(f"invalid dynamic Tool contract {tool_id}: {exc}") from exc
         self.capabilities[str(tool_id)]=function
+        self.capability_contracts[str(tool_id)]=value
 
     def _proprio(self):
         return {key:np.asarray(self.obs[key]).tolist() for key in PROPRIO}
@@ -129,6 +173,23 @@ class LiberoDeployment:
         if method=="record":
             self.trace.append({"event":"controller_record","payload":arguments.get("event")});return {"recorded":True}
         raise LiberoDeploymentError(f"unsupported method: {method}")
+
+    def project_rpc_output(self,method,arguments,result):
+        """Positive projection of every Adapter response visible to Controller/GPT."""
+        if method not in self._OUTPUT_FIELDS or not isinstance(result,Mapping):
+            raise LiberoDeploymentError(f"invalid {method} Adapter output")
+        unknown=set(str(key) for key in result)-self._OUTPUT_FIELDS[method]
+        if unknown:raise LiberoDeploymentError(
+            f"undeclared {method} output fields: {sorted(unknown)}")
+        projected={str(key):value for key,value in result.items()
+                   if str(key) in self._OUTPUT_FIELDS[method]}
+        required={"observe":{"step"},"act":{"type","step","reached"},
+                  "use":{"tool_id","step","result"},"verify":{"verified"},
+                  "record":{"recorded"}}[method]
+        missing=required-set(projected)
+        if missing:raise LiberoDeploymentError(
+            f"missing {method} output fields: {sorted(missing)}")
+        return projected
 
     def _observe(self,channel,request):
         if channel=="proprioception":return {"step":self.step,"proprioception":self._proprio()}
@@ -164,12 +225,26 @@ class LiberoDeployment:
 
     def _capture_outcome_rgb(self, name):
         folder=self.artifact_dir/"outcome";folder.mkdir(parents=True,exist_ok=True)
-        rgb=np.ascontiguousarray(self.obs["agentview_image"][::-1])
-        path=folder/f"{name}_agentview_rgb.png"
-        cv2.imwrite(str(path),cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR))
+        external=np.ascontiguousarray(self.obs["agentview_image"][::-1])
+        wrist=np.ascontiguousarray(self.obs["robot0_eye_in_hand_image"][::-1])
+        if wrist.shape[:2]!=external.shape[:2]:
+            wrist=cv2.resize(wrist,(external.shape[1],external.shape[0]),
+                             interpolation=cv2.INTER_AREA)
+        # A single hashed montage keeps the VLM API contract compact while
+        # adding the wrist view needed to disambiguate top-view overlap from a
+        # real carried object. Labels describe only camera provenance.
+        rgb=np.ascontiguousarray(np.concatenate([external,wrist],axis=1))
+        bgr=cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
+        cv2.putText(bgr,"EXTERNAL",(8,20),cv2.FONT_HERSHEY_SIMPLEX,.45,
+                    (0,255,0),1,cv2.LINE_AA)
+        cv2.putText(bgr,"WRIST",(external.shape[1]+8,20),
+                    cv2.FONT_HERSHEY_SIMPLEX,.45,(0,255,0),1,cv2.LINE_AA)
+        path=folder/f"{name}_external_wrist_montage.png"
+        cv2.imwrite(str(path),bgr)
         return {"rgb_path":str(path),
                 "rgb_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
-                "shape":list(rgb.shape)}
+                "shape":list(rgb.shape),"views":["agentview","robot0_eye_in_hand"],
+                "layout":"external_left_wrist_right"}
 
     def _act(self,action):
         kind=validate_action(action);before=np.asarray(self.obs["robot0_eef_pos"],float).copy();target=None
@@ -275,7 +350,15 @@ class LiberoDeployment:
 
     def _use(self,tool_id,payload):
         if tool_id not in self.capabilities:raise LiberoDeploymentError(f"unregistered Tool: {tool_id}")
-        try:raw_result=self.capabilities[tool_id](dict(payload))
+        try:
+            Draft202012Validator(self.capability_contracts[tool_id]["input_schema"]).validate(payload)
+            raw_result=self.capabilities[tool_id](dict(payload))
+        except ValidationError as exc:
+            result={"tool_error":{"type":"ToolContractError","message":str(exc.message)[:1000]},
+                    "ok":False}
+            self.trace.append({"event":"use","tool_id":tool_id,"step":self.step,
+                               "tool_error":result["tool_error"]})
+            return {"tool_id":tool_id,"step":self.step,"result":result}
         except Exception as exc:
             # A remote foundation-model outage or public capability failure is
             # task evidence, not a controller-program crash.  Preserve the
@@ -288,6 +371,14 @@ class LiberoDeployment:
             self.trace.append({"event":"use","tool_id":tool_id,"step":self.step,
                                "tool_error":result["tool_error"]})
             return {"tool_id":tool_id,"step":self.step,"result":result}
+        contract=self.capability_contracts[tool_id]
+        try:Draft202012Validator(contract["output_schema"]).validate(raw_result)
+        except ValidationError as exc:
+            result={"tool_error":{"type":"ToolContractError",
+                    "message":f"output: {exc.message}"[:1000]},"ok":False}
+            self.trace.append({"event":"use","tool_id":tool_id,"step":self.step,
+                               "tool_error":result["tool_error"]})
+            return {"tool_id":tool_id,"step":self.step,"result":result}
         result=self._references(tool_id,raw_result)
         receipt={"tool_id":tool_id,"step":self.step,"result":result}
         self.trace.append({"event":"use","tool_id":tool_id,"step":self.step});return receipt
@@ -295,6 +386,8 @@ class LiberoDeployment:
     def _verify(self,name,payload):
         validate_verifier_request(name,payload)
         expanded=dict(payload)
+        source_ref=str(payload.get("source_ref") or "")
+        transport_ref=str(payload.get("transport_ref") or source_ref)
         for key in ("source_ref","target_ref"):
             if key in expanded:
                 ref=str(expanded[key])
@@ -303,6 +396,11 @@ class LiberoDeployment:
                 bounds=self.references[ref].get("world_bounds_10_90")
                 if bounds is not None:
                     expanded[key.replace("_ref","_world_bounds_10_90")]=bounds
+        if name=="visual_support_relation":
+            if transport_ref not in self.references:
+                raise LiberoDeploymentError("unknown transport_ref")
+            expanded["source_transport_verified"]=(
+                transport_ref in self.verified_attachments)
         if name not in self.verifiers:raise LiberoDeploymentError(f"unknown verifier: {name}")
         try:result=dict(self.verifiers[name](expanded))
         except Exception as exc:
@@ -312,17 +410,19 @@ class LiberoDeployment:
             self.trace.append({"event":"verify","name":name,"result":result})
             return result
         if not isinstance(result.get("verified"),bool):raise LiberoDeploymentError("verifier contract")
+        if name=="visual_attachment" and result["verified"] and source_ref:
+            self.verified_attachments.add(source_ref)
         self.last_verify=result["verified"];self.trace.append({"event":"verify","name":name,"result":result});return result
 
     def sensor_report(self,execution):
         independent=True
         if self.outcome_verifier is not None:
             if self._outcome_report is None:
-                after=self._capture_outcome_rgb("after")
+                self._outcome_after=self._capture_outcome_rgb("after")
                 try:
                     self._outcome_report=dict(self.outcome_verifier({
                         "instruction":self._instruction,
-                        "before":self._outcome_before,"after":after}))
+                        "before":self._outcome_before,"after":self._outcome_after}))
                     if not isinstance(self._outcome_report.get("verified"),bool):
                         raise LiberoDeploymentError("outcome verifier contract")
                 except Exception as exc:
@@ -334,12 +434,18 @@ class LiberoDeployment:
         return {"sensor_verification_passed":bool(self.last_verify and independent),
                 "controller_visual_verification_passed":bool(self.last_verify),
                 "independent_task_outcome":self._outcome_report,
+                # Canonical task-level sensor evidence. Exposing immutable
+                # paths/hashes lets the coding Agent diagnose verifier outages
+                # and disagreements from exact before/after views instead of
+                # guessing rollout frame numbers.
+                "outcome_observations":{"before":self._outcome_before,
+                    "after":self._outcome_after},
                 "final_step":self.step,
                 "final_proprioception":self._proprio(),"trace_path":str(self.artifact_dir/"adapter_trace.json"),
                 "rollout_path":str(self.artifact_dir/"rollout.mp4"),"benchmark_signal_exposed":False,
                 # Consumed only by the Harness generalization gate.  Keys
                 # prefixed with _harness_ are removed from model evidence.
-                "_harness_case_id":f"state_{self.episode.initial_state_index:03d}"}
+                "_harness_case_id":self.episode.case_handle}
 
     def seal_controller_execution(self):
         """Permanently close robot I/O before the evaluator barrier opens."""

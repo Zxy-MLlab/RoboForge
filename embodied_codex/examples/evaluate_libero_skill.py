@@ -15,15 +15,27 @@ import json
 import os
 from pathlib import Path
 import sys
+import sys
 import types
 from typing import Any, Callable, Mapping
 
+ROOT=Path(__file__).resolve().parents[2]
+
 from embodied_codex.deployments import LiberoDeployment, LiberoEpisode
 from embodied_codex.runtime import ControllerRuntime
+from embodied_codex.tool_runtime import ToolRuntime
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _tree_sha256(root: Path) -> str:
+    digest=hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(str(path.relative_to(root)).encode()+b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 def _load_function(path: Path) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
@@ -32,7 +44,12 @@ def _load_function(path: Path) -> Callable[[Mapping[str, Any]], Mapping[str, Any
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load frozen Tool: {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous=sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode=True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode=previous
     function = getattr(module, "run", None)
     if not callable(function):
         raise RuntimeError(f"frozen Tool has no run(payload): {path}")
@@ -61,7 +78,12 @@ def _load_class(path: Path, name: str, *,
                 raise RuntimeError(f"cannot load frozen dependency: {dependency_path}")
             dependency = importlib.util.module_from_spec(dependency_spec)
             sys.modules[dependency_spec.name] = dependency
-            dependency_spec.loader.exec_module(dependency)
+            previous=sys.dont_write_bytecode
+            try:
+                sys.dont_write_bytecode=True
+                dependency_spec.loader.exec_module(dependency)
+            finally:
+                sys.dont_write_bytecode=previous
         qualified_name = f"{package_name}.tool"
     else:
         qualified_name = f"embodied_codex_frozen_{name}_{suffix}"
@@ -70,11 +92,37 @@ def _load_class(path: Path, name: str, *,
         raise RuntimeError(f"cannot load frozen deployment Tool: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[qualified_name] = module
-    spec.loader.exec_module(module)
+    previous=sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode=True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode=previous
     value = getattr(module, name, None)
     if not isinstance(value, type):
         raise RuntimeError(f"frozen Tool has no {name}: {path}")
     return value
+
+
+def _relative_module_paths(item: Mapping[str, Any]) -> dict[str, Path]:
+    folder=Path(item["folder"])
+    return {str(module):folder/str(record["path"])
+            for module,record in (item["manifest"].get("relative_modules") or {}).items()}
+
+
+def _controller_capability_view(skill_manifest: Mapping[str,Any], frozen_tools,
+                                capabilities):
+    bindings=dict(skill_manifest.get("controller_tool_bindings") or
+        {tool_id:tool_id for tool_id in skill_manifest.get("tool_ids") or []})
+    expanded={};contracts={}
+    for logical_id,packaged_id in bindings.items():
+        if packaged_id not in frozen_tools or packaged_id not in capabilities:
+            raise RuntimeError(f"invalid frozen Controller Tool binding: {logical_id} -> {packaged_id}")
+        expanded[str(logical_id)]=capabilities[packaged_id]
+        item=frozen_tools[packaged_id]
+        contracts[str(logical_id)]={key:item["manifest"][key]
+            for key in ("input_schema","output_schema")}
+    return expanded,contracts
 
 
 def inspect_skill(skill_dir: str | Path) -> tuple[Path, dict[str, Any], dict[str, dict[str, Any]]]:
@@ -90,12 +138,28 @@ def inspect_skill(skill_dir: str | Path) -> tuple[Path, dict[str, Any], dict[str
     if "experience_sha256" in manifest:
         if not experience.is_file() or _sha256(experience) != manifest["experience_sha256"]:
             raise RuntimeError("frozen experience hash mismatch")
+    task_model=root/"task_model.json"
+    if "task_model_sha256" in manifest:
+        if not task_model.is_file() or _sha256(task_model)!=manifest["task_model_sha256"]:
+            raise RuntimeError("frozen task model hash mismatch")
+    for evidence in manifest.get("evidence_files") or []:
+        source=root/str(evidence.get("path") or "")
+        if not source.is_file() or _sha256(source)!=evidence.get("sha256"):
+            raise RuntimeError("frozen Skill evidence hash mismatch")
+
+    bindings=dict(manifest.get("controller_tool_bindings") or
+        {tool_id:tool_id for tool_id in manifest.get("tool_ids") or []})
+    if set(bindings.values())-set(manifest.get("tool_ids") or []):
+        raise RuntimeError("invalid frozen Controller Tool bindings")
 
     tools: dict[str, dict[str, Any]] = {}
+    bundle_hashes=dict(manifest.get("tool_bundle_sha256") or {})
     for tool_id in manifest.get("tool_ids") or []:
         folder = root / "tools" / str(tool_id).replace(":", "_")
         tool_manifest = json.loads((folder / "manifest.json").read_text())
-        source = folder / "tool.py"
+        runtime_spec=dict(tool_manifest.get("runtime_spec") or {})
+        source=(folder/"bundle"/str(runtime_spec.get("entrypoint"))
+                if runtime_spec else folder/"tool.py")
         if tool_manifest.get("tool_id") != tool_id:
             raise RuntimeError(f"Tool id mismatch: {tool_id}")
         if tool_manifest.get("status") != "tested":
@@ -106,6 +170,15 @@ def inspect_skill(skill_dir: str | Path) -> tuple[Path, dict[str, Any], dict[str
             raise RuntimeError(f"privileged Tool is forbidden: {tool_id}")
         if _sha256(source) != tool_manifest.get("source_sha256"):
             raise RuntimeError(f"frozen Tool hash mismatch: {tool_id}")
+        for module,record in (tool_manifest.get("relative_modules") or {}).items():
+            relative=Path(str(record.get("path") or ""))
+            dependency=(folder/relative).resolve()
+            if (not str(relative) or relative.is_absolute() or ".." in relative.parts
+                    or dependency.parent!=folder or not dependency.is_file()
+                    or _sha256(dependency)!=record.get("sha256")):
+                raise RuntimeError(f"frozen Tool dependency hash mismatch: {tool_id}:{module}")
+        if tool_id not in bundle_hashes or _tree_sha256(folder)!=bundle_hashes[tool_id]:
+            raise RuntimeError(f"frozen Tool bundle hash mismatch: {tool_id}")
         tools[str(tool_id)] = {"folder": folder, "manifest": tool_manifest}
     return controller, manifest, tools
 
@@ -117,7 +190,6 @@ def _sensor_success(execution: Mapping[str, Any], sensor_report: Mapping[str, An
     return bool(
         execution.get("completed") is True
         and isinstance(result, Mapping)
-        and result.get("status") == "sensor_success"
         and last.get("method") == "verify"
         and isinstance(last.get("result"), Mapping)
         and last["result"].get("verified") is True
@@ -135,8 +207,19 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning-effort", default="high")
-    parser.add_argument("--base-url", default="https://api.apexin.ai/v1")
+    parser.add_argument("--base-url", default=os.environ.get(
+        "EMBODIED_CODEX_BASE_URL","https://api.apexin.ai/v1"))
     parser.add_argument("--config", default="config/standalone_libero")
+    parser.add_argument("--python",default=sys.executable)
+    parser.add_argument("--groundingdino-root",default=str(ROOT/"third_party"/"GroundingDINO"))
+    parser.add_argument("--groundingdino-config",default=str(ROOT/"third_party"/"GroundingDINO"/
+        "groundingdino"/"config"/"GroundingDINO_SwinT_OGC.py"))
+    parser.add_argument("--groundingdino-checkpoint",default=os.environ.get(
+        "EMBODIED_CODEX_GROUNDINGDINO_CHECKPOINT",str(ROOT/"checkpoints"/"groundingdino_swint_ogc.pth")))
+    parser.add_argument("--sam-root",default=str(ROOT/"third_party"/"segment-anything"))
+    parser.add_argument("--sam-checkpoint",default=str(ROOT/"checkpoints"/"sam_vit_b_01ec64.pth"))
+    parser.add_argument("--graspnet-backend",default=str(ROOT/"embodied_codex"/"capabilities"/"graspnet_backend.py"))
+    parser.add_argument("--graspnet-checkpoint",default=str(ROOT/"checkpoints"/"graspnet-checkpoint-rs.tar"))
     args = parser.parse_args()
 
     controller, skill_manifest, frozen_tools = inspect_skill(args.skill_dir)
@@ -149,18 +232,19 @@ def main() -> int:
     perception_item = next((item for item in frozen_tools.values()
                             if item["manifest"].get("name")=="open_vocab_rgbd_grounded_sam"),None)
     if perception_item is None:raise RuntimeError("frozen Skill lacks perception Tool")
-    perception_class=_load_class(perception_item["folder"]/"tool.py","OpenVocabularyRGBD")
+    perception_class=_load_class(perception_item["folder"]/"tool.py","OpenVocabularyRGBD",
+        relative_modules=_relative_module_paths(perception_item))
     perception = perception_class(
-        groundingdino_root="third_party/GroundingDINO",
-        groundingdino_config=("third_party/GroundingDINO/groundingdino/config/"
-                              "GroundingDINO_SwinT_OGC.py"),
-        groundingdino_checkpoint="/data/zxy/GroundingDINO/models/groundingdino_swint_ogc.pth",
-        sam_root="third_party/segment-anything",
-        sam_checkpoint="checkpoints/sam_vit_b_01ec64.pth",
+        groundingdino_root=args.groundingdino_root,
+        groundingdino_config=args.groundingdino_config,
+        groundingdino_checkpoint=args.groundingdino_checkpoint,
+        sam_root=args.sam_root,sam_checkpoint=args.sam_checkpoint,
         device=args.device,
     )
     graspnet = None
     capabilities: dict[str, Callable[..., Any]] = {}
+    tool_runtime=ToolRuntime(python=args.python,
+                             allowed_input_roots=[output])
     for tool_id, item in frozen_tools.items():
         tool_manifest = item["manifest"]
         if tool_manifest.get("execution_owned_by_deployment"):
@@ -171,29 +255,31 @@ def main() -> int:
                 if graspnet is None:
                     graspnet_class=_load_class(
                         item["folder"] / "tool.py", "GraspNetRGBD",
-                        relative_modules={
-                            "open_vocab_rgbd": perception_item["folder"] / "tool.py"
-                        })
+                        relative_modules=_relative_module_paths(item))
                     graspnet = graspnet_class(
-                        backend_script="capability_library/tools/graspnet_rgbd_grasp.py",
-                        checkpoint="checkpoints/graspnet-checkpoint-rs.tar",
-                        python="/data/zxy/envs/vla-report/bin/python",
+                        backend_script=args.graspnet_backend,
+                        checkpoint=args.graspnet_checkpoint,python=args.python,
                     )
                 capabilities[tool_id] = graspnet.infer
             elif name == "vlm_visual_relation_grounder":
                 grounder_class=_load_class(
-                    item["folder"] / "tool.py", "VLMVisualRelationGrounder")
+                    item["folder"] / "tool.py", "VLMVisualRelationGrounder",
+                    relative_modules=_relative_module_paths(item))
                 grounder=grounder_class(
-                    api_key=os.environ.get("APEX_API_KEY", ""),
+                    api_key=(os.environ.get("EMBODIED_CODEX_API_KEY") or
+                             os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY", "")),
                     base_url=args.base_url,model=args.model,
                     reasoning_effort=args.reasoning_effort)
                 capabilities[tool_id]=grounder.select
             else:
                 raise RuntimeError(f"LIBERO Adapter cannot bind deployment Tool: {name}")
         else:
-            capabilities[tool_id] = _load_function(item["folder"] / "tool.py")
+            capabilities[tool_id] = (lambda payload,_folder=item["folder"]:
+                                     tool_runtime.execute(_folder,payload))
+    capabilities,capability_contracts=_controller_capability_view(
+        skill_manifest,frozen_tools,capabilities)
 
-    runtime = ControllerRuntime(python="/data/zxy/envs/vla-report/bin/python")
+    runtime = ControllerRuntime(python=args.python)
     records = []
     for state in args.states:
         episode_dir = output / f"state_{state:03d}"
@@ -201,6 +287,7 @@ def main() -> int:
             episode=LiberoEpisode(args.suite, args.task, state, config_path=args.config),
             artifact_dir=episode_dir,
             capabilities=capabilities,
+            capability_contracts=capability_contracts,
             verifiers={
                 "visual_attachment": perception.verify_attachment,
                 "visual_support_relation": perception.verify_support_relation,

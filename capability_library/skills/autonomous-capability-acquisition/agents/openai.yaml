@@ -1,4 +1,0 @@
-interface:
-  display_name: "Acquire Embodied Capabilities"
-  short_description: "Search, audit, register, and reuse public robot capabilities"
-  default_prompt: "Use $autonomous-capability-acquisition to discover and register public tools, models, algorithms, or skills for a robot task."

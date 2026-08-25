@@ -1,4 +1,0 @@
-interface:
-  display_name: "RGB-D Code Pick Place"
-  short_description: "Classical zero-shot RGB-D robot manipulation"
-  default_prompt: "Use $rgbd-code-pick-place to solve a pick-and-place task without learned models."

@@ -1,9 +1,0 @@
-{
-  "path": "runs/sealed_eval_v2_openvla_transfer",
-  "claimable": false,
-  "reason": "runner environment error: MUJOCO_EGL_DEVICE_ID did not match CUDA_VISIBLE_DEVICES and concurrent retries exhausted GPU memory",
-  "episodes_started": 120,
-  "valid_task_results": 0,
-  "must_not_be_pooled": true,
-  "replacement": "runs/sealed_eval_v2_openvla_transfer_retry"
-}

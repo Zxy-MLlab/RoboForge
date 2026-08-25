@@ -1,8 +1,0 @@
-{
-  "thea_repository": "https://github.com/EIT-HAI/Thea.git",
-  "thea_commit": "f690e8436d917b32fe6a756e01ff04a66d4d6077",
-  "python": "3.12",
-  "workspace": "/data/zxy/embodied_frontier",
-  "status": "installed",
-  "llm_api_credentials_detected": false
-}

@@ -19,7 +19,7 @@ import uuid
 import cv2
 import numpy as np
 
-from embodied_codex.capabilities.open_vocab_rgbd import CapabilityInputError
+from .open_vocab_rgbd import CapabilityInputError
 
 
 def _sha256(path: Path) -> str:
@@ -72,9 +72,17 @@ class GraspNetRGBD:
                 "tool_id":"graspnet_rgbd_6dof:v001",
                 "models":["GraspNet baseline checkpoint-rs epoch 18"],
                 "source_urls":["https://github.com/graspnet/graspnet-baseline"],
+                "model_card_urls":["https://github.com/graspnet/graspnet-baseline"],
                 "checkpoint_sha256":{"graspnet":_sha256(self.checkpoint)},
+                "checkpoint_files":{"graspnet":str(self.checkpoint)},
                 "backend_sha256":_sha256(self.backend_script),
                 "trained_on_current_task":False,"privileged_state_used":False,
+                "training_data_declaration":(
+                    "Public GraspNet-1Billion checkpoint-rs; no LIBERO task-specific "
+                    "fine-tuning is performed by this Harness."),
+                "contamination_check":{"evaluated_benchmark":"LIBERO",
+                    "method":"upstream dataset declaration plus local checkpoint hash audit",
+                    "result":"no_declared_overlap"},
                 "inputs":["RGB","metric depth","camera intrinsic","camera-to-world",
                           "GroundingDINO box","SAM mask"],
             }

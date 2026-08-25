@@ -1,71 +1,64 @@
-# RoboForge: Embodied Intelligence Frontier Harness
+# RoboForge Embodied Coding Agent Harness
 
-This workspace evaluates whether a Thea-style embodied harness can expand its
-capabilities by discovering and registering public models, algorithms, tools,
-and skills. The first benchmark is LIBERO.
+RoboForge 是一个环境无关的 Embodied Coding Agent Harness。它提供持久 workspace、隔离
+Controller runtime、Adapter SDK 合同、结构化证据、事务事件日志和渐进式 Tool/Skill/
+Experience/Gap 检索；任务策略、失败诊断和能力获取由模型决定。
 
-The canonical autonomous entry point is
-`evaluation/run_embodied_codex_libero.py`. One command runs sensor-only
-development, public capability acquisition, immutable Task Skill freezing,
-deterministically selected unseen-state validation, and post-batch sealed
-scoring. GPT-5.6 authors the complete `run(robot)` controller and owns its
-loops, branches, reobservation, recovery, and Tool composition. The environment
-adapter owns only sensors, bounded actions, and the evaluator isolation
-boundary.
+## 架构边界
 
-For example:
+`embodied_codex/kernel/` 只包含通用运行底座：Agent Loop、workspace、sandbox runtime、
+context builder、event store 和恢复检查点。`embodied_codex/assets.py` 提供不可变 Tool
+版本、Schema、manual-first 和资产库；`embodied_codex/deployments/` 是 Adapter 实现。
+LIBERO 只通过 `deployments/libero.py` 和 `evaluation/run_embodied_codex_libero.py`
+接入。反作弊、provenance、generalization 和 sealed evaluator 只属于 `evaluation/`
+中的外部 Policy，不会被 kernel 导入。
+
+旧 `EvolutionEngine` 和实验脚本暂时保留给历史 LIBERO runner 兼容使用，但不是新 Harness
+入口，也不应向 kernel 增加任务特定状态机。
+
+## 安装与运行
 
 ```bash
-python evaluation/run_embodied_codex_libero.py \
-  --tasks 4 --development-state 23 \
-  --output runs/embodied_codex/libero_spatial_task4
+cd /path/to/embodied_frontier
+python -m pip install -e '.[test]'
+
+# 快速调试自定义 Adapter
+embodied_codex run --adapter my_package:MyAdapter \
+  --task 'put the bowl on the plate' --profile dev \
+  --model my_package:FakeModel
+
+# 自主模式使用 API 模型
+export OPENAI_API_KEY=...
+embodied_codex run --adapter my_package:MyAdapter --task 'put the bowl on the plate' \
+  --profile autonomous
+
+# LIBERO 兼容 Adapter
+embodied_codex run --adapter libero --task 0 --profile autonomous
+
+# 运行环境检查
+roboforge doctor --adapter libero
 ```
 
-`evaluation/run_autonomous_evolution.py` and
-`evaluation/run_task_skill_validation.py` are internal development and frozen
-validation stages used by that entry point. The old controller-spec path is
-not part of the canonical Embodied Codex workflow.
+Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` 开启资产检索和沉淀，
+`benchmark` 由外部评测 runner 额外加载研究 policy。自定义 Adapter 至少实现
+`instruction`、`dispatch`、`project_rpc_output`、`sensor_report` 和 `close`，详见
+[`docs/adapter_authoring.md`](docs/adapter_authoring.md)。
 
-## Integrity boundary
+## 安全与稳定性
 
-- The agent may observe the natural-language instruction, benchmark-approved
-  RGB-D cameras, documented camera calibration, and robot proprioception.
-- LIBERO success predicates, object poses, simulator internals, BDDL goal
-  predicates, rewards, and evaluation labels are evaluator-only data.
-- Evaluation episodes are never converted into demonstrations or training
-  data. Failed test-state IDs may be reported, but may not select or tune
-  episode-specific actions, prompts, checkpoints, or hyperparameters.
-- Learned robot-policy and learned-perception checkpoints are allowed in the
-  primary track when their training and preprocessing provenance is documented
-  and disjoint from the evaluated task. Checkpoints without such evidence
-  remain rejected audit assets.
-- Every claimed improvement must be rerun on a frozen evaluation manifest and
-  include per-episode traces. Development uses a disjoint smoke manifest.
+Controller、工程命令和获取的 Tool 在断网 bubblewrap worker 中运行；RPC 使用正向字段
+投影和严格 JSON 校验。Tool 版本以 SHA256 标识且不可变，调用前后执行 JSON Schema。
+Workspace 事务、事件日志和执行快照支持幂等提交与中断恢复。Adapter 负责物理速度、力、
+工作空间和急停限制。
 
-See `protocol/anti_cheating.yaml` for the machine-readable policy.
+## 测试
 
-## Current LIBERO-Spatial frontier
+```bash
+python -m pytest -q tests evaluation
+python -m compileall -q embodied_codex evaluation
+git diff --check
+```
 
-The complete-program autonomous Harness has final success evidence for task
-types 3, 5, and 7. Task 4 (open the top drawer, retrieve the bowl, and place it
-on the plate) remains under autonomous development. There is not yet a valid
-10-task score or a three-unseen-state `sensor_validated` Task Skill, so the
-project does not yet claim a LIBERO-Spatial capability upper bound.
-
-Older v016--v019 controllers and their 6/10-style measurements were produced
-under a materially different, externally engineered workflow. They remain
-historical baselines and must not be reported as the autonomous Embodied Codex
-result. All new claims must follow `protocol/reporting_tracks.md` and include
-the campaign seal, sensor traces, frozen Skill hashes, and sealed evaluator
-files.
-
-## Cross-benchmark status
-
-The first benchmark remains LIBERO and its new autonomous campaign is still in
-progress. A
-benchmark-neutral CALVIN adapter is protocol-tested in
-`Thea/simulation/thea_simulation/adapters/calvin.py`; it accepts official
-CALVIN environment objects, projects RGB observations, and keeps evaluator
-success outside the agent observation. The server currently lacks CALVIN's
-official evaluation trajectory/task-sequence files, so no CALVIN score is
-claimed. See `manifests/calvin_zero_shot_smoke.json` for the explicit data gap.
+确定性 kernel 测试不依赖 LIBERO、GPU 或真实 API，覆盖失败 Controller 读取证据、修改、
+再次执行成功以及资产保存/复用。LIBERO benchmark 的正式报告和污染审计仍由外部 runner
+负责，不能作为 Harness Core 的能力声明。

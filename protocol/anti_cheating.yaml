@@ -71,15 +71,14 @@ forbidden:
 unknown_current_task_provenance_policy: reject_from_primary_track_until_resolved
 
 development_policy:
-  manifest: manifests/libero_dev_smoke.json
+  selection: declared_in_campaign_before_development
   purpose: integration_failure_analysis_and_generic_tool_skill_improvement
   claimable_metric: false
   may_train_model_parameters: false
   may_improve_generic_tools_and_skills_from_failures: true
 
 evaluation_policy:
-  historical_exposed_manifest: manifests/libero_frozen_eval.json
-  sealed_manifest: manifests/libero_sealed_eval_v2.json
+  selection: deterministically_predeclared_in_campaign_before_development
   freeze_candidate_before_first_sealed_run: true
   run_sealed_manifest_once_per_frozen_candidate: true
   sealed_results_may_not_drive_iteration: true

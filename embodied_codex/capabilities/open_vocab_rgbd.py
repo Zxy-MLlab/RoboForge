@@ -14,6 +14,8 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
+from .perception_reliability import audit_detection_result
+
 
 class CapabilityInputError(ValueError):
     pass
@@ -52,12 +54,26 @@ class OpenVocabularyRGBD:
                 "https://github.com/IDEA-Research/GroundingDINO",
                 "https://github.com/facebookresearch/segment-anything",
             ],
+            "model_card_urls": [
+                "https://github.com/IDEA-Research/GroundingDINO",
+                "https://github.com/facebookresearch/segment-anything",
+            ],
             "checkpoint_sha256": {
                 "groundingdino": self._sha256(self.groundingdino_checkpoint),
                 "sam": self._sha256(self.sam_checkpoint),
             },
+            "checkpoint_files": {
+                "groundingdino": str(self.groundingdino_checkpoint),
+                "sam": str(self.sam_checkpoint),
+            },
             "trained_on_current_task": False,
             "privileged_state_used": False,
+            "training_data_declaration":(
+                "Public GroundingDINO Swin-T OGC and SAM ViT-B base checkpoints; "
+                "no LIBERO task-specific fine-tuning is performed by this Harness."),
+            "contamination_check":{"evaluated_benchmark":"LIBERO",
+                "method":"upstream model documentation plus local checkpoint hash audit",
+                "result":"no_declared_overlap"},
             "inputs": ["RGB", "metric depth", "camera intrinsic", "camera-to-world"],
         }
         return dict(self._provenance_cache)
@@ -75,13 +91,13 @@ class OpenVocabularyRGBD:
         from transformers import BertModel
         if not hasattr(BertModel, "get_head_mask"):
             BertModel.get_head_mask = lambda self, head_mask, num_hidden_layers, is_attention_chunked=False: [None] * num_hidden_layers
-        if not getattr(BertModel, "_embodied_harness_compat", False):
+        if not getattr(BertModel, "_embodied_codex_compat", False):
             original = BertModel.get_extended_attention_mask
             def compatible(self, attention_mask, input_shape, device=None):
                 import torch
                 return original(self, attention_mask, input_shape, dtype=torch.float32)
             BertModel.get_extended_attention_mask = compatible
-            BertModel._embodied_harness_compat = True
+            BertModel._embodied_codex_compat = True
 
     def _load_detector(self):
         if self._detector is not None: return
@@ -233,10 +249,16 @@ class OpenVocabularyRGBD:
                 except CapabilityInputError as exc:
                     projected.append({**detection, "projection_error": str(exc)})
             grouped[query] = projected
-        return {
+        result = {
             "frame_id": frame.get("frame_id"), "camera": camera_name,
             "detections": grouped, "provenance": self.provenance,
         }
+        result["reliability"] = audit_detection_result(
+            result,
+            required_queries=[str(query) for query in queries],
+            distinct_query_pairs=payload.get("distinct_query_pairs") or [],
+        )
+        return result
 
     def verify_support_relation(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         object_query = str(payload.get("object_query") or "")
@@ -289,9 +311,16 @@ class OpenVocabularyRGBD:
         target = targets[target_index] if target_index is not None else None
         target_xy_error = distances_target[selected_index]
         vertical = float(np.asarray(obj["world_xyz"], float)[2] - target_anchor[2])
-        source_vacated = min(distances_source) > float(
-            payload.get("source_vacated_radius_m", 0.055)
-        )
+        source_vacated_radius=float(payload.get("source_vacated_radius_m",0.055))
+        geometric_source_vacated=min(distances_source)>source_vacated_radius
+        source_transport_verified=bool(payload.get("source_transport_verified",False))
+        selected_source_displacement=distances_source[selected_index]
+        source_vacated=bool(geometric_source_vacated or (
+            source_transport_verified
+            and selected_source_displacement>source_vacated_radius))
+        source_vacancy_method=("category_absence" if geometric_source_vacated else
+            "prior_attachment_and_selected_object_displacement" if source_vacated else
+            "unverified_category_occupancy")
         object_bounds = np.asarray(obj["world_bounds_10_90"], float)
         maximum_association_rank=float(np.clip(
             payload.get("max_target_association_rank",0.12),0.03,0.30))
@@ -303,12 +332,19 @@ class OpenVocabularyRGBD:
         fresh_target_credible=(target_index is not None
                                and target_ranks[target_index] <= maximum_association_rank
                                and target_height_error <= maximum_target_height_error)
-        if fresh_target_credible:
-            target_bounds=np.asarray(target["world_bounds_10_90"],float)
-            geometry_source="fresh_target_detection"
-        elif anchored_bounds_valid:
+        # The target reference is captured before manipulation and therefore
+        # contains the only unobstructed support footprint. After placement,
+        # the manipulated object commonly hides the support centre; SAM then
+        # returns an exposed crescent whose centroid and bounds are shifted
+        # even though its depth still looks like a credible support surface.
+        # A fresh target remains semantic/existence evidence, while immutable
+        # pre-action sensor geometry owns containment and overlap when present.
+        if anchored_bounds_valid:
             target_bounds=anchored_target_bounds
             geometry_source="pre_action_sensor_anchor"
+        elif fresh_target_credible:
+            target_bounds=np.asarray(target["world_bounds_10_90"],float)
+            geometry_source="fresh_target_detection"
         elif target is not None:
             target_bounds=np.asarray(target["world_bounds_10_90"],float)
             geometry_source="fresh_target_detection_low_confidence"
@@ -357,6 +393,10 @@ class OpenVocabularyRGBD:
             "verified": bool(verified), "target_xy_error_m": target_xy_error,
             "vertical_offset_m": vertical, "source_vacated": source_vacated,
             "nearest_source_detection_m": min(distances_source), "object": obj,
+            "selected_object_source_displacement_m":selected_source_displacement,
+            "geometric_source_vacated":geometric_source_vacated,
+            "source_transport_verified":source_transport_verified,
+            "source_vacancy_method":source_vacancy_method,
             "target": target, "support_overlap_fraction": overlap_fraction,
             "object_coverage_fraction": object_coverage,
             "target_coverage_fraction": target_coverage,
@@ -373,7 +413,7 @@ class OpenVocabularyRGBD:
             "maximum_target_surface_height_error_m":maximum_target_height_error,
             "source_anchor_world_xyz": source_anchor.tolist(),
             "target_anchor_world_xyz": target_anchor.tolist(),
-            "criterion": "fresh object and target masks with metric support overlap, height, and source vacancy",
+            "criterion": "fresh object and target masks with metric support overlap, height, and sensor-proven source transition",
         }
 
     def verify_attachment(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:

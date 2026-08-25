@@ -1,4 +1,0 @@
-interface:
-  display_name: "Visual Drawer Open and Retrieve"
-  short_description: "Open a visually grounded drawer before retrieving an object."
-  default_prompt: "Use sensor-only RGB-D grounding to open a named drawer, verify motion, and re-ground the object before retrieval."

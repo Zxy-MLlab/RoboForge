@@ -1,4 +1,0 @@
-interface:
-  display_name: "Select Frozen Embodied Asset"
-  short_description: "Gate pretrained embodied assets by training provenance"
-  default_prompt: "Use $select-frozen-embodied-policy to classify a learned asset and freeze a leakage-safe benchmark candidate."

@@ -15,8 +15,10 @@ import json
 import mimetypes
 from pathlib import Path
 import time
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from typing import Any, Mapping
+
+from ._vlm_support import bounded_consensus, compact_image
 
 
 class VLMRelationGroundingError(ValueError):
@@ -34,6 +36,7 @@ def _transient_api_error(exc: Exception) -> bool:
 class VLMVisualRelationGrounder:
     def __init__(self, *, api_key: str, base_url: str, model: str = "gpt-5.6-sol",
                  reasoning_effort: str = "high", timeout: float = 180,
+                 total_timeout: float = 90,
                  client=None, retry_delays: tuple[float,...]=(2.0,5.0)) -> None:
         if not api_key and client is None:
             raise VLMRelationGroundingError("VLM API key is required")
@@ -44,13 +47,23 @@ class VLMVisualRelationGrounder:
         self.client = client
         self.model = str(model)
         self.reasoning_effort = str(reasoning_effort)
+        self.request_timeout=max(0.1,float(timeout))
+        self.total_timeout=max(0.1,float(total_timeout))
+        self._deadline=threading.local()
         self.retry_delays=tuple(max(0.0,float(value)) for value in retry_delays)
         self.provenance = {
             "method": "foundation_vlm_candidate_relation_grounding",
             "model": self.model,
             "source_urls": ["https://platform.openai.com/docs/guides/images-vision"],
+            "model_card_urls": ["https://platform.openai.com/docs/models"],
             "trained_on_current_task": False,
             "privileged_state_used": False,
+            "training_data_declaration":(
+                "General-purpose hosted foundation model used zero-shot; the Harness performs "
+                "no LIBERO task-specific training or fine-tuning."),
+            "contamination_check":{"evaluated_benchmark":"LIBERO",
+                "method":"zero-shot API-use policy and no task-specific fine-tuning audit",
+                "result":"no_declared_overlap"},
             "inputs": ["Adapter RGB image", "pixel boxes", "task language"],
         }
 
@@ -85,6 +98,11 @@ class VLMVisualRelationGrounder:
 
     def _complete(self, prompt: str, image_url: str) -> str:
         for attempt in range(len(self.retry_delays)+1):
+            deadline=getattr(self._deadline,"value",None)
+            remaining=(deadline-time.monotonic()) if deadline is not None else self.request_timeout
+            if remaining<=0:
+                raise VLMRelationGroundingError(
+                    f"VLM relation consensus exceeded {self.total_timeout:g} seconds")
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -92,11 +110,14 @@ class VLMVisualRelationGrounder:
                         {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": image_url}},
                     ]}], temperature=0, max_tokens=1000,
-                    extra_body={"reasoning_effort": self.reasoning_effort})
+                    extra_body={"reasoning_effort": self.reasoning_effort},
+                    timeout=min(self.request_timeout,max(0.1,remaining)))
                 break
             except Exception as exc:
                 if attempt>=len(self.retry_delays) or not _transient_api_error(exc):raise
-                time.sleep(self.retry_delays[attempt])
+                delay=min(self.retry_delays[attempt],max(0.0,
+                    (deadline-time.monotonic()) if deadline is not None else self.retry_delays[attempt]))
+                if delay>0:time.sleep(delay)
         return str(response.choices[0].message.content or "")
 
     @staticmethod
@@ -166,6 +187,8 @@ class VLMVisualRelationGrounder:
             image_bytes, candidates, references)
         if annotated_mime:
             mime, encoded = annotated_mime, base64.b64encode(annotated).decode("ascii")
+        compact_mime, compact_bytes=compact_image(base64.b64decode(encoded),mime)
+        mime,encoded=compact_mime,base64.b64encode(compact_bytes).decode("ascii")
         prompt = (
             "You are a sensor-only visual grounding module for a robot. "
             "Jointly choose the object and, when provided, the reference/support "
@@ -192,20 +215,30 @@ class VLMVisualRelationGrounder:
         # Consensus calls are independent samples of the same immutable sensor
         # evidence.  Run them concurrently without changing the vote threshold
         # or accepting partial results.
-        with ThreadPoolExecutor(max_workers=rounds) as pool:
-            texts=list(pool.map(lambda _index:self._complete(prompt,image_url),range(rounds)))
-        decisions=[self._json_object(value) for value in texts]
-
+        def complete(_index: int, deadline: float) -> str:
+            self._deadline.value=deadline
+            return self._complete(prompt,image_url)
+        required=rounds//2+1
         def normalized_id(value, size):
-            if value is None:
-                return None
-            if isinstance(value, bool):
-                return None
-            try:
-                value = int(value)
-            except (TypeError, ValueError):
-                return None
-            return value if 0 <= value < size else None
+            if value is None or isinstance(value,bool):return None
+            try:value=int(value)
+            except (TypeError,ValueError):return None
+            return value if 0<=value<size else None
+        def decision_pair(text):
+            decision=self._json_object(text)
+            object_id=normalized_id(decision.get("selected_id"),len(candidates))
+            reference_id=normalized_id(
+                decision.get("selected_reference_id"),len(references))
+            return ((object_id,reference_id) if object_id is not None
+                    and (not references or reference_id is not None) else None)
+        def decision_quorum(values):
+            votes=[vote for vote in (decision_pair(value) for value in values)
+                   if vote is not None]
+            return bool(votes and Counter(votes).most_common(1)[0][1]>=required)
+        texts=bounded_consensus(rounds,self.total_timeout,complete,
+            error_type=VLMRelationGroundingError,operation="VLM relation consensus",
+            minimum_results=required,decision_quorum=decision_quorum)
+        decisions=[self._json_object(value) for value in texts]
 
         votes = []
         for decision in decisions:
@@ -216,7 +249,6 @@ class VLMVisualRelationGrounder:
             if object_id is not None and (not references or reference_id is not None):
                 votes.append((object_id, reference_id))
         winner = Counter(votes).most_common(1)
-        required = rounds // 2 + 1
         agreed = bool(winner and winner[0][1] >= required)
         selected_id, selected_reference_id = winner[0][0] if agreed else (None, None)
         matching_decisions = [d for d in decisions
@@ -233,7 +265,8 @@ class VLMVisualRelationGrounder:
             "reference_description": str(decision.get("reference_description") or ""),
             "reason": str(decision.get("reason") or ""),
             "confidence": max(0.0, min(1.0, confidence)),
-            "consensus": {"rounds": rounds, "required": required,
+            "consensus": {"rounds": rounds, "completed_rounds":len(decisions),
+                          "required": required,
                           "winning_votes": winner[0][1] if winner else 0,
                           "agreed": agreed},
             "method": "foundation_vlm_candidate_relation_grounding",

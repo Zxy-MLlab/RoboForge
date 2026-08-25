@@ -6,6 +6,7 @@ runtime/calvin_deps/
 runtime/calvin_gym/
 __pycache__/
 .pytest_cache/
+*.egg-info/
 *.py[cod]
 
 # Credentials and local configuration

@@ -6,17 +6,36 @@ import ipaddress
 import json
 import re
 import socket
+from pathlib import Path
+import hashlib
+import os
 from urllib.parse import quote_plus, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
 _UA={"User-Agent":"Mozilla/5.0 EmbodiedCodex/1.0"}
+_SEARCH_TITLE_CHARS=200
+_SEARCH_SNIPPET_CHARS=600
 
 
 def _text(value: str) -> str:
     value=re.sub(r"<(script|style)[^>]*>.*?</\1>"," ",value,flags=re.I|re.S)
     value=re.sub(r"<[^>]+>"," ",value)
     return " ".join(unescape(value).split())
+
+
+def _bounded_search_result(item):
+    """Bound untrusted provider text before it enters the Agent context."""
+    result=dict(item)
+    title=_text(str(result.get("title") or ""))
+    snippet=_text(str(result.get("snippet") or ""))
+    result["title"]=title[:_SEARCH_TITLE_CHARS]
+    if len(snippet)>_SEARCH_SNIPPET_CHARS:
+        result["snippet"]=snippet[:_SEARCH_SNIPPET_CHARS]+"..."
+        result["snippet_truncated"]=True
+    else:
+        result["snippet"]=snippet
+    return result
 
 
 def _bing_results(html: str, limit: int):
@@ -86,7 +105,7 @@ def search_web(query: str, limit: int = 5):
     seen=set();results=[]
     for item in github+general:
         if not item.get("url") or item["url"] in seen:continue
-        seen.add(item["url"]);results.append(item)
+        seen.add(item["url"]);results.append(_bounded_search_result(item))
         if len(results)>=limit:break
     return {"query":query,"provider":("github+" if github else "")+provider,
             "results":results,"provider_errors":errors}
@@ -102,13 +121,24 @@ def _public_url(url: str):
     return parsed.geturl()
 
 
+class _PublicRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        return super().redirect_request(req,fp,code,msg,headers,_public_url(newurl))
+
+
+def _open_public(url: str, *, timeout: float):
+    validated=_public_url(url)
+    response=build_opener(_PublicRedirectHandler()).open(Request(validated,headers=_UA),timeout=timeout)
+    _public_url(response.geturl())
+    return response
+
+
 def fetch_web_page(url: str, max_chars: int = 30000):
     url=_public_url(url); maximum=max(1000,min(int(max_chars),100000))
-    request=Request(url,headers=_UA)
     last_error=None
     for _attempt in range(2):
         try:
-            with urlopen(request,timeout=25) as response:
+            with _open_public(url,timeout=25) as response:
                 raw=response.read(2*1024*1024+1)
                 if len(raw)>2*1024*1024: raise ValueError("web page exceeds 2 MiB")
                 content_type=response.headers.get_content_type()
@@ -123,4 +153,24 @@ def fetch_web_page(url: str, max_chars: int = 30000):
             "truncated":len(content)>maximum}
 
 
-__all__=["search_web","fetch_web_page"]
+def download_public_file(url: str,destination: str|Path,max_bytes: int=2*1024**3):
+    """Stream one public HTTP(S) artifact to a pre-authorized destination."""
+    target=Path(destination);maximum=max(1,min(int(max_bytes),8*1024**3))
+    temporary=target.with_name(target.name+f".partial-{os.getpid()}")
+    digest=hashlib.sha256();size=0
+    try:
+        with _open_public(url,timeout=60) as response,temporary.open("wb") as stream:
+            while True:
+                chunk=response.read(1024*1024)
+                if not chunk:break
+                size+=len(chunk)
+                if size>maximum:raise ValueError("public asset exceeds download limit")
+                digest.update(chunk);stream.write(chunk)
+        temporary.replace(target)
+    except Exception:
+        temporary.unlink(missing_ok=True);raise
+    return {"url":_public_url(url),"path":str(target),"bytes":size,
+            "sha256":digest.hexdigest()}
+
+
+__all__=["search_web","fetch_web_page","download_public_file"]

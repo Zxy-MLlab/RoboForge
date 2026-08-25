@@ -10,12 +10,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 
 from embodied_codex.deployments import LiberoDeployment, LiberoEpisode
 from embodied_codex.examples.evaluate_libero_skill import (
-    _load_class, _load_function, _sensor_success, inspect_skill,
+    _controller_capability_view, _load_class, _load_function,
+    _relative_module_paths, _sensor_success, inspect_skill,
 )
 from embodied_codex.runtime import ControllerRuntime
+from embodied_codex.tool_runtime import ToolRuntime
+
+ROOT=Path(__file__).resolve().parents[2]
 
 
 def _write(path: Path, value) -> None:
@@ -24,7 +29,8 @@ def _write(path: Path, value) -> None:
 
 
 def _capabilities(frozen_tools, perception, *, api_key, base_url, model,
-                  reasoning_effort):
+                  reasoning_effort,tool_runtime,python,graspnet_backend,
+                  graspnet_checkpoint):
     capabilities = {}; graspnet = None
     perception_item = next((item for item in frozen_tools.values()
                             if item["manifest"].get("name") ==
@@ -32,7 +38,8 @@ def _capabilities(frozen_tools, perception, *, api_key, base_url, model,
     for tool_id, item in frozen_tools.items():
         manifest = item["manifest"]
         if not manifest.get("execution_owned_by_deployment"):
-            capabilities[tool_id] = _load_function(item["folder"] / "tool.py")
+            capabilities[tool_id] = (lambda payload,_folder=item["folder"]:
+                                     tool_runtime.execute(_folder,payload))
             continue
         name = manifest.get("name")
         if name == "open_vocab_rgbd_grounded_sam":
@@ -43,17 +50,15 @@ def _capabilities(frozen_tools, perception, *, api_key, base_url, model,
                     raise RuntimeError("frozen Skill lacks perception dependency")
                 graspnet_class=_load_class(
                     item["folder"] / "tool.py", "GraspNetRGBD",
-                    relative_modules={
-                        "open_vocab_rgbd": perception_item["folder"] / "tool.py"
-                    })
+                    relative_modules=_relative_module_paths(item))
                 graspnet = graspnet_class(
-                    backend_script="capability_library/tools/graspnet_rgbd_grasp.py",
-                    checkpoint="checkpoints/graspnet-checkpoint-rs.tar",
-                    python="/data/zxy/envs/vla-report/bin/python")
+                    backend_script=graspnet_backend,checkpoint=graspnet_checkpoint,
+                    python=python)
             capabilities[tool_id] = graspnet.infer
         elif name == "vlm_visual_relation_grounder":
             grounder_class=_load_class(
-                item["folder"] / "tool.py", "VLMVisualRelationGrounder")
+                item["folder"] / "tool.py", "VLMVisualRelationGrounder",
+                relative_modules=_relative_module_paths(item))
             grounder=grounder_class(api_key=api_key,base_url=base_url,
                                     model=model,reasoning_effort=reasoning_effort)
             capabilities[tool_id]=grounder.select
@@ -72,8 +77,19 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning-effort", default="high")
-    parser.add_argument("--base-url", default="https://api.apexin.ai/v1")
+    parser.add_argument("--base-url", default=os.environ.get(
+        "EMBODIED_CODEX_BASE_URL","https://api.apexin.ai/v1"))
     parser.add_argument("--config", default="config/standalone_libero")
+    parser.add_argument("--python",default=sys.executable)
+    parser.add_argument("--groundingdino-root",default=str(ROOT/"third_party"/"GroundingDINO"))
+    parser.add_argument("--groundingdino-config",default=str(ROOT/"third_party"/"GroundingDINO"/
+        "groundingdino"/"config"/"GroundingDINO_SwinT_OGC.py"))
+    parser.add_argument("--groundingdino-checkpoint",default=os.environ.get(
+        "EMBODIED_CODEX_GROUNDINGDINO_CHECKPOINT",str(ROOT/"checkpoints"/"groundingdino_swint_ogc.pth")))
+    parser.add_argument("--sam-root",default=str(ROOT/"third_party"/"segment-anything"))
+    parser.add_argument("--sam-checkpoint",default=str(ROOT/"checkpoints"/"sam_vit_b_01ec64.pth"))
+    parser.add_argument("--graspnet-backend",default=str(ROOT/"embodied_codex"/"capabilities"/"graspnet_backend.py"))
+    parser.add_argument("--graspnet-checkpoint",default=str(ROOT/"checkpoints"/"graspnet-checkpoint-rs.tar"))
     args = parser.parse_args()
     if len(set(args.states)) != len(args.states):
         raise ValueError("sealed states must be unique")
@@ -99,19 +115,26 @@ def main() -> int:
     perception_item = next((item for item in frozen_tools.values()
                             if item["manifest"].get("name")=="open_vocab_rgbd_grounded_sam"),None)
     if perception_item is None:raise RuntimeError("frozen Skill lacks perception Tool")
-    perception_class=_load_class(perception_item["folder"]/"tool.py","OpenVocabularyRGBD")
+    perception_class=_load_class(perception_item["folder"]/"tool.py","OpenVocabularyRGBD",
+        relative_modules=_relative_module_paths(perception_item))
     perception = perception_class(
-        groundingdino_root="third_party/GroundingDINO",
-        groundingdino_config=("third_party/GroundingDINO/groundingdino/config/"
-                              "GroundingDINO_SwinT_OGC.py"),
-        groundingdino_checkpoint="/data/zxy/GroundingDINO/models/groundingdino_swint_ogc.pth",
-        sam_root="third_party/segment-anything",
-        sam_checkpoint="checkpoints/sam_vit_b_01ec64.pth", device=args.device)
+        groundingdino_root=args.groundingdino_root,
+        groundingdino_config=args.groundingdino_config,
+        groundingdino_checkpoint=args.groundingdino_checkpoint,
+        sam_root=args.sam_root,sam_checkpoint=args.sam_checkpoint, device=args.device)
+    tool_runtime=ToolRuntime(python=args.python,
+                             allowed_input_roots=[output/"runs"])
+    api_key=(os.environ.get("EMBODIED_CODEX_API_KEY") or
+             os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY", ""))
     capabilities = _capabilities(
-        frozen_tools, perception, api_key=os.environ.get("APEX_API_KEY", ""),
+        frozen_tools, perception, api_key=api_key,
         base_url=args.base_url, model=args.model,
-        reasoning_effort=args.reasoning_effort)
-    runtime = ControllerRuntime(python="/data/zxy/envs/vla-report/bin/python")
+        reasoning_effort=args.reasoning_effort,tool_runtime=tool_runtime,
+        python=args.python,graspnet_backend=args.graspnet_backend,
+        graspnet_checkpoint=args.graspnet_checkpoint)
+    capabilities,capability_contracts=_controller_capability_view(
+        manifest,frozen_tools,capabilities)
+    runtime = ControllerRuntime(python=args.python)
     pending = []; sensor_rows = []; scored = []
     try:
         # Execution phase: the evaluator remains unopened for the whole batch.
@@ -121,6 +144,7 @@ def main() -> int:
                 episode=LiberoEpisode(args.suite, args.task, state,
                                       config_path=args.config),
                 artifact_dir=episode_dir, capabilities=capabilities,
+                capability_contracts=capability_contracts,
                 verifiers={"visual_attachment": perception.verify_attachment,
                            "visual_support_relation": perception.verify_support_relation})
             pending.append((state, deployment, episode_dir))

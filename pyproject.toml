@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embodied-codex-harness"
+version = "0.3.0"
+description = "An environment-neutral coding-agent harness for autonomous robot capability acquisition"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "jsonschema>=4.20",
+  "openai>=1.40",
+  "opencv-python-headless>=4.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+embodied_codex = "embodied_codex.cli:main"
+roboforge = "embodied_codex.cli:main"
+embodied-codex-libero = "embodied_codex.examples.run_libero:main"
+embodied-codex-kernel-conformance = "embodied_codex.examples.run_kernel_conformance:main"
+embodied-codex-asset-conformance = "embodied_codex.examples.run_asset_conformance:main"
+embodied-codex-acquisition-conformance = "embodied_codex.examples.run_acquisition_conformance:main"
+embodied-codex-audit = "embodied_codex.examples.audit_harness_runs:main"
+embodied-codex-libero-campaign = "evaluation.run_embodied_codex_libero:main"
+
+[tool.setuptools.packages.find]
+include = ["embodied_codex*", "evaluation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "evaluation"]
+addopts = "-ra"
