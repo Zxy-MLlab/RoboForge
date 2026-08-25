@@ -16,7 +16,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-libero = ["robosuite>=1.2", "torch>=2.0"]
+libero = [
+  "torch>=2.0",
+  "robosuite>=1.4",
+  "libero @ git+https://github.com/Lifelong-Robot-Learning/LIBERO.git@master",
+]
 
 [project.scripts]
 embodied_codex = "embodied_codex.cli:main"
