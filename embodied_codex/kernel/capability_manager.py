@@ -75,7 +75,7 @@ class CapabilityManager:
     def build(self, directory: str, argv: list[str] | None = None) -> dict[str, Any]:
         """Build/check an acquired bundle inside the workspace sandbox."""
         target = (self.workspace.root / directory).resolve()
-        if self.workspace.root not in target.parents or not target.is_dir():
+        if (target != self.workspace.root and self.workspace.root not in target.parents) or not target.is_dir():
             raise CapabilityError("build directory is outside workspace")
         command = argv or ["python", "-m", "compileall", "-q", "."]
         result = self.workspace.run_command(command, timeout_seconds=600)
