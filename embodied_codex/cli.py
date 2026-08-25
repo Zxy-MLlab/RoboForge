@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import inspect
 import hashlib
@@ -79,7 +80,8 @@ def run_command(args) -> int:
     sandbox.require()
     if not getattr(sandbox, "safe", False) and args.profile != "dev":
         raise RuntimeError("unsafe sandbox is permitted only with --profile dev")
-    preflight = adapter_preflight(args.adapter)
+    with contextlib.redirect_stdout(sys.stderr):
+        preflight = adapter_preflight(args.adapter)
     if preflight is not None and preflight.get("ok") is not True:
         raise RuntimeError("Adapter preflight failed: " + json.dumps(preflight, default=str))
     default_run_id = hashlib.sha256(json.dumps({"adapter": args.adapter,
@@ -105,9 +107,11 @@ def run_command(args) -> int:
                 for state in args.states:
                     case_root = run_dir / "cases" / f"state_{state}"
                     case_root.mkdir(parents=True, exist_ok=True)
-                    cases.append((str(state), load_adapter(args.adapter,
-                        task=str(args.task), run_dir=case_root, case=state,
-                        configuration=adapter_configuration)))
+                    with contextlib.redirect_stdout(sys.stderr):
+                        case_adapter = load_adapter(args.adapter,
+                            task=str(args.task), run_dir=case_root, case=state,
+                            configuration=adapter_configuration)
+                    cases.append((str(state), case_adapter))
             except Exception:
                 for _case_id, case_adapter in cases:
                     close_case = getattr(case_adapter, "close", None)
@@ -120,14 +124,16 @@ def run_command(args) -> int:
             adapter = CampaignAdapter(cases)
             loop_type = CampaignRunner
         else:
-            adapter = load_adapter(args.adapter, task=str(args.task), run_dir=run_dir,
-                                   configuration=adapter_configuration)
+            with contextlib.redirect_stdout(sys.stderr):
+                adapter = load_adapter(args.adapter, task=str(args.task), run_dir=run_dir,
+                                       configuration=adapter_configuration)
             loop_type = AgentLoop
         model = _model(args, provider_configuration)
         observe = getattr(adapter, "initial_observation", None)
         if not callable(observe):
             raise TypeError("Adapter must implement initial_observation()")
-        initial_observation = observe()
+        with contextlib.redirect_stdout(sys.stderr):
+            initial_observation = observe()
         if source is not None:
             workspace.write_file("controller.py", source.read_text())
         tools, skills, experiences, gaps = _libraries(asset_root, workspace, adapter, sandbox)
@@ -200,20 +206,23 @@ def doctor_command(args) -> int:
     smoke_dir = Path(args.run_dir or Path("runs/doctor") / args.adapter.replace(":", "_")); smoke_dir.mkdir(parents=True, exist_ok=True)
     adapter = None
     try:
-        preflight = adapter_preflight(args.adapter)
+        with contextlib.redirect_stdout(sys.stderr):
+            preflight = adapter_preflight(args.adapter)
         checks["adapter_preflight"] = preflight or {"ok": True, "provided": False}
         if preflight is not None and preflight.get("ok") is not True:
             raise RuntimeError("Adapter preflight failed")
         task = args.task if args.task is not None else (
             adapter_doctor_task(args.adapter) or "doctor")
-        adapter = load_adapter(args.adapter, task=str(task), run_dir=smoke_dir)
+        with contextlib.redirect_stdout(sys.stderr):
+            adapter = load_adapter(args.adapter, task=str(task), run_dir=smoke_dir)
         checks["adapter_init"] = "available"
         required = ("dispatch", "project_rpc_output", "initial_observation", "sensor_report", "verification_receipt",
                     "execution_identity", "resume_protocol", "register_capability", "close")
         missing = [name for name in required if not callable(getattr(adapter, name, None))]
         if missing:
             raise RuntimeError(f"Adapter contract methods missing: {missing}")
-        observation = adapter.initial_observation()
+        with contextlib.redirect_stdout(sys.stderr):
+            observation = adapter.initial_observation()
         if not isinstance(observation, dict):
             raise RuntimeError("Adapter initial_observation must return an object")
         checks["adapter_smoke"] = "available"
