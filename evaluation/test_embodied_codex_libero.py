@@ -124,5 +124,7 @@ def test_validation_command_requires_three_state_runner_inputs():
         reasoning_effort="high",device="cuda",python="python",
         groundingdino_checkpoint="groundingdino.pth",base_url="https://api.example/v1",
     )
-    assert "embodied_codex.examples.evaluate_libero_skill_sealed" in command
-    assert command[command.index("--states")+1:command.index("--model")]==["1","2","3"]
+    assert "embodied_codex" in command
+    assert "evaluate_libero_skill_sealed" not in " ".join(command)
+    assert command[command.index("--adapter")+1] == "libero@1"
+    assert "--controller-source" in command

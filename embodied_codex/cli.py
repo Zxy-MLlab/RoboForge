@@ -57,6 +57,10 @@ def run_command(args) -> int:
     run_dir = Path(args.run_dir or f"runs/roboforge/{args.profile}").resolve(); run_dir.mkdir(parents=True, exist_ok=True)
     asset_root = Path(args.asset_root or (run_dir / "assets")).resolve(); asset_root.mkdir(parents=True, exist_ok=True)
     workspace = PersistentWorkspace(run_dir / "workspace")
+    if args.controller_source:
+        source = Path(args.controller_source).resolve()
+        if not source.is_file(): raise FileNotFoundError(source)
+        workspace.write_file("controller.py", source.read_text())
     adapter = load_adapter(args.adapter, task=str(args.task), run_dir=run_dir)
     tools, skills, experiences, gaps = _libraries(asset_root, workspace)
     manager = CapabilityManager(asset_root=asset_root, workspace=workspace, adapter=adapter,
@@ -114,6 +118,7 @@ def main(argv=None) -> int:
     run = sub.add_parser("run"); run.add_argument("--adapter", required=True); run.add_argument("--task", required=True)
     run.add_argument("--profile", choices=("dev", "autonomous", "benchmark"), default="dev")
     run.add_argument("--run-dir"); run.add_argument("--asset-root"); run.add_argument("--model"); run.add_argument("--model-name", default="gpt-5.6-sol")
+    run.add_argument("--controller-source", help="load a frozen controller into the workspace before running")
     run.add_argument("--base-url", default=os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1")); run.add_argument("--reasoning-effort", default="high")
     run.add_argument("--max-steps", type=int, default=60); run.add_argument("--max-executions", type=int, default=20); run.add_argument("--controller-timeout", type=float, default=600)
     run.set_defaults(handler=run_command)

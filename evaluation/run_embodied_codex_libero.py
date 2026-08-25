@@ -132,13 +132,13 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
 def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output: Path,
                        model: str,reasoning_effort: str,device: str,python: str,
                        groundingdino_checkpoint: str,base_url: str):
-    return ([python,"-m","embodied_codex.examples.evaluate_libero_skill_sealed",
-        "--skill-dir",str(skill_dir),"--output-dir",str(output),
-        "--suite","libero_spatial","--task",str(task),"--states",
-        *[str(state) for state in states],"--model",model,
-        "--reasoning-effort",reasoning_effort,"--device",device,
-        "--groundingdino-checkpoint",groundingdino_checkpoint,"--python",python]
-        +["--base-url",base_url])
+    state = states[0]
+    return ([python,"-m","embodied_codex","run","--adapter",f"libero@{state}",
+        "--task",str(task),"--profile","benchmark","--run-dir",str(output),
+        "--asset-root",str(Path(skill_dir).resolve().parent / "assets"),
+        "--controller-source",str(Path(skill_dir).resolve() / "controller.py"),
+        "--model-name",model,"--reasoning-effort",reasoning_effort,
+        "--base-url",base_url,"--max-steps","8"])
 
 
 def _development_status(root: Path):
