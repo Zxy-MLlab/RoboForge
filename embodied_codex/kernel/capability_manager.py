@@ -62,8 +62,10 @@ class CapabilityManager:
         destination = (self.workspace.root / filename).resolve()
         if self.workspace.root not in destination.parents: raise CapabilityError("download escapes workspace")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        download_public_file(url, destination)
-        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        download = download_public_file(url, destination)
+        # download_public_file hashes while streaming; do not read a model or
+        # checkpoint back into memory just to verify the optional checksum.
+        digest = str(download["sha256"])
         if sha256 and digest.casefold() != str(sha256).casefold():
             destination.unlink(missing_ok=True); raise CapabilityError("download checksum mismatch")
         return {"path": str(destination.relative_to(self.workspace.root)), "sha256": digest,

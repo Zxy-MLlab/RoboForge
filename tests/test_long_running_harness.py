@@ -376,6 +376,27 @@ def test_only_promoted_assets_are_returned_by_default(tmp_path):
     assert library.search("quality", statuses={"candidate"})[0]["tool_id"] == candidate["tool_id"]
 
 
+def test_capability_download_uses_streaming_digest(monkeypatch, tmp_path):
+    import embodied_codex.kernel.capability_manager as module
+
+    payload = b"large artifact streamed in chunks"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    def fake_download(url, destination):
+        Path(destination).write_bytes(payload)
+        return {"url": url, "path": str(destination), "bytes": len(payload),
+                "sha256": digest}
+
+    monkeypatch.setattr(module, "download_public_file", fake_download)
+    workspace = PersistentWorkspace(tmp_path / "workspace", require_sandbox=False)
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace,
+                                adapter=FakeAdapter("download", tmp_path / "run"))
+    result = manager.download("https://example.com/model.bin", "downloads/model.bin",
+                              sha256=digest)
+    assert result["sha256"] == digest
+    assert workspace.read("downloads/model.bin") == payload.decode()
+
+
 class _CampaignCase(FakeAdapter):
     def __init__(self, task, root, *, case, expected):
         self.expected = expected
