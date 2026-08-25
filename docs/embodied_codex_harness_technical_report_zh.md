@@ -71,10 +71,9 @@ RPC 都有稳定事件摘要，模型先读紧凑执行摘要，再用 `inspect_
 - assets：检索、检查、注册、测试和修订资产；
 - robot：静态 preflight 后运行一个完整 Controller。
 
-Tool 默认以 dedicated manual + JSON Schema 为调用依据。确定性 Tool 注册只要求实现、
-schema 和显式声明的公开来源 URL；Harness 自动生成 schema 一致的
-基础 manual、依赖记录和来源 provenance。需要额外依赖的模型则必须走 Capability Package
-并保留完整模型 provenance。`load_tool_source` 是独立、
+Tool 默认以 dedicated manual + JSON Schema 为调用依据。确定性 Tool 注册只要求实现和
+schema；可选的来源、依赖和内容哈希作为资产元数据保存。需要额外依赖的模型则必须走
+Capability Package。`load_tool_source` 是独立、
 分页的异常路径；manual 与证据冲突时才能用于定位实现，并通过证据发布新 manual revision。
 资产检索由服务端返回有界摘要；模型不能用大 limit 枚举资产库。Gap 由 `record_gap` 保存
 结构化失败记录。`latest_evidence`、
@@ -152,23 +151,17 @@ keywords，以及复制进资产目录的证据文件与哈希。跨任务仅通
 
 ### 3.4 Capability Gap
 
-Gap 是失败到能力获取的结构化研究记录：
+Gap 是失败到能力获取的简短结构化记录，至少包含任务、失败证据、已尝试方法、缺少的能力、
+当前阻塞原因和可能的下一步。它不驱动 Kernel 状态机：
 
 ```text
-failure evidence
-→ hypotheses
-→ selected diagnosis
-→ required capability contract
-→ searched candidates
-→ provenance decision
-→ integration result
-→ task validation
-→ reuse evidence
+task + failure evidence
+→ attempted methods
+→ missing capability + blocked reason
+→ next steps
 ```
 
-revision 不可变且只能延伸最新 revision。状态生命周期受代码验证；`integrating` 必须
-真的包含搜索候选、provenance 和集成记录，不能把普通参数微调冒充新能力。
-同名 Experience retrieval 只返回最新 revision，已纠正的旧经验不会继续污染任务上下文。
+Gap 可作为共享资产检索结果提供给模型，但是否继续搜索、获取或重试完全由模型决定。
 
 ### 3.5 Skill
 
@@ -177,16 +170,15 @@ Skill 由模型通过显式资产工具提交，核心只验证其成功证据�
 由外部 admission/evaluation policy 决定。Skill 包含：
 
 - 完整 Controller 与 SHA256；
-- 实际调用的 Tool/Package 整包与 hash；
-- Tool manual；
+- 实际调用的 Tool/Package ID；其不可变 manifest、源码和 manual 仍由共享资产库按需加载；
 - 已复制且逐文件哈希的发展 execution、Adapter trace、rollout 与 Experience；
 - preconditions/effects；
 - required sensors/Robot operations；
 - parameters/failure modes/composition notes。
 
-LLM 可以提出接口，但 Harness 会把 Tool dependencies、Robot operations 和 sensors 与
-真实成功 trace 合并，防止遗漏。新任务通过检索 Skill manifest 后按需分页读取 Controller
-进行组合，不全量注入所有 Skill 源码。
+LLM 可以提出接口；Skill manifest 记录提交时声明的 Tool ID 和接口信息，真实证据由
+Harness 绑定。新任务通过检索 Skill manifest 后按需分页读取 Controller 进行组合，不全量
+注入所有 Skill 源码。
 
 ## 4. 自主进化的一轮
 
@@ -196,7 +188,7 @@ LLM 可以提出接口，但 Harness 会把 Tool dependencies、Robot operations
 4. preflight 拒绝可静态确定的 SDK 拼写、空 reference 等错误，不消耗 robot rollout。
 5. Controller 在新 episode 执行；完整源代码先保存为 immutable snapshot。
 6. `robot_execution.json`、视频、RGB-D、动作回执先原子提交。
-7. GPT 查看证据，区分接口错误、感知错误、规划错误和物理失败。
+7. GPT 查看证据并判断下一步。
 8. 若现有能力不足，发布 Gap，搜索互联网，安装并测试新 Tool/Package。
 9. GPT 改写 Controller，下一 iteration 再执行。
 10. 模型可以选择保存 Skill、Experience 或 Gap；是否进入 sealed batch 由外部评测 runner 决定。
