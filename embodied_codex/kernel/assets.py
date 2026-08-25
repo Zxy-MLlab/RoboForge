@@ -141,13 +141,14 @@ class CapabilityLibrary:
     def __init__(self, root: str | Path, workspace_root: str | Path | None = None,
                  *, python: str | Path | None = None, scope_id: str | None = None,
                  allowed_input_roots: list[str | Path] | None = None,
-                 sandbox: Any = None, require_runtime: bool = True):
+                 sandbox: Any = None, require_runtime: bool = True,
+                 cas: ContentAddressedStore | None = None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = Path(workspace_root or self.root).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.scope_id = str(scope_id or "shared")
-        self.cas = ContentAddressedStore(self.root / "_cas")
+        self.cas = cas or ContentAddressedStore(self.root / "_cas")
         self.runtime = (ToolRuntime(python=python, allowed_input_roots=allowed_input_roots,
                                     sandbox=sandbox) if require_runtime else None)
 
@@ -342,13 +343,12 @@ class CapabilityLibrary:
                 for record in records:
                     bundled = path / "bundle" / str(record.get("path") or "")
                     try:
-                        blob = self.cas.resolve(str(record.get("blob_uri") or ""))
+                        self.cas.resolve(str(record.get("blob_uri") or ""))
                     except ContentAddressedStoreError as exc:
                         raise AssetError(str(exc)) from exc
                     if (not bundled.is_file() or bundled.is_symlink()
                             or bundled.stat().st_size != int(record.get("bytes", -1))
-                            or (not os.path.samefile(bundled, blob)
-                                and _sha256(bundled) != record.get("sha256"))):
+                            or self.cas.digest(bundled) != record.get("sha256")):
                         raise AssetError("capability bundle CAS reference mismatch")
                     digest.update(str(record["path"]).encode() + b"\0")
                     digest.update(bytes.fromhex(str(record["sha256"])))

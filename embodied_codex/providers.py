@@ -10,6 +10,10 @@ class ProviderConfigurationError(RuntimeError):
     pass
 
 
+_OPENAI_ENDPOINT = "https://api.openai.com/v1"
+_APEX_ENDPOINT = "https://api.apexin.ai/v1"
+
+
 @dataclass(frozen=True)
 class ProviderConfiguration:
     provider: str
@@ -45,11 +49,15 @@ def resolve_provider(*, provider: str | None = None, base_url: str | None = None
     key = str(env.get(key_env) or "")
     if not key:
         raise ProviderConfigurationError(f"{key_env} is not configured for provider {requested}")
-    default_endpoint = ("https://api.openai.com/v1" if requested == "openai"
-                        else str(env.get("APEX_BASE_URL") or "https://api.apexin.ai/v1"))
-    endpoint = str(base_url or default_endpoint).rstrip("/")
+    default_endpoint = _OPENAI_ENDPOINT if requested == "openai" else _APEX_ENDPOINT
+    configured_endpoint = str(base_url or (
+        env.get("APEX_BASE_URL") if requested == "apex" else default_endpoint) or "").rstrip("/")
+    endpoint = configured_endpoint or default_endpoint
     if not endpoint.startswith("https://"):
         raise ProviderConfigurationError("model endpoint must use HTTPS")
+    if endpoint != default_endpoint:
+        raise ProviderConfigurationError(
+            f"provider {requested} only permits its official endpoint {default_endpoint}")
     return ProviderConfiguration(requested, endpoint, key_env, key)
 
 

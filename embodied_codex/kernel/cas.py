@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import uuid
 
 
@@ -20,14 +21,6 @@ def _fingerprint(path: Path) -> tuple[int, int, int, int, int]:
     value = path.stat(follow_symlinks=False)
     return (value.st_dev, value.st_ino, value.st_size,
             value.st_mtime_ns, value.st_ctime_ns)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _copy_sparse(source: Path, destination: Path) -> None:
@@ -111,6 +104,16 @@ class ContentAddressedStore:
             raise ContentAddressedStoreError("invalid CAS digest")
         return self.blob_root / digest[:2] / digest[2:]
 
+    @staticmethod
+    def digest(path: str | Path) -> str:
+        """Hash a regular file in bounded memory."""
+        source = Path(path)
+        digest = hashlib.sha256()
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def _load_index(self) -> dict[str, dict[str, object]]:
         try:
             value = json.loads(self.index_path.read_text())
@@ -144,8 +147,9 @@ class ContentAddressedStore:
         with self._locked():
             index = self._load_index()
             cached = index.get(key) or {}
-            digest = (str(cached.get("sha256"))
-                      if cached.get("fingerprint") == fingerprint else _sha256(source))
+            digest = (self.digest(source) if expected is not None else
+                      (str(cached.get("sha256"))
+                       if cached.get("fingerprint") == fingerprint else self.digest(source)))
             if expected is not None and digest != expected:
                 raise ContentAddressedStoreError(
                     f"CAS source checksum mismatch: {source.name}")
@@ -156,7 +160,7 @@ class ContentAddressedStore:
                     f".{destination.name}.tmp-{uuid.uuid4().hex}")
                 try:
                     _copy_sparse(source, temporary)
-                    if _sha256(temporary) != digest:
+                    if self.digest(temporary) != digest:
                         raise ContentAddressedStoreError("CAS copy checksum mismatch")
                     temporary.chmod(0o444)
                     os.replace(temporary, destination)
@@ -164,6 +168,8 @@ class ContentAddressedStore:
                     temporary.unlink(missing_ok=True)
             elif destination.stat().st_size != source.stat().st_size:
                 raise ContentAddressedStoreError("CAS digest collision")
+            elif expected is not None and self.digest(destination) != digest:
+                raise ContentAddressedStoreError("existing CAS blob checksum mismatch")
             index[key] = {"fingerprint": fingerprint, "sha256": digest}
             self._save_index(index)
         return {"blob_uri": f"{self.prefix}{digest}", "sha256": digest,
@@ -176,18 +182,19 @@ class ContentAddressedStore:
         path = self._path(digest)
         if not path.is_file() or path.is_symlink():
             raise ContentAddressedStoreError(f"CAS blob is missing: {uri}")
-        if verify and _sha256(path) != digest:
+        if verify and self.digest(path) != digest:
             raise ContentAddressedStoreError(f"CAS blob checksum mismatch: {uri}")
         return path
 
     def materialize(self, uri: str, destination: str | Path, *,
-                    executable: bool = False) -> Path:
-        source = self.resolve(uri)
+                    executable: bool = False, writable: bool = False,
+                    verify: bool = False) -> Path:
+        source = self.resolve(uri, verify=verify)
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if executable:
+        if writable or executable:
             _copy_sparse(source, destination)
-            destination.chmod(0o555)
+            destination.chmod(0o555 if executable else stat.S_IMODE(source.stat().st_mode) | 0o200)
         else:
             try:
                 os.link(source, destination)

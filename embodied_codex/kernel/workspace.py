@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
 from dataclasses import dataclass
-import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +13,7 @@ import tempfile
 import uuid
 from typing import Any, Mapping
 
+from .cas import ContentAddressedStore
 from .sandbox import SandboxBackend, default_sandbox
 
 
@@ -31,70 +29,10 @@ class WorkspaceSnapshot:
     path: str
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _fingerprint(path: Path) -> tuple[int, int, int, int, int]:
     value = path.stat(follow_symlinks=False)
     return (value.st_dev, value.st_ino, value.st_size,
             value.st_mtime_ns, value.st_ctime_ns)
-
-
-def _copy_sparse(source: Path, destination: Path) -> None:
-    """Copy using reflink when possible and preserve holes otherwise."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    source_fd = os.open(source, os.O_RDONLY)
-    destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    cloned = False
-    try:
-        try:
-            fcntl.ioctl(destination_fd, 0x40049409, source_fd)  # FICLONE
-            cloned = True
-        except OSError as exc:
-            if exc.errno not in {errno.EOPNOTSUPP, errno.ENOTTY, errno.EXDEV,
-                                 errno.EINVAL, errno.ENOSYS}:
-                raise
-        size = os.fstat(source_fd).st_size
-        if not cloned:
-            os.ftruncate(destination_fd, size)
-        position = size if cloned else 0
-        while position < size:
-            try:
-                data_offset = os.lseek(source_fd, position, os.SEEK_DATA)
-            except OSError as exc:
-                if exc.errno == errno.ENXIO:
-                    break
-                if exc.errno == errno.EINVAL:
-                    os.lseek(source_fd, 0, os.SEEK_SET)
-                    os.lseek(destination_fd, 0, os.SEEK_SET)
-                    while True:
-                        chunk = os.read(source_fd, 4 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        os.write(destination_fd, chunk)
-                    break
-                raise
-            hole_offset = os.lseek(source_fd, data_offset, os.SEEK_HOLE)
-            os.lseek(source_fd, data_offset, os.SEEK_SET)
-            os.lseek(destination_fd, data_offset, os.SEEK_SET)
-            remaining = hole_offset - data_offset
-            while remaining:
-                chunk = os.read(source_fd, min(4 * 1024 * 1024, remaining))
-                if not chunk:
-                    raise WorkspaceError("source changed while copying")
-                os.write(destination_fd, chunk)
-                remaining -= len(chunk)
-            position = hole_offset
-        os.fsync(destination_fd)
-    finally:
-        os.close(destination_fd)
-        os.close(source_fd)
-    shutil.copystat(source, destination, follow_symlinks=False)
 
 
 class PersistentWorkspace:
@@ -106,7 +44,8 @@ class PersistentWorkspace:
     _LARGE_FILE_THRESHOLD = 16 * 1024 * 1024
 
     def __init__(self, root: str | Path, *, sandbox: SandboxBackend | None = None,
-                 require_sandbox: bool = True):
+                 require_sandbox: bool = True,
+                 cas: ContentAddressedStore | None = None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         run_root = self.root.parent
@@ -114,12 +53,7 @@ class PersistentWorkspace:
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
         self.stage_root = run_root / "staged_worktree"
         self.stage_root.mkdir(parents=True, exist_ok=True)
-        self.cas_root = run_root / "workspace_cas"
-        self.blob_root = self.cas_root / "blobs"
-        self.blob_root.mkdir(parents=True, exist_ok=True)
-        self._cache_path = self.cas_root / "hash_index.json"
-        self._cas_lock_path = self.cas_root / ".lock"
-        self._hash_cache = self._load_hash_cache()
+        self.cas = cas or ContentAddressedStore(run_root / "workspace_cas")
         self._locked_files: dict[str, str] = {}
         self._protected_paths: set[Path] = set()
         self.sandbox = sandbox or default_sandbox()
@@ -128,28 +62,6 @@ class PersistentWorkspace:
                 self.sandbox.require()
             except Exception as exc:
                 raise WorkspaceError(str(exc)) from exc
-
-    @contextmanager
-    def _cas_lock(self):
-        descriptor = os.open(self._cas_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
-
-    def _load_hash_cache(self) -> dict[str, dict[str, Any]]:
-        try:
-            value = json.loads(self._cache_path.read_text())
-            return value if isinstance(value, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-    def _save_hash_cache(self) -> None:
-        temporary = self._cache_path.with_suffix(f".tmp-{uuid.uuid4().hex}")
-        temporary.write_text(json.dumps(self._hash_cache, sort_keys=True) + "\n")
-        os.replace(temporary, self._cache_path)
 
     def _path(self, relative: str) -> Path:
         candidate = Path(str(relative))
@@ -168,17 +80,13 @@ class PersistentWorkspace:
                 known: Mapping[str, Any] | None = None) -> dict[str, Any]:
         key = relative or path.relative_to(self.root).as_posix()
         fingerprint = list(_fingerprint(path))
-        cached = self._hash_cache.get(key)
-        if known is not None and list(known.get("fingerprint") or []) == fingerprint:
-            digest = str(known["sha256"])
-        elif cached and cached.get("fingerprint") == fingerprint:
-            digest = str(cached["sha256"])
-        else:
-            digest = _sha256_file(path)
-        self._hash_cache[key] = {"fingerprint": fingerprint, "sha256": digest}
+        expected = (str(known["sha256"]) if known and
+                    list(known.get("fingerprint") or []) == fingerprint else None)
+        stored = self.cas.put(path, expected_sha256=expected)
         value = path.stat(follow_symlinks=False)
-        return {"path": key, "bytes": value.st_size, "sha256": digest,
-                "mode": stat.S_IMODE(value.st_mode), "fingerprint": fingerprint}
+        return {"path": key, "bytes": value.st_size, "sha256": stored["sha256"],
+                "mode": stat.S_IMODE(value.st_mode), "fingerprint": fingerprint,
+                "blob_uri": stored["blob_uri"]}
 
     def _all_files(self) -> list[dict[str, Any]]:
         rows = []
@@ -187,7 +95,6 @@ class PersistentWorkspace:
                 raise WorkspaceError(f"workspace symlinks are not allowed: {path}")
             if path.is_file():
                 rows.append(self._record(path))
-        self._save_hash_cache()
         return rows
 
     def list_files(self, pattern: str = "**/*") -> list[dict[str, Any]]:
@@ -199,7 +106,6 @@ class PersistentWorkspace:
                 row = self._record(path)
                 row.pop("fingerprint", None)
                 rows.append(row)
-        self._save_hash_cache()
         return rows[:2000]
 
     def index(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -242,20 +148,9 @@ class PersistentWorkspace:
                 destination.mkdir(parents=True, exist_ok=True)
                 shutil.copystat(source, destination, follow_symlinks=False)
             elif source.is_file():
-                if source.stat().st_size >= self._LARGE_FILE_THRESHOLD:
-                    # snapshot() normally populated the CAS already.  Store
-                    # lazily as well so a pre-existing large workspace can be
-                    # staged without first making a second full copy.
-                    relative_name = relative.as_posix()
-                    row = self._record(source, relative_name)
-                    uri = self._store_blob(source, row["sha256"])
-                    blob = self.resolve_blob(uri)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.link(blob, destination)
-                    # CAS blobs are immutable and read-only.  The hard link
-                    # intentionally inherits that protection in the stage.
-                else:
-                    _copy_sparse(source, destination)
+                row = self._record(source, relative.as_posix())
+                self.cas.materialize(row["blob_uri"], destination,
+                                     writable=source.stat().st_size < self._LARGE_FILE_THRESHOLD)
 
     def _commit_staged_tree(self, stage: Path) -> None:
         backup = self.root.parent / f".{self.root.name}.rollback-{uuid.uuid4().hex}"
@@ -291,7 +186,7 @@ class PersistentWorkspace:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     temporary = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex}")
                     if "blob_uri" in operation:
-                        _copy_sparse(self.resolve_blob(str(operation["blob_uri"])), temporary)
+                        self.cas.materialize(str(operation["blob_uri"]), temporary, writable=True)
                     elif "content_base64" in operation:
                         temporary.write_bytes(base64.b64decode(
                             str(operation["content_base64"]), validate=True))
@@ -319,7 +214,7 @@ class PersistentWorkspace:
 
     def lock_file(self, path: str, expected_sha256: str) -> None:
         target = self._path(path)
-        if not target.is_file() or _sha256_file(target) != str(expected_sha256):
+        if not target.is_file() or self.cas.digest(target) != str(expected_sha256):
             raise WorkspaceError(f"cannot lock mismatched workspace file: {path}")
         self._locked_files[str(path)] = str(expected_sha256)
 
@@ -403,8 +298,7 @@ class PersistentWorkspace:
         finally:
             shutil.rmtree(stage, ignore_errors=True)
 
-    @staticmethod
-    def _validate_staged_tree(stage: Path,
+    def _validate_staged_tree(self, stage: Path,
                               known: Mapping[str, Mapping[str, Any]] | None = None
                               ) -> dict[str, dict[str, Any]]:
         files: dict[str, dict[str, Any]] = {}
@@ -423,43 +317,10 @@ class PersistentWorkspace:
             fingerprint = list(_fingerprint(path))
             old = (known or {}).get(relative)
             digest = (str(old["sha256"]) if old and old.get("fingerprint") == fingerprint
-                      else _sha256_file(path))
+                      else self.cas.digest(path))
             files[relative] = {"bytes": size, "sha256": digest,
                                "fingerprint": fingerprint}
         return files
-
-    def _blob_path(self, digest: str) -> Path:
-        if not isinstance(digest, str) or len(digest) != 64 or any(
-                char not in "0123456789abcdef" for char in digest):
-            raise WorkspaceError("invalid CAS digest")
-        return self.blob_root / digest[:2] / digest[2:]
-
-    def resolve_blob(self, uri: str) -> Path:
-        prefix = "cas://sha256/"
-        if not str(uri).startswith(prefix):
-            raise WorkspaceError("unsupported blob URI")
-        path = self._blob_path(str(uri)[len(prefix):])
-        if not path.is_file():
-            raise WorkspaceError(f"workspace blob is missing: {uri}")
-        return path
-
-    def _store_blob(self, source: Path, digest: str) -> str:
-        destination = self._blob_path(digest)
-        with self._cas_lock():
-            if not destination.exists():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                temporary = destination.with_name(f".{destination.name}.tmp-{uuid.uuid4().hex}")
-                try:
-                    _copy_sparse(source, temporary)
-                    if _sha256_file(temporary) != digest:
-                        raise WorkspaceError("CAS copy checksum mismatch")
-                    temporary.chmod(0o444)
-                    os.replace(temporary, destination)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            elif destination.stat().st_size != source.stat().st_size:
-                raise WorkspaceError("CAS digest collision")
-        return f"cas://sha256/{digest}"
 
     def _changed_since_snapshot(self):
         current = {item["path"]: item["sha256"] for item in self._all_files()}
@@ -473,11 +334,8 @@ class PersistentWorkspace:
 
     def snapshot(self) -> WorkspaceSnapshot:
         files = self._all_files()
-        entries = []
-        for item in files:
-            uri = self._store_blob(self._path(item["path"]), item["sha256"])
-            entries.append({key: item[key] for key in ("path", "bytes", "sha256", "mode")} |
-                           {"blob_uri": uri})
+        entries = [{key: item[key] for key in ("path", "bytes", "sha256", "mode", "blob_uri")}
+                   for item in files]
         controller = next((item["sha256"] for item in entries
                            if item["path"] == "controller.py"), None)
         payload = {"protocol": "roboforge-workspace-snapshot-v2",
@@ -523,7 +381,7 @@ class PersistentWorkspace:
         operations.extend({"path": path, "delete": True} for path in current - expected)
         self._atomic_tree_update(operations)
         for item in payload.get("files", []):
-            if _sha256_file(self._path(item["path"])) != item["sha256"]:
+            if self.cas.digest(self._path(item["path"])) != item["sha256"]:
                 raise WorkspaceError(f"restored file checksum mismatch: {item['path']}")
         return WorkspaceSnapshot(str(payload["snapshot_id"]),
             payload.get("controller_sha256"), tuple(sorted(expected)), str(snapshot))

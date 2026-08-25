@@ -1,4 +1,5 @@
 import hashlib
+import errno
 import json
 import multiprocessing
 import os
@@ -12,7 +13,8 @@ import pytest
 from embodied_codex.kernel.assets import CapabilityLibrary
 from embodied_codex.kernel.agent_loop import LoopBudget
 from embodied_codex.kernel.campaign import CampaignAdapter, CampaignRunner
-from embodied_codex.kernel.capability_manager import CapabilityManager
+from embodied_codex.kernel.capability_manager import CapabilityError, CapabilityManager
+from embodied_codex.kernel.cas import ContentAddressedStore
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore
 from embodied_codex.kernel.runtime import ControllerRuntime
@@ -36,6 +38,11 @@ def _register_concurrently(asset_root: str, workspace_root: str, index: int, que
         provenance={"origin": "internal", "producer": "test"},
     )
     queue.put(result["tool_id"])
+
+
+def _put_blob_concurrently(cas_root: str, source: str, queue) -> None:
+    store = ContentAddressedStore(cas_root)
+    queue.put(store.put(source)["blob_uri"])
 
 
 def test_posix_probe_never_claims_safe_without_real_path_confinement():
@@ -70,11 +77,11 @@ def test_workspace_snapshot_uses_cas_for_one_gib_sparse_file(tmp_path):
     assert entry["blob_uri"].startswith("cas://sha256/")
     assert "content" not in entry and "content_base64" not in entry
 
-    blob = workspace.resolve_blob(entry["blob_uri"])
+    blob = workspace.cas.resolve(entry["blob_uri"], verify=True)
     assert blob.stat().st_size == 1 << 30
     assert blob.stat().st_blocks * 512 < 64 * 1024 * 1024
     assert workspace.snapshot().snapshot_id == first.snapshot_id
-    assert len(list(workspace.blob_root.glob("*/*"))) == 1
+    assert len(list(workspace.cas.blob_root.glob("*/*"))) == 1
 
     large.unlink()
     workspace.restore(first.snapshot_id)
@@ -93,7 +100,7 @@ def test_workspace_command_stages_large_file_as_cas_hardlink(tmp_path):
         stream.seek((1 << 30) - 1)
         stream.write(b"\0")
     workspace.snapshot()
-    blob = next(workspace.blob_root.glob("*/*"))
+    blob = next(workspace.cas.blob_root.glob("*/*"))
     script = ("import os\n"
               "st=os.stat('downloads/model.ckpt')\n"
               "print(f'{st.st_ino}:{st.st_size}', flush=True)\n"
@@ -107,6 +114,38 @@ def test_workspace_command_stages_large_file_as_cas_hardlink(tmp_path):
     assert int(inode) == blob.stat().st_ino
     assert workspace.read("small.txt") == "staged"
     assert large.stat().st_size == 1 << 30
+
+
+def test_staged_replacement_does_not_mutate_cas_blob(tmp_path):
+    cas = ContentAddressedStore(tmp_path / "cas")
+    workspace = PersistentWorkspace(tmp_path / "run/workspace", cas=cas,
+                                    require_sandbox=False)
+    workspace.write_file("weights.bin", "original")
+    snapshot = workspace.snapshot()
+    record = json.loads(Path(snapshot.path).read_text())["files"][0]
+    blob = cas.resolve(record["blob_uri"], verify=True)
+    workspace.write_file("weights.bin", "replacement")
+    assert cas.digest(blob) == record["sha256"]
+    assert workspace.read("weights.bin") == "replacement"
+
+
+def test_concurrent_put_same_content_creates_one_verified_blob(tmp_path):
+    source = tmp_path / "checkpoint.bin"
+    source.write_bytes(b"same checkpoint")
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    processes = [context.Process(target=_put_blob_concurrently,
+        args=(str(tmp_path / "cas"), str(source), queue)) for _ in range(6)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(30)
+        assert process.exitcode == 0
+    uris = [queue.get(timeout=2) for _ in processes]
+    assert len(set(uris)) == 1
+    store = ContentAddressedStore(tmp_path / "cas")
+    assert store.resolve(uris[0], verify=True).is_file()
+    assert len(list(store.blob_root.glob("*/*"))) == 1
 
 
 def test_capability_versions_share_checkpoint_cas_blob(tmp_path):
@@ -147,12 +186,15 @@ def test_capability_versions_share_checkpoint_cas_blob(tmp_path):
     first_weights = first_path / "bundle/weights.bin"
     second_weights = second_path / "bundle/weights.bin"
     assert first["tool_id"] != second["tool_id"]
-    assert os.path.samefile(first_weights, second_weights)
     first_manifest = json.loads((first_path / "manifest.json").read_text())
     weight_record = next(row for row in first_manifest["bundle_files"]
                          if row["path"] == "weights.bin")
-    assert os.path.samefile(first_weights,
-        library.cas.resolve(weight_record["blob_uri"], verify=True))
+    second_manifest = json.loads((second_path / "manifest.json").read_text())
+    second_weight_record = next(row for row in second_manifest["bundle_files"]
+                                if row["path"] == "weights.bin")
+    assert weight_record["blob_uri"] == second_weight_record["blob_uri"]
+    assert library.cas.digest(first_weights) == checkpoint_sha
+    assert library.cas.digest(second_weights) == checkpoint_sha
     assert first_weights.stat().st_blocks * 512 < 8 << 20
     assert not any(str(tmp_path) in path.read_text()
                    for path in library.cas.root.glob("*.json"))
@@ -395,6 +437,125 @@ def test_capability_download_uses_streaming_digest(monkeypatch, tmp_path):
                               sha256=digest)
     assert result["sha256"] == digest
     assert workspace.read("downloads/model.bin") == payload.decode()
+
+
+def test_capability_download_never_reads_download_target_into_memory(monkeypatch, tmp_path):
+    import embodied_codex.kernel.capability_manager as module
+
+    payload = b"streamed checkpoint payload"
+    digest = hashlib.sha256(payload).hexdigest()
+    workspace = PersistentWorkspace(tmp_path / "workspace", require_sandbox=False)
+    target = (workspace.root / "downloads/model.bin").resolve()
+    original_read_bytes = Path.read_bytes
+
+    def fake_download(url, destination):
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(payload)
+        return {"url": url, "path": str(destination), "bytes": len(payload),
+                "sha256": digest}
+
+    def reject_target_read(path):
+        if path.resolve() == target:
+            raise AssertionError("download target was loaded with read_bytes")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(module, "download_public_file", fake_download)
+    monkeypatch.setattr(Path, "read_bytes", reject_target_read)
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace,
+                                adapter=FakeAdapter("download", tmp_path / "run"))
+    result = manager.download("https://example.com/model.bin", "downloads/model.bin",
+                              sha256=digest)
+    assert result["bytes"] == len(payload)
+    assert target.stat().st_size == len(payload)
+
+
+def test_capability_download_checksum_mismatch_removes_target(monkeypatch, tmp_path):
+    import embodied_codex.kernel.capability_manager as module
+
+    workspace = PersistentWorkspace(tmp_path / "workspace", require_sandbox=False)
+    target = workspace.root / "downloads/model.bin"
+
+    def fake_download(url, destination):
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(b"unexpected")
+        return {"url": url, "path": str(destination), "bytes": 10,
+                "sha256": hashlib.sha256(b"unexpected").hexdigest()}
+
+    monkeypatch.setattr(module, "download_public_file", fake_download)
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace,
+                                adapter=FakeAdapter("download", tmp_path / "run"))
+    with pytest.raises(CapabilityError, match="checksum mismatch"):
+        manager.download("https://example.com/model.bin", "downloads/model.bin",
+                         sha256="0" * 64)
+    assert not target.exists()
+
+
+def test_builtin_provider_endpoints_cannot_cross_route_credentials():
+    from embodied_codex.providers import ProviderConfigurationError, resolve_provider
+
+    environment = {"OPENAI_API_KEY": "openai-secret", "APEX_API_KEY": "apex-secret"}
+    openai = resolve_provider(provider="openai", environment=environment)
+    apex = resolve_provider(provider="apex", environment=environment)
+    assert openai.endpoint == "https://api.openai.com/v1"
+    assert apex.endpoint == "https://api.apexin.ai/v1"
+    with pytest.raises(ProviderConfigurationError):
+        resolve_provider(provider="openai", base_url="https://api.apexin.ai/v1",
+                         environment=environment)
+    with pytest.raises(ProviderConfigurationError):
+        resolve_provider(provider="apex", base_url="https://api.openai.com/v1",
+                         environment=environment)
+
+
+def test_workspace_and_capability_package_share_one_cas_protocol(tmp_path):
+    shared_cas = ContentAddressedStore(tmp_path / "shared-cas")
+    workspace = PersistentWorkspace(tmp_path / "run/workspace", cas=shared_cas,
+                                    require_sandbox=False)
+    bundle = workspace.root / "bundle"
+    bundle.mkdir(parents=True)
+    payload = b"shared checkpoint contents"
+    checkpoint = bundle / "weights.bin"
+    checkpoint.write_bytes(payload)
+    checkpoint_sha = hashlib.sha256(payload).hexdigest()
+    workspace_snapshot = workspace.snapshot()
+    library = CapabilityLibrary(tmp_path / "assets/tools", workspace.root,
+                                python=sys.executable, require_runtime=False,
+                                cas=shared_cas)
+    (bundle / "tool.py").write_text("def run(payload):\n    return {'value': 1}\n")
+    registration = library.register_package(
+        name="shared_package", bundle_path="bundle", description="shared CAS package",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        output_schema={"type": "object", "properties": {"value": {"type": "integer"}},
+                       "required": ["value"], "additionalProperties": False},
+        package_spec={"kind": "model", "entrypoint": "tool.py", "accelerator": "cpu",
+                      "checkpoint_sha256": {"weights.bin": checkpoint_sha}})
+    manifest = json.loads((library.root / registration["tool_id"].replace(":", "/") /
+                           "manifest.json").read_text())
+    snapshot_payload = json.loads(Path(workspace_snapshot.path).read_text())
+    snapshot_uri = next(item["blob_uri"] for item in snapshot_payload["files"]
+                        if item["path"] == "bundle/weights.bin")
+    package_uri = next(item["blob_uri"] for item in manifest["bundle_files"]
+                       if item["path"] == "weights.bin")
+    assert snapshot_uri == package_uri
+    assert shared_cas.resolve(snapshot_uri).is_file()
+    assert len(list((shared_cas.root / "blobs").glob("*/*"))) == 2
+
+
+def test_cas_materialize_falls_back_without_hardlink_and_preserves_blob(monkeypatch, tmp_path):
+    cas = ContentAddressedStore(tmp_path / "cas")
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"immutable")
+    record = cas.put(source)
+    original_link = os.link
+
+    def reject_link(*args, **kwargs):
+        raise OSError(errno.EXDEV, "cross-device")
+
+    monkeypatch.setattr(os, "link", reject_link)
+    destination = tmp_path / "materialized.bin"
+    cas.materialize(record["blob_uri"], destination)
+    assert destination.read_bytes() == b"immutable"
+    assert cas.resolve(record["blob_uri"], verify=True).read_bytes() == b"immutable"
+    monkeypatch.setattr(os, "link", original_link)
 
 
 class _CampaignCase(FakeAdapter):
