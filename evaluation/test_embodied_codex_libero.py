@@ -96,13 +96,15 @@ def test_canonical_command_exposes_only_complete_program_controller():
         task=4,states=[23,7,9],max_iterations=8,output=Path("run"),
         capabilities=Path("tools"),model="gpt-5.6-sol",
         reasoning_effort="high",device="cuda",python="python",
-        groundingdino_checkpoint="groundingdino.pth",base_url="https://api.example/v1",
+        groundingdino_checkpoint="groundingdino.pth",provider="openai",
+        base_url="https://api.example/v1",
     )
     assert "embodied_codex" in command
     assert "EvolutionEngine" not in " ".join(command)
     assert command[command.index("--adapter")+1] == "libero"
     assert command[command.index("--asset-root")+1] == "tools"
     assert command[command.index("--profile")+1] == "autonomous"
+    assert command[command.index("--provider")+1] == "openai"
     assert command[command.index("--states")+1:] == ["23", "7", "9"]
 
 

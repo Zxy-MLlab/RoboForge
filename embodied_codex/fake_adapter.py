@@ -146,14 +146,26 @@ def _call(turn, name, arguments):
 
 
 class FakeModel:
-    """Evidence-driven scripted model used only to prove the real Harness path."""
+    """State-reactive model used only to exercise the real Harness mechanics."""
 
     def __init__(self):
         self.turn = 0
+        self.searched = False
         self.reuse = False
+        self.inspected = False
         self.tool_id = "fake_target:v001"
-        self.evidence_uri = None
-        self.image_uri = None
+        self.bad_controller_written = False
+        self.execution_inspected = False
+        self.image_viewed = False
+        self.tool_source_written = False
+        self.tool_registered = False
+        self.tool_verified = False
+        self.fixed_controller_written = False
+        self.tool_promoted = False
+        self.experience_id = None
+        self.experience_promoted = False
+        self.skill_id = None
+        self.skill_promoted = False
 
     @staticmethod
     def _documents(messages):
@@ -183,74 +195,163 @@ class FakeModel:
                     return found
         return None
 
+    @staticmethod
+    def _last_call(messages):
+        for message in reversed(messages):
+            calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if calls:
+                return calls[-1].get("function", {}).get("name")
+        return None
+
+    @staticmethod
+    def _current_context(documents):
+        return next((value for value in reversed(documents)
+                     if isinstance(value, dict) and "workspace" in value
+                     and "state" in value), {})
+
+    @staticmethod
+    def _latest_tool_payload(messages):
+        for message in reversed(messages):
+            if message.get("role") != "tool" or not isinstance(message.get("content"), str):
+                continue
+            try:
+                return json.loads(message["content"])
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @staticmethod
+    def _evidence_paths(context):
+        campaign = (context.get("state") or {}).get("campaign") or {}
+        records = campaign.get("validated_cases") or {}
+        values = [item.get("artifact_uri") for item in records.values()
+                  if isinstance(item, dict) and item.get("artifact_uri")]
+        if values:
+            return values
+        latest = context.get("latest_evidence") or {}
+        return [latest["artifact_uri"]] if latest.get("artifact_uri") else []
+
+    def _consume_result(self, messages):
+        name = self._last_call(messages)
+        payload = self._latest_tool_payload(messages)
+        result = payload.get("result") if payload.get("ok") else None
+        if name == "search_assets" and isinstance(result, dict):
+            self.searched = True
+            promoted = next((item for item in result.get("tools", [])
+                             if item.get("status") == "promoted"), None)
+            if promoted:
+                self.reuse = True
+                self.tool_id = promoted["tool_id"]
+        elif name == "inspect_asset" and payload.get("ok"):
+            self.inspected = True
+        elif name == "write_file" and payload.get("ok"):
+            changed = set((result or {}).get("changed") or [])
+            if "target_tool.py" in changed:
+                self.tool_source_written = True
+            elif "controller.py" in changed:
+                if self.tool_verified or self.reuse:
+                    self.fixed_controller_written = True
+                else:
+                    self.bad_controller_written = True
+        elif name == "inspect_execution" and payload.get("ok"):
+            self.execution_inspected = True
+        elif name == "view_sensor_artifact" and payload.get("ok"):
+            self.image_viewed = True
+        elif name == "register_tool" and isinstance(result, dict):
+            self.tool_registered = True
+            self.tool_id = result["tool_id"]
+        elif name == "test_tool" and isinstance(result, dict):
+            self.tool_verified = result.get("status") == "verified"
+        elif name == "register_experience" and isinstance(result, dict):
+            self.experience_id = result.get("experience_id")
+        elif name == "register_skill" and isinstance(result, dict):
+            self.skill_id = result.get("skill_id")
+        elif name == "promote_asset" and isinstance(result, dict):
+            asset_id = result.get("tool_id") or result.get("experience_id") or result.get("skill_id")
+            if asset_id == self.tool_id:
+                self.tool_promoted = True
+            elif asset_id == self.experience_id:
+                self.experience_promoted = True
+            elif asset_id == self.skill_id:
+                self.skill_promoted = True
+
     def decide(self, *, messages, tools):
         self.turn += 1
         documents = self._documents(messages)
-        if self.turn == 1:
+        self._consume_result(messages)
+        context = self._current_context(documents)
+        latest = context.get("latest_evidence") or {}
+        sensor = latest.get("sensor_report") or {}
+        campaign = (context.get("state") or {}).get("campaign") or {}
+        workspace_files = {item.get("path") for item in context.get("workspace", [])}
+        last_call = self._last_call(messages)
+        last_payload = self._latest_tool_payload(messages)
+        last_changed = set(((last_payload.get("result") or {}).get("changed") or [])
+                           if last_payload.get("ok") else [])
+        if not self.searched:
             return _call(self.turn, "search_assets", {"query": "set marker target value", "limit": 5})
-        if self.turn == 2:
-            tool_rows = []
-            for document in documents:
-                result = self._find(document, "tools")
-                if isinstance(result, list):
-                    tool_rows.extend(result)
-            tested = next((row for row in tool_rows if row.get("status") == "tested"), None)
-            self.reuse = tested is not None
-            if tested:
-                self.tool_id = tested["tool_id"]
-                return _call(self.turn, "inspect_asset", {"asset_id": self.tool_id})
-            bad = "def run(robot):\n    robot.observe('rgb', {})\n    robot.act({'type':'set_value','value':0})\n    return robot.verify('target', {})\n"
-            return _call(self.turn, "write_file", {"path": "controller.py", "content": bad})
         if self.reuse:
-            if self.turn == 3:
+            if not self.inspected:
+                return _call(self.turn, "inspect_asset", {"asset_id": self.tool_id})
+            if not self.fixed_controller_written:
                 source = ("def run(robot):\n    target=robot.use(%r,{})\n    robot.act({'type':'set_value','value':target['value']})\n"
                           "    return robot.verify('target', {})\n") % self.tool_id
                 return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
-            if self.turn == 4:
+            if campaign and not campaign.get("all_cases_verified"):
                 return _call(self.turn, "run_controller", {})
-            return _call(self.turn, "finish", {"summary": "reused tested shared Tool"})
-        if self.turn == 3:
+            if sensor.get("sensor_success") is not True:
+                return _call(self.turn, "run_controller", {})
+            return _call(self.turn, "finish", {"summary": "reused promoted shared Tool"})
+
+        if "controller.py" not in workspace_files and not self.bad_controller_written:
+            bad = "def run(robot):\n    robot.observe('rgb', {})\n    robot.act({'type':'set_value','value':0})\n    return robot.verify('target', {})\n"
+            return _call(self.turn, "write_file", {"path": "controller.py", "content": bad})
+        if last_call == "write_file" and "controller.py" in last_changed:
             return _call(self.turn, "run_controller", {})
-        if self.turn == 4:
-            return _call(self.turn, "inspect_execution", {})
-        if self.turn == 5:
-            for document in reversed(documents):
-                candidate = self._find(document, "rgb_path")
-                if isinstance(candidate, str):
-                    self.image_uri = candidate
-                    break
-            return _call(self.turn, "view_sensor_artifact", {"path": self.image_uri or "artifact://adapter/frame-0001.png"})
-        if self.turn == 6:
+        if sensor.get("sensor_success") is False:
+            if not self.execution_inspected:
+                return _call(self.turn, "inspect_execution", {})
+            if not self.image_viewed:
+                image_uri = self._find(latest, "rgb_path") or "artifact://adapter/frame-0001.png"
+                return _call(self.turn, "view_sensor_artifact", {"path": image_uri})
+        if not self.tool_source_written:
             return _call(self.turn, "write_file", {"path": "target_tool.py",
                 "content": "def run(payload):\n    return {'value': 1}\n"})
-        if self.turn == 7:
+        if not self.tool_registered:
             return _call(self.turn, "register_tool", {"name": "fake_target", "source_path": "target_tool.py",
                 "description": "Return the generic target value", "input_schema": {"type": "object", "properties": {},
                 "additionalProperties": False}, "output_schema": {"type": "object", "properties": {"value": {"type": "integer"}},
                 "required": ["value"], "additionalProperties": False}})
-        if self.turn == 8:
+        if not self.tool_verified:
             return _call(self.turn, "test_tool", {"tool_id": self.tool_id,
                 "cases": [{"input": {}, "expected": {"value": 1}}]})
-        if self.turn == 9:
+        if not self.fixed_controller_written:
             source = ("def run(robot):\n    target=robot.use(%r,{})\n    robot.act({'type':'set_value','value':target['value']})\n"
                       "    return robot.verify('target', {})\n") % self.tool_id
             return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
-        if self.turn == 10:
+        if campaign and not campaign.get("all_cases_verified"):
             return _call(self.turn, "run_controller", {})
-        for document in reversed(documents):
-            candidate = self._find(document, "artifact_uri")
-            if isinstance(candidate, str):
-                self.evidence_uri = candidate
-                break
-        if self.turn == 11:
+        if sensor.get("sensor_success") is not True:
+            return _call(self.turn, "run_controller", {})
+        evidence_paths = self._evidence_paths(context)
+        if not self.tool_promoted:
+            return _call(self.turn, "promote_asset", {"asset_id": self.tool_id,
+                "evidence_paths": evidence_paths, "applicability": {"adapter_contract": "target-value"}})
+        if self.experience_id is None:
             return _call(self.turn, "register_experience", {"name": "verified_target_repair",
                 "summary": "A tested target Tool corrected the failed value selection.",
                 "applicability": "Adapters exposing a target-value action contract.",
-                "keywords": ["target", "repair"], "evidence_paths": [self.evidence_uri]})
-        if self.turn == 12:
+                "keywords": ["target", "repair"], "evidence_paths": evidence_paths})
+        if not self.experience_promoted:
+            return _call(self.turn, "promote_asset", {"asset_id": self.experience_id,
+                "evidence_paths": evidence_paths, "applicability": {"adapter_contract": "target-value"}})
+        if len(evidence_paths) >= 2 and self.skill_id is None:
             return _call(self.turn, "register_skill", {"name": "verified_target_skill",
                 "task": "set target value", "controller": "controller.py", "tool_ids": [self.tool_id],
-                "evidence": {"verified": True}, "evidence_paths": [self.evidence_uri]})
+                "evidence": {"verified": True}, "evidence_paths": evidence_paths})
+        if self.skill_id and not self.skill_promoted:
+            return _call(self.turn, "promote_asset", {"asset_id": self.skill_id,
+                "evidence_paths": evidence_paths, "applicability": {"adapter_contract": "target-value"}})
         return _call(self.turn, "finish", {"summary": "verified after evidence-driven repair"})
 
 

@@ -7,21 +7,26 @@ untrusted Tool execution to the isolated ToolRuntime.
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
 import sys
 import tempfile
 import time
+import uuid
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator, ValidationError
 
 from ..retrieval import rank_records
 from ..tool_runtime import ToolRuntime
+from .cas import ContentAddressedStore, ContentAddressedStoreError
 
 
 class AssetError(RuntimeError):
@@ -40,8 +45,39 @@ def _tree_sha256(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         digest.update(str(path.relative_to(root)).encode() + b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        digest.update(bytes.fromhex(_sha256(path)))
     return digest.hexdigest()
+
+
+@contextmanager
+def _registry_lock(root: Path):
+    root.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(root / ".registry.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        with temporary.open("x") as stream:
+            json.dump(dict(value), stream, indent=2, sort_keys=True, default=str)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _name(value: str) -> str:
@@ -105,14 +141,15 @@ class CapabilityLibrary:
     def __init__(self, root: str | Path, workspace_root: str | Path | None = None,
                  *, python: str | Path | None = None, scope_id: str | None = None,
                  allowed_input_roots: list[str | Path] | None = None,
-                 sandbox: Any = None):
+                 sandbox: Any = None, require_runtime: bool = True):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = Path(workspace_root or self.root).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.scope_id = str(scope_id or "shared")
-        self.runtime = ToolRuntime(python=python, allowed_input_roots=allowed_input_roots,
-                                   sandbox=sandbox)
+        self.cas = ContentAddressedStore(self.root / "_cas")
+        self.runtime = (ToolRuntime(python=python, allowed_input_roots=allowed_input_roots,
+                                    sandbox=sandbox) if require_runtime else None)
 
     def _workspace_file(self, path: str) -> Path:
         candidate = (self.workspace / str(path)).resolve()
@@ -141,26 +178,27 @@ class CapabilityLibrary:
 
     def _write_manifest(self, name: str, manifest: dict[str, Any], source: Path,
                         manual: Mapping[str, Any]) -> dict[str, Any]:
-        family = self.root / name
-        versions = [int(path.name[1:]) for path in family.glob("v[0-9]*") if path.name[1:].isdigit()]
-        version = max(versions, default=0) + 1
-        target = family / f"v{version:03d}"
-        staging = family / f".v{version:03d}.staging-{time.time_ns()}"
-        staging.mkdir(parents=True, exist_ok=False)
-        try:
-            shutil.copy2(source, staging / "tool.py")
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-        manifest["version"] = version
-        manifest["tool_id"] = f"{name}:v{version:03d}"
-        manifest["created_unix"] = time.time()
-        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-        manual_dir = self.root / "_manuals" / name / f"v{version:03d}"
-        manual_dir.mkdir(parents=True, exist_ok=True)
-        (manual_dir / "r001.json").write_text(json.dumps({"tool_id": manifest["tool_id"],
-            "manual_revision": 1, "manual": dict(manual), "created_unix": time.time()}, indent=2) + "\n")
-        staging.replace(target)
+        with _registry_lock(self.root):
+            family = self.root / name
+            versions = [int(path.name[1:]) for path in family.glob("v[0-9]*") if path.name[1:].isdigit()]
+            version = max(versions, default=0) + 1
+            target = family / f"v{version:03d}"
+            staging = family / f".v{version:03d}.staging-{uuid.uuid4().hex}"
+            staging.mkdir(parents=True, exist_ok=False)
+            try:
+                shutil.copy2(source, staging / "tool.py")
+                manifest["version"] = version
+                manifest["tool_id"] = f"{name}:v{version:03d}"
+                manifest["created_unix"] = time.time()
+                (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+                manual_dir = self.root / "_manuals" / name / f"v{version:03d}"
+                manual_dir.mkdir(parents=True, exist_ok=True)
+                (manual_dir / "r001.json").write_text(json.dumps({"tool_id": manifest["tool_id"],
+                    "manual_revision": 1, "manual": dict(manual), "created_unix": time.time()}, indent=2) + "\n")
+                staging.replace(target)
+            except Exception:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
         return {"tool_id": manifest["tool_id"], "status": manifest["status"]}
 
     def register_tool(self, *, name: str, source_path: str, description: str,
@@ -168,6 +206,7 @@ class CapabilityLibrary:
                       source_urls: list[str] | None = None,
                       manual: Mapping[str, Any] | None = None,
                       runtime_requirements: list[str] | None = None,
+                      provenance: Mapping[str, Any] | None = None,
                       **_unused) -> dict[str, Any]:
         source = self._workspace_file(source_path)
         text = source.read_text()
@@ -188,18 +227,20 @@ class CapabilityLibrary:
                     and (old.get("dependencies") or {}).get("runtime_requirements", [])
                         == requirements):
                 return {"tool_id": old["tool_id"], "status": old["status"], "duplicate_of": old["tool_id"]}
-        manifest = {"protocol": "roboforge-tool-v1", "name": name, "description": str(description),
+        manifest = {"protocol": "roboforge-tool-v2", "name": name, "description": str(description),
                     "input_schema": input_schema, "output_schema": output_schema,
                     "source_sha256": digest, "source_urls": list(source_urls or []),
                     "dependencies": {"runtime": "isolated-python",
                                      "runtime_requirements": requirements},
-                    "visibility": "shared", "status": "registered", "tests": []}
+                    "provenance": dict(provenance or {"origin": "workspace"}),
+                    "visibility": "shared", "status": "candidate", "tests": []}
         return self._write_manifest(name, manifest, source,
             _manual(description, input_schema, output_schema, manual))
 
     def register_package(self, *, name: str, bundle_path: str, description: str,
                          input_schema: Mapping[str, Any], output_schema: Mapping[str, Any],
                          package_spec: Mapping[str, Any], source_urls: list[str] | None = None,
+                         provenance: Mapping[str, Any] | None = None,
                          **_unused) -> dict[str, Any]:
         bundle = (self.workspace / str(bundle_path)).resolve()
         if self.workspace not in bundle.parents or not bundle.is_dir():
@@ -221,8 +262,7 @@ class CapabilityLibrary:
         for relative, expected in checkpoint_hashes.items():
             checkpoint = (bundle / relative).resolve()
             if (bundle not in checkpoint.parents or not checkpoint.is_file()
-                    or not re.fullmatch(r"[0-9a-f]{64}", expected)
-                    or _sha256(checkpoint) != expected):
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected)):
                 raise AssetError(f"checkpoint sha256 mismatch: {relative}")
         accelerator = str(spec.get("accelerator", "cpu"))
         if accelerator not in {"cpu", "cuda"}:
@@ -233,35 +273,60 @@ class CapabilityLibrary:
         input_schema = _schema(input_schema, "input_schema")
         output_schema = _schema(output_schema, "output_schema")
         name = _name(name)
-        manifest = {"protocol": "roboforge-capability-package-v1", "name": name,
+        records = []
+        try:
+            for path in sorted(item for item in bundle.rglob("*") if item.is_file()):
+                if path.is_symlink():
+                    raise AssetError("capability package symlinks are not allowed")
+                relative = path.relative_to(bundle).as_posix()
+                stored = self.cas.put(path,
+                    expected_sha256=checkpoint_hashes.get(relative))
+                records.append({"path": relative, **stored,
+                                "executable": bool(path.stat().st_mode & 0o111)})
+        except ContentAddressedStoreError as exc:
+            raise AssetError(str(exc)) from exc
+        missing_checkpoints = set(checkpoint_hashes) - {row["path"] for row in records}
+        if missing_checkpoints:
+            raise AssetError(f"checkpoint files are missing: {sorted(missing_checkpoints)}")
+        tree_digest = hashlib.sha256()
+        for record in records:
+            tree_digest.update(str(record["path"]).encode() + b"\0")
+            tree_digest.update(bytes.fromhex(str(record["sha256"])))
+        manifest = {"protocol": "roboforge-capability-package-v2", "name": name,
                     "description": str(description), "input_schema": input_schema,
                     "output_schema": output_schema, "source_sha256": _sha256(bundle / entry),
-                    "bundle_tree_sha256": _tree_sha256(bundle), "asset_kind": kind,
+                    "bundle_tree_sha256": tree_digest.hexdigest(),
+                    "bundle_files": records, "asset_kind": kind,
                     "checkpoint_sha256": checkpoint_hashes, "runtime_spec": {
                         "entrypoint": str(entry), "accelerator": accelerator,
                         "network": False, "timeout_seconds": float(spec.get("timeout_seconds", 120)),
                         "runtime_requirements": requirements},
                     "source_urls": list(source_urls or []), "visibility": "shared",
-                    "status": "registered", "tests": []}
+                    "provenance": dict(provenance or {"origin": "workspace"}),
+                    "status": "candidate", "tests": []}
         # _write_manifest expects a single source; stage package explicitly.
-        family = self.root / name
-        version = max([int(p.name[1:]) for p in family.glob("v[0-9]*") if p.name[1:].isdigit()] or [0]) + 1
-        target = family / f"v{version:03d}"
-        staging = family / f".v{version:03d}.staging-{time.time_ns()}"
-        staging.mkdir(parents=True, exist_ok=False)
-        try:
-            shutil.copytree(bundle, staging / "bundle")
-            manifest.update(version=version, tool_id=f"{name}:v{version:03d}", created_unix=time.time())
-            (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-            (self.root / "_manuals" / name / f"v{version:03d}").mkdir(parents=True, exist_ok=True)
-            (self.root / "_manuals" / name / f"v{version:03d}" / "r001.json").write_text(
-                json.dumps({"tool_id": manifest["tool_id"], "manual_revision": 1,
-                    "manual": _manual(description, input_schema, output_schema)}, indent=2) + "\n")
-            staging.replace(target)
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-        return {"tool_id": manifest["tool_id"], "status": "registered"}
+        with _registry_lock(self.root):
+            family = self.root / name
+            version = max([int(p.name[1:]) for p in family.glob("v[0-9]*") if p.name[1:].isdigit()] or [0]) + 1
+            target = family / f"v{version:03d}"
+            staging = family / f".v{version:03d}.staging-{uuid.uuid4().hex}"
+            staging.mkdir(parents=True, exist_ok=False)
+            try:
+                for record in records:
+                    self.cas.materialize(str(record["blob_uri"]),
+                        staging / "bundle" / str(record["path"]),
+                        executable=bool(record.get("executable")))
+                manifest.update(version=version, tool_id=f"{name}:v{version:03d}", created_unix=time.time())
+                (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+                (self.root / "_manuals" / name / f"v{version:03d}").mkdir(parents=True, exist_ok=True)
+                (self.root / "_manuals" / name / f"v{version:03d}" / "r001.json").write_text(
+                    json.dumps({"tool_id": manifest["tool_id"], "manual_revision": 1,
+                        "manual": _manual(description, input_schema, output_schema)}, indent=2) + "\n")
+                staging.replace(target)
+            except Exception:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+        return {"tool_id": manifest["tool_id"], "status": "candidate"}
 
     def inspect(self, tool_id: str, *, include_source: bool = False) -> dict[str, Any]:
         path = self._path(tool_id)
@@ -270,8 +335,27 @@ class CapabilityLibrary:
         source = path / "bundle" / str(runtime["entrypoint"]) if runtime else path / "tool.py"
         if not source.is_file() or _sha256(source) != manifest.get("source_sha256"):
             raise AssetError("Tool source hash mismatch")
-        if runtime and _tree_sha256(path / "bundle") != manifest.get("bundle_tree_sha256"):
-            raise AssetError("capability bundle hash mismatch")
+        if runtime:
+            records = manifest.get("bundle_files")
+            if isinstance(records, list):
+                digest = hashlib.sha256()
+                for record in records:
+                    bundled = path / "bundle" / str(record.get("path") or "")
+                    try:
+                        blob = self.cas.resolve(str(record.get("blob_uri") or ""))
+                    except ContentAddressedStoreError as exc:
+                        raise AssetError(str(exc)) from exc
+                    if (not bundled.is_file() or bundled.is_symlink()
+                            or bundled.stat().st_size != int(record.get("bytes", -1))
+                            or (not os.path.samefile(bundled, blob)
+                                and _sha256(bundled) != record.get("sha256"))):
+                        raise AssetError("capability bundle CAS reference mismatch")
+                    digest.update(str(record["path"]).encode() + b"\0")
+                    digest.update(bytes.fromhex(str(record["sha256"])))
+                if digest.hexdigest() != manifest.get("bundle_tree_sha256"):
+                    raise AssetError("capability bundle manifest hash mismatch")
+            elif _tree_sha256(path / "bundle") != manifest.get("bundle_tree_sha256"):
+                raise AssetError("capability bundle hash mismatch")
         receipts = self._test_receipts(tool_id)
         if receipts:
             manifest = {**manifest, "status": receipts[-1]["status"],
@@ -296,25 +380,40 @@ class CapabilityLibrary:
         manifest = self.inspect(tool_id)["manifest"]
         normalized = _manual(manifest["description"], manifest["input_schema"], manifest["output_schema"], manual)
         directory = self.root / "_manuals" / manifest["name"] / tool_id.partition(":")[2]
-        directory.mkdir(parents=True, exist_ok=True)
-        revision = len(list(directory.glob("r*.json"))) + 1
-        path = directory / f"r{revision:03d}.json"
-        evidence_dir = directory / f"r{revision:03d}_evidence"
-        evidence_dir.mkdir(exist_ok=False)
-        records = []
-        for index, value in enumerate(evidence_paths, 1):
-            source = Path(value).resolve()
-            if not source.is_file():
-                raise AssetError(f"manual evidence does not exist: {source}")
-            destination = evidence_dir / f"{index:03d}_{source.name}"
-            shutil.copy2(source, destination)
-            records.append({"artifact_uri": destination.relative_to(directory).as_posix(),
-                            "sha256": _sha256(destination)})
-        path.write_text(json.dumps({"tool_id": tool_id, "manual_revision": revision,
-            "manual": normalized, "evidence": records}, indent=2) + "\n")
+        with _registry_lock(self.root):
+            directory.mkdir(parents=True, exist_ok=True)
+            revisions = [int(path.stem[1:]) for path in directory.glob("r*.json")
+                         if path.stem[1:].isdigit()]
+            revision = max(revisions, default=0) + 1
+            path = directory / f"r{revision:03d}.json"
+            evidence_dir = directory / f"r{revision:03d}_evidence"
+            temporary_dir = directory / f".r{revision:03d}_evidence-{uuid.uuid4().hex}"
+            temporary_path = directory / f".r{revision:03d}-{uuid.uuid4().hex}.json"
+            records = []
+            try:
+                temporary_dir.mkdir(exist_ok=False)
+                for index, value in enumerate(evidence_paths, 1):
+                    source = Path(value).resolve()
+                    if not source.is_file():
+                        raise AssetError(f"manual evidence does not exist: {source}")
+                    destination = temporary_dir / f"{index:03d}_{source.name}"
+                    shutil.copy2(source, destination)
+                    records.append({"artifact_uri":
+                        f"{evidence_dir.name}/{destination.name}",
+                        "sha256": _sha256(destination)})
+                temporary_path.write_text(json.dumps({"tool_id": tool_id,
+                    "manual_revision": revision, "manual": normalized,
+                    "evidence": records}, indent=2) + "\n")
+                temporary_dir.replace(evidence_dir)
+                temporary_path.replace(path)
+            finally:
+                shutil.rmtree(temporary_dir, ignore_errors=True)
+                temporary_path.unlink(missing_ok=True)
         return {"tool_id": tool_id, "manual_revision": revision}
 
     def run(self, tool_id: str, payload: Mapping[str, Any]):
+        if self.runtime is None:
+            raise AssetError("Tool runtime was not configured for this registry process")
         inspected = self.inspect(tool_id)
         manifest = inspected["manifest"]
         _validate(dict(payload), manifest["input_schema"], "Tool input")
@@ -335,21 +434,23 @@ class CapabilityLibrary:
                                 "actual": actual, "expected": case.get("expected")})
             except Exception as exc:
                 results.append({"passed": False, "error": f"{type(exc).__name__}: {exc}"})
-        status = "tested" if all(item.get("passed") is True for item in results) else "test_failed"
+        status = "verified" if all(item.get("passed") is True for item in results) else "rejected"
         directory = self.root / "_tests" / tool_id.partition(":")[0] / tool_id.partition(":")[2]
-        directory.mkdir(parents=True, exist_ok=True)
-        sequence = len(list(directory.glob("r*.json"))) + 1
         receipt = {"protocol": "roboforge-tool-test-v1", "tool_id": tool_id,
                    "source_sha256": manifest["source_sha256"], "status": status,
                    "cases": results, "tested_unix": time.time()}
         encoded = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
         receipt["receipt_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
         encoded = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
-        target = directory / f"r{sequence:03d}.json"
-        temporary = target.with_suffix(".tmp"); temporary.write_text(encoded); temporary.replace(target)
-        if status != "tested":
+        with _registry_lock(self.root):
+            directory.mkdir(parents=True, exist_ok=True)
+            sequence = len(list(directory.glob("r*.json"))) + 1
+            target = directory / f"r{sequence:03d}.json"
+            temporary = target.with_suffix(f".tmp-{uuid.uuid4().hex}")
+            temporary.write_text(encoded); temporary.replace(target)
+        if status != "verified":
             raise AssetError("Tool contract tests failed")
-        return {"tool_id": tool_id, "status": "tested", "results": results}
+        return {"tool_id": tool_id, "status": "verified", "results": results}
 
     def _test_receipts(self, tool_id: str):
         directory = self.root / "_tests" / tool_id.partition(":")[0] / tool_id.partition(":")[2]
@@ -371,25 +472,70 @@ class CapabilityLibrary:
             if receipts:
                 manifest={**manifest,"status":receipts[-1]["status"],
                           "test_receipt_sha256":receipts[-1]["receipt_sha256"]}
+            promotions = self._promotion_receipts(manifest["tool_id"])
+            if promotions:
+                manifest = {**manifest, "status": "promoted",
+                            "promotion_receipt_sha256": promotions[-1]["receipt_sha256"]}
             rows.append(manifest)
         return sorted(rows,key=lambda row:row.get("tool_id", ""))
 
     def tested(self):
-        return [row for row in self.list_all() if row.get("status") == "tested"]
+        return [row for row in self.list_all() if row.get("status") in {"verified", "promoted"}]
+
+    def promoted(self):
+        return [row for row in self.list_all() if row.get("status") == "promoted"]
 
     def list_summaries(self):
         return [{key: row.get(key) for key in ("tool_id", "name", "version", "description",
             "input_schema", "output_schema", "status", "runtime_spec", "dependencies")}
             for row in self.list_all()]
 
-    def search(self, query: str, limit: int = 8):
-        return rank_records(query, self.list_summaries(),
+    def search(self, query: str, limit: int = 8, statuses: set[str] | None = None):
+        allowed = {"promoted"} if statuses is None else set(statuses)
+        rows = [row for row in self.list_summaries() if row.get("status") in allowed]
+        return rank_records(query, rows,
             text_fields=("tool_id", "name", "description", "input_schema", "output_schema"),
             id_field="tool_id", limit=limit)
 
     def runtime_functions(self):
         return {row["tool_id"]: (lambda payload, _id=row["tool_id"]: self.run(_id, payload))
                 for row in self.tested()}
+
+    def _promotion_receipts(self, tool_id: str) -> list[dict[str, Any]]:
+        directory = self.root / "_admissions" / tool_id.partition(":")[0] / tool_id.partition(":")[2]
+        rows = []
+        for path in sorted(directory.glob("r*.json")) if directory.is_dir() else []:
+            value = json.loads(path.read_text())
+            recorded = value.pop("receipt_sha256", None)
+            if recorded != hashlib.sha256((json.dumps(value, indent=2,
+                    sort_keys=True) + "\n").encode()).hexdigest():
+                raise AssetError(f"Tool promotion receipt hash mismatch: {path}")
+            rows.append({**value, "receipt_sha256": recorded})
+        return rows
+
+    def promote(self, tool_id: str, *, evidence: list[Mapping[str, Any]],
+                applicability: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        manifest = self.inspect(tool_id)["manifest"]
+        if manifest.get("status") not in {"verified", "promoted"}:
+            raise AssetError("only a verified Tool can be promoted")
+        if not evidence:
+            raise AssetError("Tool promotion requires successful integration evidence")
+        receipt = {"protocol": "roboforge-tool-admission-v1", "tool_id": tool_id,
+                   "source_sha256": manifest["source_sha256"],
+                   "test_receipt_sha256": manifest.get("test_receipt_sha256"),
+                   "evidence": [dict(item) for item in evidence],
+                   "applicability": dict(applicability or {}),
+                   "promoted_unix": time.time()}
+        encoded = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        receipt["receipt_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
+        with _registry_lock(self.root):
+            directory = self.root / "_admissions" / tool_id.partition(":")[0] / tool_id.partition(":")[2]
+            directory.mkdir(parents=True, exist_ok=True)
+            sequence = len(list(directory.glob("r*.json"))) + 1
+            target = directory / f"r{sequence:03d}.json"
+            _atomic_json(target, receipt)
+        return {"tool_id": tool_id, "status": "promoted",
+                "receipt_sha256": receipt["receipt_sha256"]}
 
 
 class _JsonAssetLibrary:
@@ -409,41 +555,42 @@ class _JsonAssetLibrary:
 
     def _save(self, name: str, payload: dict[str, Any], evidence_paths=None, attachments=None):
         name = _name(name)
-        family = self.root / name
-        versions = [int(path.name[1:]) for path in family.glob("v[0-9]*") if path.name[1:].isdigit()]
-        version = max(versions, default=0) + 1
-        target = family / f"v{version:03d}"
-        staging = family / f".v{version:03d}.staging-{time.time_ns()}"
-        staging.mkdir(parents=True, exist_ok=False)
-        try:
-            payload.update(name=name, version=version, **{self.id_field: f"{name}:v{version:03d}"},
-                          created_unix=time.time())
-            if evidence_paths:
-                directory = staging / "evidence"
-                directory.mkdir()
-                records = []
-                for index, value in enumerate(evidence_paths, 1):
-                    source = Path(value).resolve()
-                    if not source.is_file():
-                        raise AssetError(f"evidence file does not exist: {source}")
-                    destination = directory / f"{index:03d}_{source.name}"
+        with _registry_lock(self.root):
+            family = self.root / name
+            versions = [int(path.name[1:]) for path in family.glob("v[0-9]*") if path.name[1:].isdigit()]
+            version = max(versions, default=0) + 1
+            target = family / f"v{version:03d}"
+            staging = family / f".v{version:03d}.staging-{uuid.uuid4().hex}"
+            staging.mkdir(parents=True, exist_ok=False)
+            try:
+                payload.update(name=name, version=version, **{self.id_field: f"{name}:v{version:03d}"},
+                              created_unix=time.time())
+                if evidence_paths:
+                    directory = staging / "evidence"
+                    directory.mkdir()
+                    records = []
+                    for index, value in enumerate(evidence_paths, 1):
+                        source = Path(value).resolve()
+                        if not source.is_file():
+                            raise AssetError(f"evidence file does not exist: {source}")
+                        destination = directory / f"{index:03d}_{source.name}"
+                        shutil.copy2(source, destination)
+                        records.append({"artifact_uri": str(destination.relative_to(staging)),
+                                        "sha256": _sha256(destination)})
+                    payload["evidence"] = records
+                for filename, source_value in dict(attachments or {}).items():
+                    source = Path(source_value).resolve()
+                    relative = Path(str(filename))
+                    if relative.is_absolute() or ".." in relative.parts or not source.is_file():
+                        raise AssetError("invalid asset attachment")
+                    destination = staging / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, destination)
-                    records.append({"artifact_uri": str(destination.relative_to(staging)),
-                                    "sha256": _sha256(destination)})
-                payload["evidence"] = records
-            for filename, source_value in dict(attachments or {}).items():
-                source = Path(source_value).resolve()
-                relative = Path(str(filename))
-                if relative.is_absolute() or ".." in relative.parts or not source.is_file():
-                    raise AssetError("invalid asset attachment")
-                destination = staging / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-            (staging / "manifest.json").write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n")
-            staging.replace(target)
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
+                (staging / "manifest.json").write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n")
+                staging.replace(target)
+            except Exception:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
         return {self.id_field: payload[self.id_field], "status": payload.get("status", "recorded")}
 
     def inspect(self, asset_id: str):
@@ -453,6 +600,10 @@ class _JsonAssetLibrary:
             evidence = path.parent / str(record["artifact_uri"])
             if not evidence.is_file() or _sha256(evidence) != record.get("sha256"):
                 raise AssetError(f"asset evidence hash mismatch: {asset_id}")
+        promotions = self._promotion_receipts(asset_id)
+        if promotions:
+            payload = {**payload, "status": "promoted",
+                       "promotion_receipt_sha256": promotions[-1]["receipt_sha256"]}
         return payload
 
     def list_summaries(self):
@@ -463,10 +614,47 @@ class _JsonAssetLibrary:
                 "applicability", "keywords", "status", "interface", "tool_ids")})
         return rows
 
-    def search(self, query: str, limit: int = 8):
-        return rank_records(query, self.list_summaries(),
+    def search(self, query: str, limit: int = 8, statuses: set[str] | None = None):
+        allowed = {"promoted"} if statuses is None else set(statuses)
+        rows = [row for row in self.list_summaries() if row.get("status") in allowed]
+        return rank_records(query, rows,
             text_fields=(self.id_field, "name", "task", "summary", "applicability", "keywords", "interface"),
             id_field=self.id_field, limit=limit)
+
+    def _promotion_receipts(self, asset_id: str) -> list[dict[str, Any]]:
+        name, _, version = str(asset_id).partition(":")
+        directory = self.root / "_admissions" / name / version
+        rows = []
+        for path in sorted(directory.glob("r*.json")) if directory.is_dir() else []:
+            value = json.loads(path.read_text())
+            recorded = value.pop("receipt_sha256", None)
+            encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+            if recorded != hashlib.sha256(encoded.encode()).hexdigest():
+                raise AssetError(f"asset promotion receipt hash mismatch: {path}")
+            rows.append({**value, "receipt_sha256": recorded})
+        return rows
+
+    def promote(self, asset_id: str, *, evidence: list[Mapping[str, Any]],
+                applicability: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        payload = self.inspect(asset_id)
+        if payload.get("status") not in {"verified", "promoted"}:
+            raise AssetError("only a verified asset can be promoted")
+        if not evidence:
+            raise AssetError("asset promotion requires verified evidence")
+        receipt = {"protocol": "roboforge-asset-admission-v1",
+                   self.id_field: asset_id, "evidence": [dict(item) for item in evidence],
+                   "applicability": dict(applicability or {}),
+                   "promoted_unix": time.time()}
+        encoded = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        receipt["receipt_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
+        with _registry_lock(self.root):
+            name, _, version = str(asset_id).partition(":")
+            directory = self.root / "_admissions" / name / version
+            directory.mkdir(parents=True, exist_ok=True)
+            sequence = len(list(directory.glob("r*.json"))) + 1
+            _atomic_json(directory / f"r{sequence:03d}.json", receipt)
+        return {self.id_field: asset_id, "status": "promoted",
+                "receipt_sha256": receipt["receipt_sha256"]}
 
 
 class SkillLibrary(_JsonAssetLibrary):
@@ -481,7 +669,7 @@ class SkillLibrary(_JsonAssetLibrary):
             raise AssetError("Skill controller does not exist")
         payload = {"protocol": "roboforge-skill-v1", "task": str(task), "controller_sha256": _sha256(source),
                    "tool_ids": sorted(set(tool_ids or [])), "development_evidence": dict(evidence or {}),
-                   "interface": dict(interface or {}), "status": "recorded"}
+                   "interface": dict(interface or {}), "status": "verified"}
         payload["controller_path"] = "controller.py"
         result = self._save(name, payload, evidence_paths, {"controller.py": source})
         return {**result, "path": str(self._id(result["skill_id"]).parent)}
@@ -501,9 +689,12 @@ class ExperienceLibrary(_JsonAssetLibrary):
                  keywords: list[str] | None = None, evidence_paths=None, **payload):
         if not evidence_paths:
             raise AssetError("Experience evidence is required")
-        return self._save(name, {"protocol": "roboforge-experience-v1", "summary": str(summary),
+        if payload.get("outcome", "success") != "success":
+            raise AssetError("failed or unresolved findings must be recorded as a Capability Gap")
+        return self._save(name, {"protocol": "roboforge-experience-v2", "summary": str(summary),
             "applicability": str(applicability), "keywords": list(keywords or []),
-            "status": payload.get("status", "recorded")}, evidence_paths)
+            "outcome": "success", "provenance": dict(payload.get("provenance") or {}),
+            "status": "verified"}, evidence_paths)
 
 
 class CapabilityGapLibrary(_JsonAssetLibrary):

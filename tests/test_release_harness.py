@@ -21,7 +21,7 @@ from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore
 from embodied_codex.kernel.runtime import ControllerRuntime
 from embodied_codex.kernel.recovery import RecoveryError, load_checkpoint, save_checkpoint
-from embodied_codex.kernel.sandbox import BubblewrapBackend, PosixSandboxBackend
+from embodied_codex.kernel.sandbox import BubblewrapBackend, PosixSandboxBackend, select_sandbox
 from embodied_codex.kernel.workspace import PersistentWorkspace
 
 
@@ -107,9 +107,6 @@ def test_checkpoint_checksum_rejects_tampered_payload(tmp_path):
     path = tmp_path / "checkpoint/state.json"
     envelope = json.loads(path.read_text())
     envelope["payload"]["steps"] = 999
-    with pytest.raises(PermissionError):
-        path.write_text(json.dumps(envelope))
-    path.chmod(0o600)
     path.write_text(json.dumps(envelope))
     with pytest.raises(RecoveryError, match="checksum mismatch"):
         load_checkpoint(tmp_path)
@@ -124,7 +121,7 @@ def test_failed_tool_never_binds_and_internal_tool_needs_no_benchmark_policy(tmp
         "properties": {}, "additionalProperties": False}, output_schema={"type": "object",
         "properties": {"value": {"type": "integer"}}, "required": ["value"],
         "additionalProperties": False}, trained_on_current_task=True, source_urls=[])
-    assert registered["status"] == "registered"
+    assert registered["status"] == "candidate"
     with pytest.raises(Exception, match="tests failed"):
         loop.capability_manager.test_tool(registered["tool_id"],
             [{"input": {}, "expected": {"value": 1}}])
@@ -189,7 +186,19 @@ def test_context_bounds_large_tool_output_and_image_is_multimodal(tmp_path):
     assert result["finished"] is False
     assert max(model.observed) <= loop.max_context_chars + 5000
     tool_messages = [row for row in loop.messages if row.get("role") == "tool"]
-    assert any(json.loads(row["content"]).get("truncated") is True for row in tool_messages)
+    truncated = next(json.loads(row["content"]) for row in tool_messages
+                     if json.loads(row["content"]).get("truncated") is True)
+    assert truncated["artifact_uri"].startswith("run://artifacts/tool-results/")
+    first = loop._view_artifact(truncated["artifact_uri"], max_chars=100,
+                                offset_bytes=0)
+    assert first["truncated"] is True and first["next_offset_bytes"] == 100
+    second = loop._view_artifact(truncated["artifact_uri"], max_chars=100,
+                                 offset_bytes=first["next_offset_bytes"])
+    assert second["offset_bytes"] == 100
+    event = next(row for row in loop.event_store.events()
+                 if row["kind"] == "tool_result")
+    assert event["payload"]["payload"]["artifact_uri"] == truncated["artifact_uri"]
+    assert loop.event_store.path.stat().st_size < 100_000
 
     image = np.zeros((20, 30, 3), np.uint8)
     path = loop.workspace.root / "sensor.png"; cv2.imwrite(str(path), image)
@@ -232,11 +241,17 @@ def test_tool_runtime_rejects_missing_pinned_dependency(tmp_path):
 
 def test_default_sandbox_is_rootless_and_bubblewrap_is_only_optional():
     working = PosixSandboxBackend().probe()
-    assert working.available is True, working.detail
     assert working.features["requires_root"] is False
     assert working.features["uses_user_namespace"] is False
     assert working.features["no_new_privs"] is True
     assert working.features["seccomp"] is True
+    assert working.available is working.features["filesystem_isolation"]
+    if working.features["landlock"] is False:
+        assert working.available is False
+        assert working.features["unauthorized_read_denied"] is False
+    selected = select_sandbox("auto")
+    assert selected.probe().available is True
+    assert selected.safe is True
     broken = BubblewrapBackend(executable="/bin/false").probe()
     assert broken.available is False
 
@@ -286,7 +301,7 @@ def test_workspace_command_is_staged_and_cannot_modify_run_state(tmp_path):
         f"paths={repr([str(path) for path in protected])}\n"
         "for value in paths:\n"
         " try: Path(value).write_text('tampered'); raise RuntimeError('write escaped stage')\n"
-        " except PermissionError: pass\n"
+        " except OSError: pass\n"
         "Path('generated.txt').write_text('committed')\n")
     result = workspace.run_command([sys.executable, "-c", script], timeout_seconds=20)
     assert result["exit_code"] == 0 and result["committed"] is True
@@ -321,7 +336,7 @@ def test_controller_runtime_cannot_mutate_harness_or_shared_asset_state(tmp_path
         "        try:\n"
         "            Path(value).write_text('tampered')\n"
         "            raise RuntimeError('write escaped sandbox')\n"
-        "        except PermissionError:\n"
+        "        except OSError:\n"
         "            pass\n"
         "    robot.act({'type':'set_value','value':1})\n"
         "    return robot.verify('target', {})\n")
@@ -469,19 +484,22 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
                XDG_DATA_HOME=str(tmp_path / "shared-data"))
     assets = tmp_path / "shared-data/roboforge/assets"
 
-    first = subprocess.run([*base, "--task", "task A", "--run-dir", str(tmp_path / "run-a")],
+    first = subprocess.run([*base, "--task", "task A", "--run-dir", str(tmp_path / "run-a"),
+        "--states", "0", "1"],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
     assert first.returncode == 0, first.stdout
     first_result = json.loads(first.stdout)
-    assert first_result["finished"] is True and first_result["executions"] == 2
+    assert first_result["finished"] is True and first_result["executions"] == 3
+    assert first_result["campaign"]["all_cases_verified"] is True
     assert (assets / "tools/fake_target/v001/manifest.json").is_file()
     assert (assets / "skills/verified_target_skill/v001/controller.py").is_file()
     assert (assets / "experiences/verified_target_repair/v001/manifest.json").is_file()
 
-    resumed = subprocess.run([*base, "--task", "task A", "--run-dir", str(tmp_path / "run-a")],
+    resumed = subprocess.run([*base, "--task", "task A", "--run-dir", str(tmp_path / "run-a"),
+        "--states", "0", "1"],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
     assert resumed.returncode == 0, resumed.stdout
-    assert json.loads(resumed.stdout)["executions"] == 2
+    assert json.loads(resumed.stdout)["executions"] == 3
 
     second = subprocess.run([*base, "--task", "task B", "--run-dir", str(tmp_path / "run-b")],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
@@ -500,8 +518,10 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
         stderr=subprocess.STDOUT, timeout=90)
     assert multicase.returncode == 0, multicase.stdout
     multi_result = json.loads(multicase.stdout)
-    assert multi_result["finished"] is True and len(multi_result["cases"]) == 2
-    assert len({row["latest_evidence"]["controller_sha256"] for row in multi_result["cases"]}) == 1
+    assert multi_result["finished"] is True and multi_result["cases"] == ["0", "1"]
+    assert multi_result["campaign"]["all_cases_verified"] is True
+    assert len({row["controller_sha256"] for row in
+                multi_result["campaign"]["validated_cases"].values()}) == 1
 
     doctor = subprocess.run([sys.executable, "-m", "embodied_codex", "doctor", "--adapter", adapter,
         "--model", model, "--run-dir", str(tmp_path / "doctor")], env=env, text=True,
@@ -509,4 +529,8 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
     assert doctor.returncode == 0, doctor.stdout
     report = json.loads(doctor.stdout)
     assert report["sandbox"]["available"] is True
+    assert report["sandbox"]["safe"] is True
+    assert report["sandbox"]["features"]["filesystem_isolation"] is True
+    assert report["sandbox"]["features"]["unauthorized_read_denied"] is True
+    assert report["sandbox"]["features"]["unauthorized_write_denied"] is True
     assert report["controller_runtime"] == report["tool_runtime"] == "available"

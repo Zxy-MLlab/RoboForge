@@ -13,7 +13,7 @@ import time
 from typing import Any, Mapping
 
 from ..interfaces import ALLOWED_RPC, RobotDeployment
-from .sandbox import ReadOnlyGuard, SandboxBackend, default_sandbox
+from .sandbox import SandboxBackend, default_sandbox
 
 
 class ControllerRuntimeError(RuntimeError):
@@ -103,23 +103,14 @@ class ControllerRuntime:
         if not path.is_file():
             raise FileNotFoundError(path)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        run_root = path.parent.parent
-        adapter_artifact = getattr(deployment, "artifact_dir", None)
-        excluded = [Path(adapter_artifact).resolve()] if adapter_artifact else []
-        guard = ReadOnlyGuard([run_root, *self.protected_paths], exclude=excluded)
-        with tempfile.TemporaryDirectory(prefix="roboforge-controller-") as temporary, guard:
-            try:
-                process = self.sandbox.popen([self.python, "-u", "-I", "-c", _CHILD,
-                    str(path), json.dumps(str(deployment.instruction))], cwd=path.parent,
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, bufsize=1, env=self._safe_environment(),
-                    read_only_paths=[run_root, *self.protected_paths,
-                                     Path(self.python).resolve().parents[1]],
-                    read_write_paths=[temporary], temporary_dir=temporary,
-                    timeout_seconds=self.timeout_seconds)
-            except Exception:
-                guard.restore()
-                raise
+        with tempfile.TemporaryDirectory(prefix="roboforge-controller-") as temporary:
+            process = self.sandbox.popen([self.python, "-u", "-I", "-c", _CHILD,
+                str(path), json.dumps(str(deployment.instruction))], cwd=path.parent,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, env=self._safe_environment(),
+                read_only_paths=[path.parent, Path(self.python).resolve().parents[1]],
+                read_write_paths=[temporary], temporary_dir=temporary,
+                timeout_seconds=self.timeout_seconds)
             assert process.stdin is not None and process.stdout is not None
             selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
             deadline = time.monotonic() + self.timeout_seconds

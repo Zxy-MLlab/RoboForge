@@ -89,6 +89,16 @@ def call(name, arguments, index):
                              "arguments": json.dumps(arguments)}], "content": ""}
 
 
+def committed_execution(workspace, adapter, manager):
+    loop = AgentLoop(model=object(), workspace=workspace, adapter=adapter,
+        context_builder=ContextBuilder(adapter_index={"protocol": "fake-v1"},
+            asset_registry=manager, workspace=workspace),
+        capability_manager=manager, runtime=ControllerRuntime(timeout_seconds=10),
+        event_store=EventStore(workspace.root.parent / "events"),
+        root=workspace.root.parent, resume=False)
+    return loop._run_controller()
+
+
 class FakeModel:
     def __init__(self): self.turn = 0
     def decide(self, *, messages, tools):
@@ -160,6 +170,11 @@ def test_shared_tool_is_bound_and_reused_by_independent_workspace(tmp_path):
                        "required": ["value"], "additionalProperties": False},
         source_urls=["https://example.com/increment"], trained_on_current_task=False)
     manager_a.test_tool(registration["tool_id"], [{"input": {"value": 2}, "expected": {"value": 3}}])
+    workspace_a.write_file("controller.py", "def run(robot):\n"
+        "    target=robot.use('increment:v001', {'value': 0})\n"
+        "    robot.act(target)\n    return robot.verify('goal', {})\n")
+    evidence = committed_execution(workspace_a, adapter_a, manager_a)
+    manager_a.promote_asset(registration["tool_id"], [evidence["artifact_uri"]])
 
     workspace_b = PersistentWorkspace(tmp_path / "run-b" / "workspace")
     workspace_b.write_file("controller.py", "def run(robot):\n    return robot.use('increment:v001', {'value': 4})\n")
@@ -193,8 +208,9 @@ def test_cross_task_reuse_needs_fewer_robot_executions_than_no_asset_baseline(tm
                        "required": ["value"], "additionalProperties": False})
     manager_a.test_tool(registered["tool_id"], [{"input": {}, "expected": {"value": 1}}])
     task_a.write_file("controller.py", "def run(robot):\n    target = robot.use('task_target:v001', {})\n    robot.act(target)\n    return robot.verify('goal', {})\n")
-    succeeded = ControllerRuntime(timeout_seconds=10).execute(task_a.controller, adapter_a)
-    assert adapter_a.sensor_report(succeeded)["sensor_success"] is True
+    evidence = committed_execution(task_a, adapter_a, manager_a)
+    assert evidence["sensor_report"]["sensor_success"] is True
+    manager_a.promote_asset(registered["tool_id"], [evidence["artifact_uri"]])
 
     # Task B starts in an independent workspace and reuses the shared Tool on its first execution.
     task_b = PersistentWorkspace(tmp_path / "task-b/workspace"); adapter_b = SharedAdapter()
@@ -275,3 +291,19 @@ def test_benchmark_policies_execute_before_after_and_sealed_evaluator(tmp_path):
     assert {(item["policy"], item["phase"]) for item in records} == {
         (name, phase) for name in ("anti_cheating", "generalization", "provenance", "sealed_evaluation")
         for phase in ("before_run", "after_run")}
+
+
+def test_sealed_evaluation_checks_every_campaign_case(tmp_path):
+    from embodied_codex.kernel.campaign import CampaignAdapter
+
+    first, second = SealedAdapter(), SealedAdapter()
+    first.value = second.value = 1
+    adapter = CampaignAdapter((("A", first), ("B", second)))
+    result = {}
+    loop = type("Loop", (), {"adapter": adapter,
+        "event_store": EventStore(tmp_path / "events")})()
+    SealedEvaluationPolicy(name="sealed_evaluation").after_run(loop, result)
+    assert result["evaluation_passed"] is True
+    assert result["sealed_evaluation_cases"] == [
+        {"case": "A", "passed": True}, {"case": "B", "passed": True}]
+    assert first.sealed is second.sealed is True

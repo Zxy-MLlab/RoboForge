@@ -38,7 +38,9 @@ clone_at https://github.com/graspnet/graspnet-baseline.git \
 "$python_bin" -m pip install -e "$vendor_root/graspnet-baseline/pointnet2"
 
 cat <<EOF
-Pinned LIBERO sources installed.
+Pinned LIBERO source and optional perception sources installed. The package uses
+the fixed LIBERO Git revision above rather than the upstream archive, whose
+metadata is not consistently installable by pip.
 ROBOFORGE_GROUNDINGDINO_ROOT=$vendor_root/GroundingDINO
 ROBOFORGE_SAM_ROOT=$vendor_root/segment-anything
 ROBOFORGE_GRASPNET_ROOT=$vendor_root/graspnet-baseline

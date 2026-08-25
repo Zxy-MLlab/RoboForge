@@ -48,18 +48,16 @@ def save_checkpoint(root: str | Path, state: dict[str, Any]) -> Path:
     envelope = {"protocol": "roboforge-checkpoint-envelope-v1",
                 "payload_sha256": hashlib.sha256(_payload_bytes(payload)).hexdigest(),
                 "payload": payload}
-    path.parent.chmod(0o700)
     try:
         with temporary.open("w") as stream:
             stream.write(json.dumps(envelope, indent=2, sort_keys=True, default=str) + "\n")
             stream.flush(); os.fsync(stream.fileno())
-        temporary.replace(path); path.chmod(0o400)
+        temporary.replace(path)
         directory = os.open(path.parent, os.O_RDONLY)
         try: os.fsync(directory)
         finally: os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
-        path.parent.chmod(0o500)
     return path
 
 

@@ -11,16 +11,18 @@ from pathlib import Path
 import sys
 import tempfile
 
-from .adapters import adapter_preflight, load_adapter
+from .adapters import adapter_doctor_task, adapter_preflight, load_adapter
 from .kernel.assets import CapabilityGapLibrary, CapabilityLibrary, ExperienceLibrary, SkillLibrary
 from .kernel.agent_loop import AgentLoop, LoopBudget
 from .kernel.capability_manager import CapabilityManager
+from .kernel.campaign import CampaignAdapter, CampaignRunner
 from .kernel.context import ContextBuilder
 from .kernel.events import EventStore
 from .kernel.runtime import ControllerRuntime
 from .kernel.workspace import PersistentWorkspace
 from .kernel.sandbox import select_sandbox
 from .model import OpenAIModel
+from .providers import ProviderConfigurationError, resolve_provider
 
 
 def _load(spec: str):
@@ -29,13 +31,15 @@ def _load(spec: str):
     return getattr(importlib.import_module(module), name)
 
 
-def _model(args):
+def _model(args, configuration=None):
     if args.model:
         factory = _load(args.model)
         return factory() if inspect.isclass(factory) else factory
-    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY")
-    if not key: raise SystemExit("set OPENAI_API_KEY/APEX_API_KEY or pass --model package:Model")
-    return OpenAIModel(api_key=key, base_url=args.base_url, model=args.model_name,
+    configuration = configuration or resolve_provider(
+        provider=getattr(args, "provider", None),
+        base_url=getattr(args, "base_url", None))
+    return OpenAIModel(api_key=configuration.api_key, base_url=configuration.endpoint,
+                       model=args.model_name,
                        reasoning_effort=args.reasoning_effort)
 
 
@@ -45,6 +49,8 @@ def _libraries(asset_root: Path, workspace: PersistentWorkspace, adapter=None, s
     roots = [workspace.root, workspace.root.parent / "evidence"]
     if getattr(adapter, "artifact_dir", None):
         roots.append(Path(adapter.artifact_dir).resolve())
+    roots.extend(Path(value).resolve() for value in
+                 getattr(adapter, "artifact_roots", []) or [])
     tools = CapabilityLibrary(asset_root / "tools", workspace.root, python=sys.executable,
                               scope_id="shared01", allowed_input_roots=roots, sandbox=sandbox)
     return tools, SkillLibrary(asset_root / "skills"), ExperienceLibrary(asset_root / "experiences"), CapabilityGapLibrary(asset_root / "gaps")
@@ -70,9 +76,9 @@ def _benchmark_policies():
 
 def run_command(args) -> int:
     sandbox = select_sandbox(args.sandbox)
+    sandbox.require()
     if not getattr(sandbox, "safe", False) and args.profile != "dev":
         raise RuntimeError("unsafe sandbox is permitted only with --profile dev")
-    sandbox.require()
     preflight = adapter_preflight(args.adapter)
     if preflight is not None and preflight.get("ok") is not True:
         raise RuntimeError("Adapter preflight failed: " + json.dumps(preflight, default=str))
@@ -84,59 +90,81 @@ def run_command(args) -> int:
     asset_root.mkdir(parents=True, exist_ok=True)
     source = Path(args.controller_source).resolve() if args.controller_source else None
     if source is not None and not source.is_file(): raise FileNotFoundError(source)
-    results = []
-    for state in list(args.states or [None]):
-        adapter_spec = args.adapter
-        case_root = run_dir if state is None else run_dir / f"state_{state}"
-        case_root.mkdir(parents=True, exist_ok=True)
-        workspace = PersistentWorkspace(case_root / "workspace", sandbox=sandbox)
-        adapter = None
-        try:
-            adapter = load_adapter(adapter_spec, task=str(args.task), run_dir=case_root, case=state)
-            observe = getattr(adapter, "initial_observation", None)
-            if not callable(observe):
-                raise TypeError("Adapter must implement initial_observation()")
-            initial_observation = observe()
-            if source is not None: workspace.write_file("controller.py", source.read_text())
-            tools, skills, experiences, gaps = _libraries(asset_root, workspace, adapter, sandbox)
-            manager = CapabilityManager(asset_root=asset_root, workspace=workspace, adapter=adapter,
-                                       tool_library=tools, skill_library=skills,
-                                       experience_library=experiences, gap_library=gaps)
-            manager.bind_shared_tools()
-            contract = getattr(adapter, "sdk_index", None) or getattr(adapter, "sdk_contract", None) or {
-                "protocol": "adapter-provided", "operations": ["observe", "use", "act", "verify", "record"]}
-            policies = _benchmark_policies() if args.profile == "benchmark" else []
-            if args.frozen_controller:
-                from evaluation.generalization import FrozenControllerPolicy
-                if source is None:
-                    raise ValueError("--frozen-controller requires --controller-source")
-                policies.insert(0, FrozenControllerPolicy(
-                    expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest()))
-            loop = AgentLoop(model=_model(args), workspace=workspace, adapter=adapter,
-                context_builder=ContextBuilder(adapter_index=contract, asset_registry=manager,
-                    workspace=workspace, initial_observation=initial_observation),
-                capability_manager=manager, runtime=ControllerRuntime(
-                    timeout_seconds=args.controller_timeout, sandbox=sandbox,
-                    protected_paths=[asset_root]),
-                event_store=EventStore(case_root / "events", protect=True), budget=LoopBudget(max_steps=args.max_steps,
-                    max_executions=args.max_executions), root=case_root, web_search=manager.web_search,
-                policies=policies, resume=True)
-            result = loop.run(getattr(adapter, "instruction", str(args.task)))
-        finally:
-            close = getattr(adapter, "close", None) if adapter is not None else None
-            if callable(close): close()
-        result["case"] = state; result["profile"] = args.profile
-        result["evaluation_policies"] = [p.name for p in policies]; results.append(result)
-    output = results[0] if len(results) == 1 else {
-        "finished": (all(item.get("finished") and item.get("latest_evidence", {}).get(
-            "verification_receipt", {}).get("verified") is True for item in results)
-            and len({item.get("latest_evidence", {}).get("controller_sha256") for item in results}) == 1),
-        "executions": sum(item.get("executions", 0) for item in results), "cases": results,
-        "profile": args.profile,
-        "cross_case_controller_sha256": results[0].get("latest_evidence", {}).get("controller_sha256")}
+    provider_configuration = (None if args.model else resolve_provider(
+        provider=args.provider, base_url=args.base_url))
+    adapter_configuration = ({"model_provider": provider_configuration.provider,
+        "model_base_url": provider_configuration.endpoint}
+        if provider_configuration is not None else {})
+    workspace = PersistentWorkspace(run_dir / "workspace", sandbox=sandbox)
+    adapter = None
+    policies = _benchmark_policies() if args.profile == "benchmark" else []
+    try:
+        if args.states:
+            cases = []
+            try:
+                for state in args.states:
+                    case_root = run_dir / "cases" / f"state_{state}"
+                    case_root.mkdir(parents=True, exist_ok=True)
+                    cases.append((str(state), load_adapter(args.adapter,
+                        task=str(args.task), run_dir=case_root, case=state,
+                        configuration=adapter_configuration)))
+            except Exception:
+                for _case_id, case_adapter in cases:
+                    close_case = getattr(case_adapter, "close", None)
+                    if callable(close_case):
+                        try:
+                            close_case()
+                        except Exception:
+                            pass
+                raise
+            adapter = CampaignAdapter(cases)
+            loop_type = CampaignRunner
+        else:
+            adapter = load_adapter(args.adapter, task=str(args.task), run_dir=run_dir,
+                                   configuration=adapter_configuration)
+            loop_type = AgentLoop
+        model = _model(args, provider_configuration)
+        observe = getattr(adapter, "initial_observation", None)
+        if not callable(observe):
+            raise TypeError("Adapter must implement initial_observation()")
+        initial_observation = observe()
+        if source is not None:
+            workspace.write_file("controller.py", source.read_text())
+        tools, skills, experiences, gaps = _libraries(asset_root, workspace, adapter, sandbox)
+        manager = CapabilityManager(asset_root=asset_root, workspace=workspace, adapter=adapter,
+                                   tool_library=tools, skill_library=skills,
+                                   experience_library=experiences, gap_library=gaps)
+        manager.bind_shared_tools()
+        contract = getattr(adapter, "sdk_index", None) or getattr(adapter, "sdk_contract", None) or {
+            "protocol": "adapter-provided", "operations": ["observe", "use", "act", "verify", "record"]}
+        if args.frozen_controller:
+            from evaluation.generalization import FrozenControllerPolicy
+            if source is None:
+                raise ValueError("--frozen-controller requires --controller-source")
+            policies.insert(0, FrozenControllerPolicy(
+                expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest()))
+        loop = loop_type(model=model, workspace=workspace, adapter=adapter,
+            context_builder=ContextBuilder(adapter_index=contract, asset_registry=manager,
+                workspace=workspace, initial_observation=initial_observation),
+            capability_manager=manager, runtime=ControllerRuntime(
+                timeout_seconds=args.controller_timeout, sandbox=sandbox,
+                protected_paths=[asset_root]),
+            event_store=EventStore(run_dir / "events", protect=True),
+            budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions),
+            root=run_dir, web_search=manager.web_search, policies=policies, resume=True)
+        output = loop.run(getattr(adapter, "instruction", str(args.task)))
+    finally:
+        close = getattr(adapter, "close", None) if adapter is not None else None
+        if callable(close):
+            close()
+    output["profile"] = args.profile
+    output["evaluation_policies"] = [policy.name for policy in policies]
+    if args.states:
+        output["cross_case_controller_sha256"] = ((output.get("campaign") or {})
+                                                   .get("controller_sha256"))
     result_path = run_dir / "result.json"; temporary = result_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(output, indent=2, default=str) + "\n"); temporary.replace(result_path)
-    benchmark_passed = (all(item.get("evaluation_passed") is True for item in results)
+    benchmark_passed = (output.get("evaluation_passed") is True
                         if args.profile == "benchmark" else True)
     print(json.dumps(output, indent=2, default=str))
     return 0 if output.get("finished") and benchmark_passed else 2
@@ -150,7 +178,17 @@ def doctor_command(args) -> int:
                   "safe": bool(getattr(sandbox, "safe", False)),
                   "detail": sandbox_probe.detail, "features": dict(sandbox_probe.features)},
               "adapter": args.adapter,
-              "api_key": bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY")), "dependencies": {}}
+              "model_provider": None, "dependencies": {}}
+    if args.model:
+        checks["model_provider"] = {"provider": "plugin", "endpoint": None,
+                                    "key_env": None, "configured": True}
+    else:
+        try:
+            provider = resolve_provider(provider=args.provider, base_url=args.base_url)
+            checks["model_provider"] = provider.redacted()
+        except ProviderConfigurationError as exc:
+            checks["model_provider"] = {"provider": args.provider, "endpoint": args.base_url,
+                "key_env": None, "configured": False, "error": str(exc)}
     for dependency in ("jsonschema", "openai"):
         try: importlib.import_module(dependency); checks["dependencies"][dependency] = "available"
         except Exception as exc: checks["dependencies"][dependency] = f"unavailable: {exc}"
@@ -161,8 +199,8 @@ def doctor_command(args) -> int:
         checks["adapter_preflight"] = preflight or {"ok": True, "provided": False}
         if preflight is not None and preflight.get("ok") is not True:
             raise RuntimeError("Adapter preflight failed")
-        task = args.task if args.task is not None else ("0" if args.adapter == "libero"
-            or str(args.adapter).startswith("libero@") else "doctor")
+        task = args.task if args.task is not None else (
+            adapter_doctor_task(args.adapter) or "doctor")
         adapter = load_adapter(args.adapter, task=str(task), run_dir=smoke_dir)
         checks["adapter_init"] = "available"
         required = ("dispatch", "project_rpc_output", "initial_observation", "sensor_report", "verification_receipt",
@@ -221,9 +259,9 @@ def doctor_command(args) -> int:
                 tools=[{"type": "function", "function": {"name": "finish", "description": "finish",
                     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}}])
             checks["model"] = "available" if isinstance(response, dict) else "unavailable: invalid response"
-        elif checks["api_key"]:
+        elif checks["model_provider"].get("configured"):
             model = _model(argparse.Namespace(model=None, base_url=args.base_url,
-                model_name=args.model_name, reasoning_effort="low"))
+                provider=args.provider, model_name=args.model_name, reasoning_effort="low"))
             response = model.decide(messages=[{"role": "user",
                 "content": "Call the finish function with an empty object."}], tools=[{
                     "type": "function", "function": {"name": "finish",
@@ -242,14 +280,22 @@ def doctor_command(args) -> int:
         if not checkpoint.is_file():
             checks["checkpoint"] = {"available": False, "reason": "file is missing"}
         else:
-            digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+            digest = hashlib.sha256()
+            with checkpoint.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            digest = digest.hexdigest()
             expected = str(args.checkpoint_sha256 or "").casefold()
             valid = not expected or digest == expected
             checks["checkpoint"] = {"available": valid, "path": str(checkpoint),
                 "bytes": checkpoint.stat().st_size, "sha256": digest,
                 "expected_sha256": expected or None,
                 "reason": None if valid else "checksum mismatch"}
+    sandbox_features = checks["sandbox"]["features"]
     checks["ok"] = bool(checks["sandbox"]["available"] and checks["sandbox"]["safe"]
+                         and sandbox_features.get("filesystem_isolation") is True
+                         and sandbox_features.get("unauthorized_read_denied") is True
+                         and sandbox_features.get("unauthorized_write_denied") is True
                          and checks.get("adapter_smoke") == "available"
                          and checks.get("controller_runtime") == "available"
                          and checks.get("command_smoke") == "available"
@@ -264,20 +310,20 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="roboforge"); sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run"); run.add_argument("--adapter", required=True); run.add_argument("--task", required=True)
     run.add_argument("--profile", choices=("dev", "autonomous", "benchmark"), default="dev")
-    run.add_argument("--sandbox", choices=("posix", "bubblewrap", "unsafe"), default="posix")
+    run.add_argument("--sandbox", choices=("auto", "posix", "bubblewrap", "unsafe"), default="auto")
     run.add_argument("--run-dir"); run.add_argument("--asset-root"); run.add_argument("--model"); run.add_argument("--model-name", default="gpt-5.6-sol")
     run.add_argument("--controller-source", help="load a frozen controller into the workspace before running")
     run.add_argument("--frozen-controller", action="store_true",
                      help="evaluation-owned immutable Controller mode")
     run.add_argument("--states", type=int, nargs="+", help="run the same Kernel over multiple Adapter cases")
-    run.add_argument("--base-url", default=os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1")); run.add_argument("--reasoning-effort", default="high")
+    run.add_argument("--provider", choices=("openai", "apex")); run.add_argument("--base-url"); run.add_argument("--reasoning-effort", default="high")
     run.add_argument("--max-steps", type=int, default=60); run.add_argument("--max-executions", type=int, default=20); run.add_argument("--controller-timeout", type=float, default=600)
     run.set_defaults(handler=run_command)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--adapter", required=True); doctor.add_argument("--task"); doctor.add_argument("--run-dir"); doctor.add_argument("--checkpoint")
-    doctor.add_argument("--sandbox", choices=("posix", "bubblewrap", "unsafe"), default="posix")
+    doctor.add_argument("--sandbox", choices=("auto", "posix", "bubblewrap", "unsafe"), default="auto")
     doctor.add_argument("--checkpoint-sha256")
     doctor.add_argument("--model"); doctor.add_argument("--model-name", default="gpt-5.6-sol")
-    doctor.add_argument("--base-url", default=os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1"))
+    doctor.add_argument("--provider", choices=("openai", "apex")); doctor.add_argument("--base-url")
     doctor.set_defaults(handler=doctor_command)
     args = parser.parse_args(argv); return args.handler(args)
 

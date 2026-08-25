@@ -62,17 +62,20 @@ Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` �
 
 ## 安全与稳定性
 
-默认 `posix-hardened` sandbox 不需要 root、Docker、setuid binary 或 user namespace。
-它实际启用 `no_new_privs`、libseccomp 网络/危险 syscall 阻断、rlimit、环境白名单、私有
-临时目录和进程组超时回收；支持 Landlock 的内核会额外启用路径规则。工程命令只写独立
-`staged_worktree/`，成功退出后由 Harness 检查文件类型、容量和冻结哈希并原子提交。
-canonical workspace、checkpoint、events 和 evidence 不直接暴露为可写目标。
+默认 `auto` sandbox 先探测 rootless `posix-hardened`（Landlock + no_new_privs + seccomp +
+rlimit + 环境白名单 + 私有临时目录 + 进程组回收），再探测 bubblewrap namespace 增强。
+两者都必须通过真实的越权读写负向测试；没有文件系统隔离时 autonomous/benchmark 会
+fail closed，绝不会降级为普通 subprocess。Linux 5.4 等没有 Landlock 且禁止 user
+namespace 的系统必须明确报告不可安全运行。工程命令只写独立 `staged_worktree/`，成功
+退出后由 Harness 检查文件类型、容量和冻结哈希并原子提交；canonical workspace、
+checkpoint、events 和 evidence 不直接暴露为可写目标。
 
 `--sandbox bubblewrap` 是探测成功后才可选择的 namespace 增强项，不是依赖。只有
 `--profile dev --sandbox unsafe` 能显式使用无 syscall 隔离的调试模式；autonomous 和
 benchmark 会拒绝 unsafe backend。
 
-可复现的无特权容器入口使用同一个 POSIX backend，不安装或依赖 bubblewrap：
+可复现的容器入口使用同一个 `auto` backend。容器宿主机必须提供 Landlock，或允许镜像
+内显式安装并探测通过 bubblewrap；Docker 本身不能替代 Controller 子进程的隔离探测：
 
 ```bash
 docker build -t roboforge:0.5.0 .

@@ -10,6 +10,10 @@ import sys
 from ..capabilities import (GraspNetRGBD, OpenVocabularyRGBD,
                             VLMVisualRelationGrounder, VLMVisualTaskOutcomeVerifier)
 from ..deployments.libero import LiberoDeployment, LiberoEpisode
+from ..providers import resolve_provider
+
+
+DOCTOR_TASK = "0"
 
 
 _CHECKPOINT_SHA256 = {
@@ -190,13 +194,12 @@ def doctor_checks():
             "checkpoints": checkpoints, "accelerator": accelerator}
 
 
-def create(*, task: str, state: int = 0, root: str | Path):
+def create(*, task: str, state: int = 0, root: str | Path,
+           configuration: dict | None = None):
     paths = _paths(); package_root = paths["package_root"]
     config = os.environ.get("LIBERO_CONFIG_PATH")
     episode = LiberoEpisode("libero_spatial", int(task), int(state), config_path=config,
                             case_handle=f"libero-task-{task}-state-{state}")
-    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY")
-    base_url = os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1")
     model_name = os.environ.get("ROBOFORGE_MODEL", "gpt-5.6-sol")
     perception = OpenVocabularyRGBD(groundingdino_root=paths["groundingdino_root"],
         groundingdino_config=paths["groundingdino_config"],
@@ -209,8 +212,14 @@ def create(*, task: str, state: int = 0, root: str | Path):
     verifiers = {"visual_attachment": perception.verify_attachment,
                  "visual_support_relation": perception.verify_support_relation}
     outcome = None
-    if key:
-        outcome = VLMVisualTaskOutcomeVerifier(api_key=key, base_url=base_url, model=model_name).verify
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY"):
+        adapter_configuration = dict(configuration or {})
+        provider = resolve_provider(provider=adapter_configuration.get("model_provider")
+            or os.environ.get("ROBOFORGE_MODEL_PROVIDER"),
+            base_url=adapter_configuration.get("model_base_url")
+            or os.environ.get("ROBOFORGE_MODEL_BASE_URL"))
+        outcome = VLMVisualTaskOutcomeVerifier(api_key=provider.api_key,
+            base_url=provider.endpoint, model=model_name).verify
     capabilities = {"libero.rgbd_perception:v001": perception.detect,
                     "libero.grasp_proposals:v001": grasp.infer}
     contracts = {"libero.rgbd_perception:v001": _perception_contract(),

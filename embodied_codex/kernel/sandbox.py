@@ -1,10 +1,9 @@
 """Injectable execution sandboxes for Controller, Tool and workspace commands.
 
-The default backend needs no root privileges or user namespaces.  It combines
-no_new_privs, a libseccomp deny-list, resource limits, a scrubbed environment,
-private temporary directories and process-group cleanup.  Landlock filesystem
-rules are added when the running kernel implements them.  Bubblewrap remains an
-explicit, probed enhancement rather than a startup requirement.
+The preferred backend combines rootless Landlock, no_new_privs, seccomp,
+resource limits, environment scrubbing and process-group cleanup. Bubblewrap is
+a probed optional fallback. If neither backend proves filesystem confinement,
+formal profiles fail closed instead of falling back to a subprocess.
 """
 from __future__ import annotations
 
@@ -17,9 +16,9 @@ import math
 import os
 from pathlib import Path
 import resource
+import platform
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -69,52 +68,6 @@ class SandboxBackend(Protocol):
     def terminate(self, process: subprocess.Popen, grace_seconds: float = 2) -> None: ...
 
 
-class ReadOnlyGuard:
-    """Temporarily remove write permission from canonical state trees.
-
-    Sandboxed children cannot undo these modes because every safe backend denies
-    chmod-family syscalls.  The Harness restores the exact original modes after
-    the process exits or while the parent performs one Adapter RPC.
-    """
-
-    def __init__(self, roots: Sequence[str | Path], *, exclude: Sequence[str | Path] = ()):
-        self.roots = tuple(dict.fromkeys(Path(value).resolve() for value in roots
-                                        if Path(value).exists()))
-        self.exclude = tuple(Path(value).resolve() for value in exclude)
-        self._modes: list[tuple[Path, int]] = []
-
-    def _excluded(self, path: Path) -> bool:
-        return any(path == value or value in path.parents for value in self.exclude)
-
-    def protect(self) -> None:
-        if self._modes:
-            return
-        paths = []
-        for root in self.roots:
-            paths.append(root)
-            if root.is_dir(): paths.extend(root.rglob("*"))
-        for path in dict.fromkeys(paths):
-            if self._excluded(path) or path.is_symlink(): continue
-            try:
-                mode = stat.S_IMODE(path.stat().st_mode)
-                self._modes.append((path, mode))
-                path.chmod(0o500 if path.is_dir() else 0o400)
-            except FileNotFoundError:
-                continue
-
-    def restore(self) -> None:
-        modes, self._modes = self._modes, []
-        for path, mode in reversed(modes):
-            try: path.chmod(mode)
-            except FileNotFoundError: pass
-
-    def __enter__(self):
-        self.protect(); return self
-
-    def __exit__(self, _type, _value, _traceback):
-        self.restore()
-
-
 _ENV_EXACT = {
     "CUDA_HOME", "CUDA_VISIBLE_DEVICES", "HF_HOME", "LANG", "LC_ALL", "LC_CTYPE",
     "LD_LIBRARY_PATH", "MUJOCO_GL", "NVIDIA_VISIBLE_DEVICES", "OMP_NUM_THREADS",
@@ -141,11 +94,27 @@ def _clean_environment(value: Mapping[str, str] | None, *, home: Path,
     return result
 
 
+_LANDLOCK_SYSCALLS = {
+    "x86_64": (444, 445, 446),
+    "amd64": (444, 445, 446),
+    "aarch64": (444, 445, 446),
+    "arm64": (444, 445, 446),
+    "riscv64": (444, 445, 446),
+}
+
+
+def _landlock_syscalls() -> tuple[int, int, int] | None:
+    return _LANDLOCK_SYSCALLS.get(platform.machine().casefold())
+
+
 def _landlock_abi() -> int:
     if sys.platform != "linux":
         return 0
+    calls = _landlock_syscalls()
+    if calls is None:
+        return 0
     libc = ctypes.CDLL(None, use_errno=True)
-    result = libc.syscall(444, 0, 0, 1)
+    result = libc.syscall(calls[0], 0, 0, 1)
     return int(result) if result >= 1 else 0
 
 
@@ -187,11 +156,14 @@ def _landlock_rights(abi: int) -> int:
 def _apply_landlock(read_only: Sequence[Path], read_write: Sequence[Path]) -> None:
     abi = _landlock_abi()
     if not abi:
-        return
+        raise OSError(errno.ENOSYS, "Landlock filesystem isolation is unavailable")
+    calls = _landlock_syscalls()
+    if calls is None:
+        raise OSError(errno.ENOSYS, f"Landlock syscall mapping is unavailable for {platform.machine()}")
     libc = ctypes.CDLL(None, use_errno=True)
     handled = _landlock_rights(abi)
     ruleset_attr = _LandlockRulesetAttr(handled)
-    ruleset_fd = libc.syscall(444, ctypes.byref(ruleset_attr), ctypes.sizeof(ruleset_attr), 0)
+    ruleset_fd = libc.syscall(calls[0], ctypes.byref(ruleset_attr), ctypes.sizeof(ruleset_attr), 0)
     if ruleset_fd < 0:
         raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
     try:
@@ -206,13 +178,13 @@ def _apply_landlock(read_only: Sequence[Path], read_write: Sequence[Path]) -> No
             descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC)
             try:
                 path_attr = _LandlockPathBeneathAttr(rights, descriptor)
-                if libc.syscall(445, ruleset_fd, 1, ctypes.byref(path_attr), 0) < 0:
+                if libc.syscall(calls[1], ruleset_fd, 1, ctypes.byref(path_attr), 0) < 0:
                     raise OSError(ctypes.get_errno(), f"landlock_add_rule: {path}")
             finally:
                 os.close(descriptor)
         if libc.prctl(38, 1, 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
-        if libc.syscall(446, ruleset_fd, 0) < 0:
+        if libc.syscall(calls[2], ruleset_fd, 0) < 0:
             raise OSError(ctypes.get_errno(), "landlock_restrict_self")
     finally:
         os.close(ruleset_fd)
@@ -276,25 +248,87 @@ def _limit_resources(timeout_seconds: float) -> None:
 
 
 def _hardened_child(timeout_seconds: float, read_only: tuple[Path, ...],
-                    read_write: tuple[Path, ...]):
+                    read_write: tuple[Path, ...], *, filesystem: bool = True):
     def apply():
         _limit_resources(timeout_seconds)
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(38, 1, 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
-        _apply_landlock(read_only, read_write)
+        if filesystem:
+            _apply_landlock(read_only, read_write)
         _apply_seccomp()
     return apply
+
+
+_PROBE_SCRIPT = r'''
+import json,resource,socket,sys
+allowed_read,allowed_write,forbidden_read,forbidden_write=sys.argv[1:]
+def can_read(path):
+    try:
+        open(path,"rb").read(1);return True
+    except (PermissionError,FileNotFoundError):return False
+def can_write(path):
+    try:
+        open(path,"wb").write(b"x");return True
+    except (PermissionError,FileNotFoundError):return False
+status=dict(line.split(':',1) for line in open('/proc/self/status') if ':' in line)
+try:socket.socket();network_denied=False
+except PermissionError:network_denied=True
+print(json.dumps({
+  "no_new_privs":status.get("NoNewPrivs","").strip()=="1",
+  "seccomp":status.get("Seccomp","").strip()=="2",
+  "network_denied":network_denied,
+  "nofile":resource.getrlimit(resource.RLIMIT_NOFILE)[0],
+  "allowed_read":can_read(allowed_read),
+  "allowed_write":can_write(allowed_write),
+  "unauthorized_read_denied":not can_read(forbidden_read),
+  "unauthorized_write_denied":not can_write(forbidden_write),
+}))
+'''
+
+
+def _probe_payload(backend: "SandboxBackend", *, bypass_filesystem: bool = False):
+    with tempfile.TemporaryDirectory(prefix="roboforge-sandbox-probe-") as root_name:
+        root = Path(root_name)
+        allowed = root / "allowed"; forbidden = root / "forbidden"
+        allowed.mkdir(); forbidden.mkdir()
+        allowed_read = allowed / "read.txt"; allowed_read.write_text("allowed")
+        allowed_write = allowed / "write.txt"
+        forbidden_read = forbidden / "secret.txt"; forbidden_read.write_text("secret")
+        forbidden_write = forbidden / "write.txt"
+        argv = [sys.executable, "-I", "-c", _PROBE_SCRIPT, str(allowed_read),
+                str(allowed_write), str(forbidden_read), str(forbidden_write)]
+        if bypass_filesystem:
+            process = subprocess.Popen(argv, cwd=allowed,
+                env=_clean_environment(None, home=allowed, temporary=allowed),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
+                preexec_fn=_hardened_child(20, (), (), filesystem=False))
+            stdout, stderr = process.communicate(timeout=20)
+            result = SandboxResult(tuple(argv), process.returncode, stdout, stderr,
+                                   False, getattr(backend, "name", "probe"))
+        else:
+            result = backend.run(argv, cwd=allowed, read_only_paths=[allowed_read],
+                                 read_write_paths=[allowed], timeout_seconds=20)
+        lines = result.stdout.strip().splitlines()
+        payload = json.loads(lines[-1]) if lines else {}
+        payload["returncode"] = result.returncode
+        payload["timed_out"] = result.timed_out
+        payload["stderr"] = result.stderr[-1000:]
+        return payload
 
 
 class PosixSandboxBackend:
     """Rootless hardening backend that does not create Linux namespaces."""
 
     name = "posix-hardened"
-    safe = True
-
     def __init__(self):
         self.landlock_abi = _landlock_abi()
+        self._safe = False
+
+    @property
+    def safe(self) -> bool:
+        return self._safe
 
     @staticmethod
     def _paths(values: Sequence[str | Path]) -> tuple[Path, ...]:
@@ -309,6 +343,9 @@ class PosixSandboxBackend:
         command = [str(item) for item in argv]
         if not command:
             raise SandboxUnavailable("sandbox command is empty")
+        if self.landlock_abi < 1:
+            raise SandboxUnavailable(
+                "posix-hardened requires Landlock filesystem isolation; this kernel does not provide it")
         working = Path(cwd).resolve()
         temporary = Path(temporary_dir or working).resolve()
         read_only = self._paths([*read_only_paths, Path(sys.prefix), "/usr", "/bin",
@@ -317,7 +354,7 @@ class PosixSandboxBackend:
         process_env = _clean_environment(env, home=working, temporary=temporary)
         return subprocess.Popen(command, cwd=working, env=process_env,
             start_new_session=True, preexec_fn=_hardened_child(timeout_seconds,
-                read_only, read_write), **kwargs)
+                read_only, read_write, filesystem=True), **kwargs)
 
     def run(self, argv: Sequence[str], *, cwd: str | Path,
             env: Mapping[str, str] | None = None,
@@ -358,33 +395,34 @@ class PosixSandboxBackend:
             except ProcessLookupError: pass
 
     def probe(self) -> SandboxProbe:
-        script = (
-            "import json,resource,socket\n"
-            "status=dict(line.split(':',1) for line in open('/proc/self/status') "
-            "if ':' in line)\n"
-            "try:\n socket.socket(); network=False\n"
-            "except PermissionError:\n network=True\n"
-            "print(json.dumps({'no_new_privs':status.get('NoNewPrivs','').strip()=='1',"
-            "'seccomp':status.get('Seccomp','').strip()=='2','network_denied':network,"
-            "'nofile':resource.getrlimit(resource.RLIMIT_NOFILE)[0]}))\n")
         try:
-            result = self.run([sys.executable, "-I", "-c", script], cwd=Path.cwd(),
-                              timeout_seconds=20)
-            payload = json.loads(result.stdout.strip().splitlines()[-1])
-            available = (not result.timed_out and result.returncode == 0
+            payload = _probe_payload(self, bypass_filesystem=self.landlock_abi < 1)
+            available = (self.landlock_abi >= 1
+                         and not payload.get("timed_out") and payload.get("returncode") == 0
                          and payload.get("no_new_privs") is True
                          and payload.get("seccomp") is True
                          and payload.get("network_denied") is True
+                         and payload.get("allowed_read") is True
+                         and payload.get("allowed_write") is True
+                         and payload.get("unauthorized_read_denied") is True
+                         and payload.get("unauthorized_write_denied") is True
                          and int(payload.get("nofile", 0)) <= 256)
-            detail = "rootless no_new_privs/seccomp/rlimit execution succeeded" if available \
-                else f"hardening receipt failed: {payload} {result.stderr[-1000:]}"
+            detail = ("rootless Landlock/seccomp/rlimit path confinement succeeded"
+                      if available else "filesystem confinement failed: " + json.dumps(payload, sort_keys=True))
         except Exception as exc:
             available = False; detail = f"{type(exc).__name__}: {exc}"
+            payload = {}
+        self._safe = available
         return SandboxProbe(self.name, available, detail, {
             "requires_root": False, "uses_user_namespace": False,
-            "no_new_privs": available, "seccomp": available, "rlimit": available,
-            "environment_scrub": available, "process_group_cleanup": available,
+            "no_new_privs": payload.get("no_new_privs") is True,
+            "seccomp": payload.get("seccomp") is True,
+            "rlimit": int(payload.get("nofile", 999999)) <= 256,
+            "environment_scrub": True, "process_group_cleanup": True,
             "landlock": self.landlock_abi > 0, "landlock_abi": self.landlock_abi,
+            "filesystem_isolation": available,
+            "unauthorized_read_denied": payload.get("unauthorized_read_denied") is True,
+            "unauthorized_write_denied": payload.get("unauthorized_write_denied") is True,
         })
 
     def require(self) -> SandboxProbe:
@@ -409,21 +447,34 @@ class BubblewrapBackend(PosixSandboxBackend):
         if not self.executable:
             raise SandboxUnavailable("bwrap executable not found")
         command = [self.executable, "--die-with-parent", "--new-session", "--unshare-pid",
-            "--unshare-ipc", "--unshare-uts", "--unshare-net",
-            "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
-        required = [cwd, *[Path(value).resolve() for value in read_only_paths],
-                    *[Path(value).resolve() for value in read_write_paths]]
-        required.extend(Path(str(value)).resolve() for value in argv
-                        if Path(str(value)).is_absolute())
-        host_tmp_required = any(path == Path("/tmp") or Path("/tmp") in path.parents
-                                for path in required)
-        if not host_tmp_required:
-            command.extend(["--tmpfs", "/tmp"])
-        for value in read_write_paths:
-            path = Path(value).resolve()
-            if path.exists():
-                command.extend(["--bind", str(path), str(path)])
-        command.extend(["--chdir", str(cwd), "--", *[str(item) for item in argv]])
+            "--unshare-ipc", "--unshare-uts", "--tmpfs", "/", "--proc", "/proc",
+            "--dev", "/dev"]
+        read_only = [Path(value).resolve() for value in read_only_paths if Path(value).exists()]
+        read_only.extend(path for path in (Path("/usr"), Path("/bin"), Path("/lib"),
+            Path("/lib64"), Path("/etc"), Path(sys.prefix).resolve(), Path(__file__).resolve())
+            if path.exists())
+        read_write = [Path(value).resolve() for value in read_write_paths if Path(value).exists()]
+        if not any(cwd == path or path in cwd.parents for path in read_write):
+            read_only.append(cwd)
+        bindings: dict[Path, bool] = {}
+        for path in read_only:
+            bindings.setdefault(path, False)
+        for path in read_write:
+            bindings[path] = True
+        directories = {Path("/tmp")}
+        for path in bindings:
+            current = path if path.is_dir() else path.parent
+            directories.update(current.parents)
+            directories.add(current)
+        for directory in sorted((item for item in directories if str(item) != "/"),
+                                key=lambda item: len(item.parts)):
+            command.extend(["--dir", str(directory)])
+        command.extend(["--tmpfs", "/tmp"])
+        for path, writable in sorted(bindings.items(), key=lambda item: len(item[0].parts)):
+            command.extend(["--bind" if writable else "--ro-bind", str(path), str(path)])
+        launcher = [sys.executable, str(Path(__file__).resolve()), "--sandbox-exec",
+                    str(120), json.dumps([str(item) for item in argv])]
+        command.extend(["--chdir", str(cwd), "--", *launcher])
         return command
 
     def popen(self, argv: Sequence[str], *, cwd: str | Path,
@@ -444,26 +495,38 @@ class BubblewrapBackend(PosixSandboxBackend):
             return SandboxProbe(self.name, False, "bwrap executable not found", {
                 "requires_root": False, "uses_user_namespace": True})
         try:
-            result = self.run([sys.executable, "-I", "-c",
-                "import json;print(json.dumps({'sandbox':True}))"], cwd=Path.cwd(),
-                timeout_seconds=20)
-            lines = result.stdout.strip().splitlines()
-            value = json.loads(lines[-1]) if lines else None
-            available = result.returncode == 0 and value == {"sandbox": True}
-            detail = "namespace execution succeeded" if available else (
-                result.stderr or result.stdout)[-2000:].strip()
+            payload = _probe_payload(self)
+            available = (payload.get("returncode") == 0
+                         and payload.get("no_new_privs") is True
+                         and payload.get("seccomp") is True
+                         and payload.get("network_denied") is True
+                         and payload.get("allowed_read") is True
+                         and payload.get("allowed_write") is True
+                         and payload.get("unauthorized_read_denied") is True
+                         and payload.get("unauthorized_write_denied") is True)
+            detail = "bubblewrap path confinement succeeded" if available else json.dumps(payload)
         except Exception as exc:
             available = False; detail = f"{type(exc).__name__}: {exc}"
+            payload = {}
+        self._safe = available
         return SandboxProbe(self.name, available, detail, {
             "requires_root": False, "uses_user_namespace": True,
-            "namespace_filesystem": available, "network_namespace": available})
+            "namespace_filesystem": available, "network_namespace": False,
+            "filesystem_isolation": available,
+            "unauthorized_read_denied": payload.get("unauthorized_read_denied") is True,
+            "unauthorized_write_denied": payload.get("unauthorized_write_denied") is True,
+            "no_new_privs": payload.get("no_new_privs") is True,
+            "seccomp": payload.get("seccomp") is True})
 
 
 class UnsafeSandboxBackend(PosixSandboxBackend):
     """Explicit development-only process runner with no syscall isolation."""
 
     name = "unsafe-dev"
-    safe = False
+
+    @property
+    def safe(self) -> bool:
+        return False
 
     def popen(self, argv: Sequence[str], *, cwd: str | Path,
               env: Mapping[str, str] | None = None,
@@ -482,7 +545,15 @@ class UnsafeSandboxBackend(PosixSandboxBackend):
 
 
 def select_sandbox(name: str = "posix") -> SandboxBackend:
-    if name in {"auto", "posix"}:
+    if name == "auto":
+        posix = PosixSandboxBackend()
+        if posix.probe().available:
+            return posix
+        bubblewrap = BubblewrapBackend()
+        if bubblewrap.probe().available:
+            return bubblewrap
+        return posix
+    if name == "posix":
         return PosixSandboxBackend()
     if name == "bubblewrap":
         return BubblewrapBackend()
@@ -491,11 +562,30 @@ def select_sandbox(name: str = "posix") -> SandboxBackend:
     raise ValueError(f"unknown sandbox backend: {name}")
 
 
-def default_sandbox() -> PosixSandboxBackend:
-    return PosixSandboxBackend()
+def default_sandbox() -> SandboxBackend:
+    return select_sandbox("auto")
+
+
+def _sandbox_exec_main(argv: Sequence[str]) -> int:
+    if len(argv) != 3 or argv[0] != "--sandbox-exec":
+        return 64
+    timeout_seconds = float(argv[1])
+    command = json.loads(argv[2])
+    if not isinstance(command, list) or not command:
+        return 64
+    _limit_resources(timeout_seconds)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
+    _apply_seccomp()
+    os.execvpe(str(command[0]), [str(item) for item in command], dict(os.environ))
+    return 70
 
 
 __all__ = ["SandboxBackend", "SandboxProbe", "SandboxResult", "SandboxUnavailable",
-           "ReadOnlyGuard",
            "PosixSandboxBackend", "BubblewrapBackend", "UnsafeSandboxBackend",
            "default_sandbox", "select_sandbox"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_sandbox_exec_main(sys.argv[1:]))

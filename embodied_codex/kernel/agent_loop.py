@@ -130,8 +130,8 @@ class AgentLoop:
         registry.add("run_command", "Run a bounded engineering/test command in the workspace.", self._schema(
             {"argv": {"type": "array", "items": string, "minItems": 1},
              "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600}}, ["argv"]), ws.run_command)
-        registry.add("search_assets", "Search shared Tool, Skill, Experience and Gap summaries.", self._schema(
-            {"query": string, "limit": integer}, ["query"]), cap.search)
+        registry.add("search_assets", "Search promoted shared Tool, Skill and Experience summaries.", self._schema(
+            {"query": string, "limit": integer, "include_gaps": {"type": "boolean"}}, ["query"]), cap.search)
         registry.add("inspect_asset", "Load selected asset manual/contract detail.", self._schema({"asset_id": string}, ["asset_id"]), cap.inspect)
         registry.add("load_tool_source", "Explicitly load a Tool implementation after manual inspection.", self._schema({"tool_id": string}, ["tool_id"]), cap.load_tool_source)
         registry.add("search_web", "Search public web sources for a capability.", self._schema({"query": string, "limit": integer}, ["query"]), cap.web_search)
@@ -174,6 +174,9 @@ class AgentLoop:
             {"name": string, "summary": string, "applicability": string, "keywords": {"type": "array", "items": string},
              "evidence_paths": {"type": "array", "items": string}},
             ["name", "summary", "applicability", "evidence_paths"]), cap.register_experience)
+        registry.add("promote_asset", "Promote a verified asset after successful integration evidence.", self._schema(
+            {"asset_id": string, "evidence_paths": {"type": "array", "items": string, "minItems": 1},
+             "applicability": {"type": "object"}}, ["asset_id", "evidence_paths"]), cap.promote_asset)
         registry.add("record_gap", "Persist an unresolved capability Gap.", self._schema(
             {"name": string, "task": string, "failure_summary": string, "evidence_paths": {"type": "array", "items": string},
              "attempted_methods": {"type": "array", "items": string}, "missing_capability": string,
@@ -182,11 +185,15 @@ class AgentLoop:
              "missing_capability", "blocked_reason", "next_steps"]), cap.record_gap)
         registry.add("run_controller", "Execute the current controller once and return sensor evidence.", self._schema(), self._run_controller)
         registry.add("inspect_execution", "Inspect the latest committed execution evidence.", self._schema(), lambda: self.latest_evidence or {})
-        registry.add("view_sensor_artifact", "Read a bounded sensor/evidence artifact path.", self._schema({"path": string, "max_chars": integer}, ["path"]), self._view_artifact)
+        registry.add("view_sensor_artifact", "Read a bounded sensor/evidence artifact path.", self._schema(
+            {"path": string, "max_chars": {"type": "integer", "minimum": 1,
+                "maximum": 20000}, "offset_bytes": {"type": "integer", "minimum": 0}},
+            ["path"]), self._view_artifact)
         registry.add("finish", "Finish only after the task is actually verified.", self._schema({"summary": string}, ["summary"]), self._finish)
         return registry
 
-    def _view_artifact(self, path: str, max_chars: int = 12000):
+    def _view_artifact(self, path: str, max_chars: int = 12000,
+                       offset_bytes: int = 0):
         candidate = Path(path)
         if not candidate.is_absolute():
             if str(path).startswith("artifact://adapter/"):
@@ -258,7 +265,44 @@ class AgentLoop:
             return {"path": relative, "kind": "point_cloud", "format": suffix[1:],
                     "bytes": candidate.stat().st_size, "points": points,
                     "sha256": _file_sha256(candidate)}
-        return {"path": relative, "kind": "text", "content": candidate.read_text(errors="replace")[:max_chars]}
+        maximum = min(max(int(max_chars), 1), 20000)
+        offset = max(int(offset_bytes), 0)
+        size = candidate.stat().st_size
+        if offset > size:
+            raise ProtocolError("artifact text offset exceeds file size")
+        with candidate.open("rb") as stream:
+            stream.seek(offset)
+            data = stream.read(maximum)
+        next_offset = offset + len(data)
+        return {"path": relative, "kind": "text",
+                "content": data.decode("utf-8", errors="replace"),
+                "bytes": size, "offset_bytes": offset,
+                "next_offset_bytes": next_offset if next_offset < size else None,
+                "truncated": next_offset < size}
+
+    def _bound_tool_result(self, payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        content = self.context_window.bound_tool_payload(payload)
+        summary = json.loads(content)
+        if summary.get("truncated") is not True:
+            return content, summary
+        digest = str(summary["sha256"])
+        directory = self.root / "artifacts" / "tool-results"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{digest}.json"
+        if not target.exists():
+            temporary = target.with_suffix(f".tmp-{time.time_ns()}")
+            try:
+                with temporary.open("x") as stream:
+                    json.dump(dict(payload), stream, sort_keys=True, default=str)
+                    stream.write("\n")
+                    stream.flush()
+                    import os
+                    os.fsync(stream.fileno())
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        summary["artifact_uri"] = f"run://artifacts/tool-results/{target.name}"
+        return json.dumps(summary, default=str), summary
 
     @staticmethod
     def _evidence_success(evidence: Mapping[str, Any]) -> bool:
@@ -383,15 +427,13 @@ class AgentLoop:
                     "environment_generation": (protocol or {}).get("environment_generation")}
         evidence_dir = self.root / "evidence"
         if not evidence_dir.exists(): evidence_dir.mkdir(parents=True)
-        evidence_dir.chmod(0o700)
         evidence_path = evidence_dir / f"execution-{self.budget.executions:06d}-{execution_key[:12]}.json"
         temporary = evidence_path.with_suffix(".tmp")
         try:
             temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n")
-            temporary.replace(evidence_path); evidence_path.chmod(0o400)
+            temporary.replace(evidence_path)
         finally:
             temporary.unlink(missing_ok=True)
-            evidence_dir.chmod(0o500)
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
         self.latest_evidence = evidence
         self.state["restored_evidence_unverified"] = False
@@ -475,14 +517,15 @@ class AgentLoop:
                             value["frames"] = [{k: v for k, v in row.items() if k != "image_url"}
                                                for row in value["frames"]]
                         payload = {**payload, "result": value, "multimodal_delivered": len(multimodal)}
-                content = self.context_window.bound_tool_payload(payload)
+                content, event_payload = self._bound_tool_result(payload)
                 self.messages.append({"role": "tool", "tool_call_id": normalized["id"],
                                       "content": content})
                 if multimodal:
                     parts = [{"type": "text", "text": "Selected sensor artifact."}]
                     parts.extend({"type": "image_url", "image_url": {"url": url}} for url in multimodal[:4])
                     self.messages.append({"role": "user", "content": parts})
-                self.event_store.commit("tool_result", {"name": name, "payload": payload})
+                self.event_store.commit("tool_result", {"name": name,
+                                                        "payload": event_payload})
             self._checkpoint()
         result = {"steps": self.budget.steps, "executions": self.budget.executions,
                   "budget_exhausted": self.budget.exhausted(), "finished": self.state.get("finished", False),

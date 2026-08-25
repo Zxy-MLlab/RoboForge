@@ -14,6 +14,8 @@ import subprocess
 import sys
 from typing import Any
 
+from embodied_codex.providers import resolve_provider
+
 
 ROOT=Path(__file__).resolve().parents[1]
 PYTHON=sys.executable
@@ -119,6 +121,7 @@ def _predeclared_states(*, task: int, development_state: int, count: int,
 def development_command(*, task: int,states: list[int],max_iterations: int,output: Path,
                         capabilities: Path,model: str,reasoning_effort: str,device: str,
                         python: str,groundingdino_checkpoint: str,base_url: str,
+                        provider: str|None=None,
                         retry_locked_validation: bool=False,
                         verifier_reasoning_effort: str="low"):
     # Development uses the autonomous Harness over every predeclared case.  No
@@ -126,7 +129,8 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
     command=([python,"-m","embodied_codex","run","--adapter","libero",
         "--task",str(task),"--profile","autonomous","--run-dir",str(output),
         "--asset-root",str(capabilities),"--model-name",model,
-        "--reasoning-effort",reasoning_effort,"--base-url",base_url,
+        "--reasoning-effort",reasoning_effort,
+        *(["--provider",provider] if provider else []),"--base-url",base_url,
         "--max-steps",str(max_iterations),"--controller-timeout","600",
         "--states",*[str(state) for state in states]])
     return command
@@ -135,6 +139,7 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
 def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output: Path,
                        model: str,reasoning_effort: str,device: str,python: str,
                        groundingdino_checkpoint: str,base_url: str,
+                       provider: str|None=None,
                        capabilities: str|Path|None=None):
     skill_dir=Path(skill_dir).resolve()
     controller=skill_dir/"controller.py"
@@ -148,6 +153,7 @@ def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output
         "--controller-source",str(controller),"--frozen-controller",
         "--states",*[str(state) for state in states],
         "--model-name",model,"--reasoning-effort",reasoning_effort,
+        *(["--provider",provider] if provider else []),
         "--base-url",base_url,"--max-steps","8"])
 
 
@@ -263,8 +269,8 @@ def main():
     parser.add_argument("--reasoning-effort",default="high")
     parser.add_argument("--verifier-reasoning-effort",default=os.environ.get(
         "EMBODIED_CODEX_VERIFIER_REASONING_EFFORT","low"))
-    parser.add_argument("--base-url",default=os.environ.get(
-        "EMBODIED_CODEX_BASE_URL","https://api.apexin.ai/v1"))
+    parser.add_argument("--provider",choices=("openai","apex"))
+    parser.add_argument("--base-url",default=os.environ.get("EMBODIED_CODEX_BASE_URL"))
     parser.add_argument("--device",default="cuda")
     parser.add_argument("--python",default=sys.executable)
     parser.add_argument("--groundingdino-checkpoint",default=os.environ.get(
@@ -274,9 +280,9 @@ def main():
     parser.add_argument("--retry-locked-validation",action="store_true",
         help="Replay the current immutable Controller once after a verifier/Adapter correction")
     args=parser.parse_args()
-    if not any(os.environ.get(name) for name in
-               ("EMBODIED_CODEX_API_KEY","OPENAI_API_KEY","APEX_API_KEY")):
-        raise OSError("set EMBODIED_CODEX_API_KEY, OPENAI_API_KEY, or APEX_API_KEY")
+    provider=resolve_provider(provider=args.provider,base_url=args.base_url)
+    args.provider=provider.provider
+    args.base_url=provider.endpoint
     if not Path(args.python).is_file():raise FileNotFoundError(f"Python executable: {args.python}")
     if not Path(args.groundingdino_checkpoint).is_file():
         raise FileNotFoundError("GroundingDINO checkpoint; pass --groundingdino-checkpoint "
@@ -295,7 +301,8 @@ def main():
     plans={task:value["sealed"] for task,value in partitions.items()}
     expected={"protocol":"embodied-codex-libero-campaign-v3",
         "kernel":"embodied_codex.kernel.AgentLoop","historical_graph_harness_used":False,
-        "model":args.model,"base_url":args.base_url,"suite":"libero_spatial","tasks":args.tasks,
+        "model":args.model,"provider":args.provider,"base_url":args.base_url,
+        "provider_key_env":provider.key_env,"suite":"libero_spatial","tasks":args.tasks,
         "coding_agent_reasoning_effort":args.reasoning_effort,
         "outcome_verifier_reasoning_effort":args.verifier_reasoning_effort,
         "groundingdino_checkpoint_sha256":_file_sha256(args.groundingdino_checkpoint),
@@ -351,7 +358,7 @@ def main():
                 max_iterations=args.max_iterations,output=development,capabilities=capabilities,
                 model=args.model,reasoning_effort=args.reasoning_effort,device=args.device,
                 python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
-                base_url=args.base_url,
+                base_url=args.base_url,provider=args.provider,
                 retry_locked_validation=args.retry_locked_validation,
                 verifier_reasoning_effort=args.verifier_reasoning_effort)
             completed=subprocess.run(command,cwd=ROOT,env=runtime_env)
@@ -411,7 +418,7 @@ def main():
                     states=plans[task],output=sealed,model=args.model,
                     reasoning_effort=args.reasoning_effort,device=args.device,
                     python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
-                    base_url=args.base_url,capabilities=capabilities),
+                    base_url=args.base_url,provider=args.provider,capabilities=capabilities),
                     cwd=ROOT,env=runtime_env)
                 row["sealed_returncode"]=evaluated.returncode
                 summary=_sealed_status(sealed,skill_id=evaluated_skill.get("skill_id"),

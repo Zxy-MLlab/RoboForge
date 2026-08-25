@@ -38,20 +38,32 @@ def adapter_preflight(spec: str):
     return result
 
 
-def load_adapter(spec: str, *, task: str, run_dir: str | Path, case: Any = None):
+def adapter_doctor_task(spec: str) -> str | None:
+    """Return an optional Adapter-owned task selector for Doctor initialization."""
+    module = _adapter_module(spec)
+    value = getattr(module, "DOCTOR_TASK", None) if module is not None else None
+    return str(value) if value is not None else None
+
+
+def load_adapter(spec: str, *, task: str, run_dir: str | Path, case: Any = None,
+                 configuration: dict[str, Any] | None = None):
     if spec == "libero" or str(spec).startswith("libero@"):
         from .libero import create
         state = int(case) if case is not None and spec == "libero" else (
             0 if spec == "libero" else int(str(spec).split("@", 1)[1]))
-        return create(task=task, state=state, root=run_dir)
+        return create(task=task, state=state, root=run_dir,
+                      configuration=configuration)
     if spec == "embodied_codex.adapters.libero":
         from .libero import create
-        return create(task=task, root=run_dir)
+        return create(task=task, root=run_dir, configuration=configuration)
     factory = _FACTORIES.get(spec) or _load(spec)
     if not inspect.isclass(factory) and not callable(factory): return factory
     try: signature = inspect.signature(factory)
     except (TypeError, ValueError): signature = None
-    for kwargs in ({"task": task, "root": Path(run_dir), "case": case},
+    configured = ({"task": task, "root": Path(run_dir), "case": case,
+                   "configuration": dict(configuration or {})},)
+    for kwargs in (*configured,
+                   {"task": task, "root": Path(run_dir), "case": case},
                    {"task": task, "root": Path(run_dir)}, {"task": task, "case": case}, {"task": task},
                    {"instruction": task}, {}):
         if signature is not None:

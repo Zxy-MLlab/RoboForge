@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import signal
 import threading
+import time
 from typing import Any, Mapping, Protocol
 
 
@@ -37,11 +38,21 @@ class OpenAIModel:
     api_key: str; base_url: str; model: str = "gpt-5.6-sol"
     reasoning_effort: str = "high"; max_tokens: int = 8000; timeout: float = 120
     total_response_timeout: float = 120
+    retry_delays: tuple[float, ...] = (1.0, 2.0)
     def __post_init__(self):
         from openai import OpenAI
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url,
                              timeout=self.timeout, max_retries=0)
-    def decide(self, *, messages, tools):
+    @staticmethod
+    def _transient(error: BaseException) -> bool:
+        status = getattr(error, "status_code", None)
+        if status in {408, 409, 425, 429, 500, 502, 503, 504}:
+            return True
+        name = type(error).__name__
+        return name in {"APIConnectionError", "APITimeoutError", "RateLimitError",
+                        "InternalServerError", "TimeoutError", "ConnectionError"}
+
+    def _decide_once(self, *, messages, tools):
         with _total_deadline(self.total_response_timeout):
             stream = self.client.chat.completions.create(
                 model=self.model, messages=list(messages), tools=list(tools),
@@ -60,5 +71,15 @@ class OpenAIModel:
                         if item.function.name: call["name"] += item.function.name
                         if item.function.arguments: call["arguments"] += item.function.arguments
         return {"content":"".join(content),"tool_calls":[calls[i] for i in sorted(calls)]}
+
+    def decide(self, *, messages, tools):
+        for attempt in range(len(self.retry_delays) + 1):
+            try:
+                return self._decide_once(messages=messages, tools=tools)
+            except Exception as exc:
+                if attempt >= len(self.retry_delays) or not self._transient(exc):
+                    raise
+                time.sleep(max(0.0, float(self.retry_delays[attempt])))
+        raise AssertionError("unreachable")
 
 __all__ = ["Model", "OpenAIModel", "ModelResponseTimeout"]

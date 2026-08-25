@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping
 
-from .kernel.sandbox import ReadOnlyGuard, SandboxBackend, default_sandbox
+from .kernel.sandbox import SandboxBackend, default_sandbox
 
 
 class ToolRuntimeError(RuntimeError): pass
@@ -118,13 +118,12 @@ class ToolRuntime:
         bindings:set[Path]=set();rewritten=self._rewrite_payload(dict(payload),bindings)
         timeout=min(max(float(runtime_spec.get("timeout_seconds",
             self.timeout_seconds)),0.1),600)
-        with ReadOnlyGuard([directory,*self.allowed_input_roots]):
-            completed=self.sandbox.run([self.python,"-u","-I","-c",_CHILD,
-                str(entrypoint),str(manifest_path)],cwd=directory,
-                input_text=json.dumps(rewritten),
-                env=self._safe_environment(str(runtime_spec.get("accelerator") or "cpu")),
-                read_only_paths=[directory,*bindings,Path(self.python).resolve().parents[1]],
-                timeout_seconds=timeout)
+        completed=self.sandbox.run([self.python,"-u","-I","-c",_CHILD,
+            str(entrypoint),str(manifest_path)],cwd=directory,
+            input_text=json.dumps(rewritten),
+            env=self._safe_environment(str(runtime_spec.get("accelerator") or "cpu")),
+            read_only_paths=[directory,*bindings,Path(self.python).resolve().parents[1]],
+            timeout_seconds=timeout)
         if completed.timed_out:
             raise ToolRuntimeError("Tool execution timed out")
         if completed.returncode!=0:
