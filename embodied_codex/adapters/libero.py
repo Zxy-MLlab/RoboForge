@@ -24,25 +24,38 @@ _CHECKPOINT_SHA256 = {
 }
 
 
-def _sdk_index(capabilities, verifiers):
+def _sdk_index(capabilities, verifiers, contracts=None):
     """Return the bounded SDK index needed to form valid RPC requests.
 
     This is contract metadata, not a task policy: it describes the accepted
     request shapes while leaving object selection and motion strategy to the
     controller.
     """
+    def compact_schema(schema):
+        schema = dict(schema or {})
+        properties = dict(schema.get("properties") or {})
+        return {"type": schema.get("type", "object"),
+                "required": list(schema.get("required") or []),
+                "fields": sorted(str(key) for key in properties)}
+
     return {
         "protocol": "embodied-codex-libero-robot-sdk-v1",
         "operations": ["observe", "use", "act", "verify", "record"],
         "action_contracts": {
             name: {key: value for key, value in contract.items()
-                   if key in {"required", "any_of", "enum", "example"}}
+                   if key in {"required", "any_of", "enum", "optional", "field_semantics",
+                              "rule", "example"}}
             for name, contract in LIBERO_ROBOT_SDK_CONTRACT["actions"].items()
         },
         "verifier_contracts": {
             name: {key: value for key, value in contract.items()
-                   if key in {"required", "example"}}
+                   if key in {"required", "optional", "rule", "example"}}
             for name, contract in LIBERO_ROBOT_SDK_CONTRACT["verifiers"].items()
+        },
+        "seed_tool_contracts": {
+            name: {"input": compact_schema(contract.get("input_schema")),
+                   "output": compact_schema(contract.get("output_schema"))}
+            for name, contract in dict(contracts or {}).items()
         },
         "seed_tools": sorted(capabilities),
         "verifiers": sorted(verifiers),
@@ -253,5 +266,5 @@ def create(*, task: str, state: int = 0, root: str | Path,
     deployment = LiberoDeployment(episode=episode, artifact_dir=Path(root) / "adapter",
         capabilities=capabilities, capability_contracts=contracts, verifiers=verifiers,
         outcome_verifier=outcome)
-    deployment.sdk_index = _sdk_index(capabilities, verifiers)
+    deployment.sdk_index = _sdk_index(capabilities, verifiers, contracts)
     return deployment

@@ -19,12 +19,16 @@ from evaluation.run_embodied_codex_libero import (
 def test_libero_sdk_index_exposes_machine_action_and_verifier_contracts():
     from embodied_codex.adapters.libero import _sdk_index
 
-    index = _sdk_index(["seed:v001"], ["visual_attachment"])
+    index = _sdk_index(["seed:v001"], ["visual_attachment"], {
+        "seed:v001": {"input_schema": {"type": "object"},
+                       "output_schema": {"type": "object"}}})
     assert index["action_contracts"]["move_to_point"]["required"] == ["type", "target_ref"]
     assert index["action_contracts"]["osc_delta"]["required"] == ["type", "translation", "rotation"]
     assert index["verifier_contracts"]["visual_attachment"]["required"] == [
         "frame", "object_query", "source_ref"]
     assert index["seed_tools"] == ["seed:v001"]
+    assert index["seed_tool_contracts"]["seed:v001"]["input"] == {
+        "type": "object", "required": [], "fields": []}
 
 
 def test_anti_cheating_audits_deduplicated_execution_artifact(tmp_path):
