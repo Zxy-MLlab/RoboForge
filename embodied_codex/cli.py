@@ -138,7 +138,9 @@ def doctor_command(args) -> int:
     smoke_dir = Path(args.run_dir or Path("runs/doctor") / args.adapter.replace(":", "_")); smoke_dir.mkdir(parents=True, exist_ok=True)
     adapter = None
     try:
-        adapter = load_adapter(args.adapter, task=str(args.task), run_dir=smoke_dir)
+        task = args.task if args.task is not None else ("0" if args.adapter == "libero"
+            or str(args.adapter).startswith("libero@") else "doctor")
+        adapter = load_adapter(args.adapter, task=str(task), run_dir=smoke_dir)
         checks["adapter_init"] = "available"
         required = ("dispatch", "project_rpc_output", "initial_observation", "sensor_report", "verification_receipt",
                     "execution_identity", "resume_protocol", "register_capability", "close")
@@ -221,7 +223,7 @@ def main(argv=None) -> int:
     run.add_argument("--base-url", default=os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1")); run.add_argument("--reasoning-effort", default="high")
     run.add_argument("--max-steps", type=int, default=60); run.add_argument("--max-executions", type=int, default=20); run.add_argument("--controller-timeout", type=float, default=600)
     run.set_defaults(handler=run_command)
-    doctor = sub.add_parser("doctor"); doctor.add_argument("--adapter", required=True); doctor.add_argument("--task", default="doctor"); doctor.add_argument("--run-dir"); doctor.add_argument("--checkpoint")
+    doctor = sub.add_parser("doctor"); doctor.add_argument("--adapter", required=True); doctor.add_argument("--task"); doctor.add_argument("--run-dir"); doctor.add_argument("--checkpoint")
     doctor.add_argument("--model"); doctor.add_argument("--model-name", default="gpt-5.6-sol")
     doctor.add_argument("--base-url", default=os.environ.get("APEX_BASE_URL", "https://api.apexin.ai/v1"))
     doctor.set_defaults(handler=doctor_command)
