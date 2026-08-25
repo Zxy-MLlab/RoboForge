@@ -118,15 +118,14 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
                         python: str,groundingdino_checkpoint: str,base_url: str,
                         retry_locked_validation: bool=False,
                         verifier_reasoning_effort: str="low"):
-    command=([python,"-m","embodied_codex.examples.run_libero",
-        "--run-dir",str(output),"--suite","libero_spatial","--task",str(task),
-        "--states",*[str(state) for state in states],"--max-iterations",str(max_iterations),
-        "--capability-library",str(capabilities),"--model",model,
-        "--reasoning-effort",reasoning_effort,
-        "--verifier-reasoning-effort",verifier_reasoning_effort,"--device",device]
-        +["--groundingdino-checkpoint",groundingdino_checkpoint,"--python",python,
-          "--base-url",base_url])
-    if retry_locked_validation:command.append("--retry-locked-validation")
+    # Every episode now enters the same canonical Kernel via the Adapter plugin.
+    # The campaign runner remains responsible for partitioning development and sealed cases.
+    state = states[0]
+    command=([python,"-m","embodied_codex","run","--adapter",f"libero@{state}",
+        "--task",str(task),"--profile","benchmark","--run-dir",str(output),
+        "--asset-root",str(capabilities),"--model-name",model,
+        "--reasoning-effort",reasoning_effort,"--base-url",base_url,
+        "--max-steps",str(max_iterations),"--controller-timeout","600"])
     return command
 
 
@@ -234,7 +233,7 @@ def main():
     development_plans={task:value["development"] for task,value in partitions.items()}
     plans={task:value["sealed"] for task,value in partitions.items()}
     expected={"protocol":"embodied-codex-libero-campaign-v3",
-        "kernel":"embodied_codex.EvolutionEngine","historical_graph_harness_used":False,
+        "kernel":"embodied_codex.kernel.AgentLoop","historical_graph_harness_used":False,
         "model":args.model,"base_url":args.base_url,"suite":"libero_spatial","tasks":args.tasks,
         "coding_agent_reasoning_effort":args.reasoning_effort,
         "outcome_verifier_reasoning_effort":args.verifier_reasoning_effort,

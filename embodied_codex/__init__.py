@@ -11,7 +11,7 @@ from .workspace import TaskWorkspace
 from .assets import (CapabilityGapLibrary, CapabilityLibrary, ExperienceLibrary,
                      SkillLibrary)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 def __getattr__(name):
     if name == "EvolutionEngine":

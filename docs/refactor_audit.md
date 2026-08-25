@@ -16,10 +16,10 @@
 ## 迁移与删除
 
 新 `kernel` 只执行模型显式请求的搜索、详情加载、workspace 变更、Controller 执行和资产
-保存。历史 Evolution 链和 LIBERO runner 暂时保留以维持兼容，但新 CLI 不依赖它们；研究
-策略改为 `evaluation/policy.py` 的可组合 hook。渐进加载为 index → summary → manual/schema，
-源码必须通过显式 `load_source` 请求。旧 Graph/Stage Node/capability_library 和实验产物已
-从工作树移除，未恢复为 Core 依赖。
+保存。旧复杂实现已移动到明确的 `embodied_codex/legacy/` 迁移层；canonical CLI、LIBERO
+Adapter 和 benchmark runner 不依赖它。研究策略由 `evaluation/policy.py` 的可组合 hook
+真实执行。渐进加载为 index → summary → manual/schema，源码必须通过显式 `load_source`
+请求。旧 Graph/Stage Node/capability_library 和实验产物已从工作树移除。
 
 ## 依赖方向
 

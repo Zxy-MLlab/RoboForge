@@ -6,25 +6,28 @@ Experience/Gap 检索；任务策略、失败诊断和能力获取由模型决�
 
 ## 架构边界
 
-`embodied_codex/kernel/` 只包含通用运行底座：Agent Loop、workspace、sandbox runtime、
-context builder、event store 和恢复检查点。`embodied_codex/assets.py` 提供不可变 Tool
+`embodied_codex/kernel/` 是唯一运行底座：Agent Loop、workspace、sandbox runtime、
+function-calling tools、capability manager、context builder、event store 和恢复检查点。
+`embodied_codex/assets.py` 提供不可变 Tool
 版本、Schema、manual-first 和资产库；`embodied_codex/deployments/` 是 Adapter 实现。
 LIBERO 只通过 `deployments/libero.py` 和 `evaluation/run_embodied_codex_libero.py`
 接入。反作弊、provenance、generalization 和 sealed evaluator 只属于 `evaluation/`
 中的外部 Policy，不会被 kernel 导入。
 
-旧 `EvolutionEngine` 和实验脚本暂时保留给历史 LIBERO runner 兼容使用，但不是新 Harness
-入口，也不应向 kernel 增加任务特定状态机。
+旧实验代码已不再作为运行入口；正式 CLI、LIBERO 和自定义 Adapter 都进入同一个 Kernel。
 
 ## 安装与运行
 
 ```bash
-cd /path/to/embodied_frontier
+cd RoboForge
 python -m pip install -e '.[test]'
+# LIBERO adapter and robot simulation dependencies
+python -m pip install -e '.[libero]'
 
 # 快速调试自定义 Adapter
 embodied_codex run --adapter my_package:MyAdapter \
   --task 'put the bowl on the plate' --profile dev \
+  --run-dir runs/task_b --asset-root assets/shared \
   --model my_package:FakeModel
 
 # 自主模式使用 API 模型
@@ -33,11 +36,18 @@ embodied_codex run --adapter my_package:MyAdapter --task 'put the bowl on the pl
   --profile autonomous
 
 # LIBERO 兼容 Adapter
-embodied_codex run --adapter libero --task 0 --profile autonomous
+roboforge run --adapter libero --task 0 --profile autonomous \
+  --run-dir runs/libero_task0 --asset-root assets/shared
 
 # 运行环境检查
 roboforge doctor --adapter libero
 ```
+
+LIBERO perception checkpoints and third-party sources are intentionally external. Set
+`ROBOFORGE_GROUNDINGDINO_ROOT`, `ROBOFORGE_GROUNDINGDINO_CONFIG`,
+`ROBOFORGE_GROUNDINGDINO_CHECKPOINT`, `ROBOFORGE_SAM_ROOT`, `ROBOFORGE_SAM_CHECKPOINT` and
+`ROBOFORGE_GRASPNET_CHECKPOINT`; `roboforge doctor --adapter libero` performs adapter and
+proprioception smoke checks before a run.
 
 Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` 开启资产检索和沉淀，
 `benchmark` 由外部评测 runner 额外加载研究 policy。自定义 Adapter 至少实现

@@ -98,11 +98,11 @@ def test_canonical_command_exposes_only_complete_program_controller():
         reasoning_effort="high",device="cuda",python="python",
         groundingdino_checkpoint="groundingdino.pth",base_url="https://api.example/v1",
     )
-    assert "embodied_codex.examples.run_libero" in command
-    assert "run_autonomous_evolution.py" not in command
-    assert "--capability-library" in command
-    assert command[command.index("--verifier-reasoning-effort")+1]=="low"
-    assert command[command.index("--states")+1:command.index("--max-iterations")]==["23","7","9"]
+    assert "embodied_codex" in command
+    assert "EvolutionEngine" not in " ".join(command)
+    assert command[command.index("--adapter")+1] == "libero@23"
+    assert command[command.index("--asset-root")+1] == "tools"
+    assert command[command.index("--profile")+1] == "benchmark"
 
 
 def test_development_command_can_decouple_verifier_reasoning_effort():
@@ -114,7 +114,7 @@ def test_development_command_can_decouple_verifier_reasoning_effort():
         groundingdino_checkpoint="groundingdino.pth",
         base_url="https://api.example/v1")
     assert command[command.index("--reasoning-effort")+1]=="high"
-    assert command[command.index("--verifier-reasoning-effort")+1]=="low"
+    assert command[command.index("--adapter")+1]=="libero@0"
 
 
 def test_validation_command_requires_three_state_runner_inputs():
