@@ -47,7 +47,10 @@ class LiveAcquisitionModel:
             5: ("read_file", {"path": f"{source}/embodied_codex/retrieval.py",
                               "start_line": 1, "end_line": 120}),
             6: ("write_file", {"path": f"{source}/acquired_tool.py", "content":
-                "from embodied_codex.retrieval import rank_records\n"
+                "import os\n"
+                "import sys\n"
+                "sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'embodied_codex'))\n"
+                "from retrieval import rank_records\n"
                 "def run(payload):\n"
                 "    rows=[{'id':'target','text':'set target','value':1},"
                 "{'id':'other','text':'other','value':0}]\n"
@@ -106,9 +109,15 @@ def main():
         "register_capability_package", "test_tool", "write_file", "run_controller", "finish"]
     if invoked != expected or result.get("finished") is not True:
         raise SystemExit(json.dumps({"result": result, "invoked": invoked}, indent=2, default=str))
+    execution_event = next(row for row in reversed(events)
+                           if row["kind"] == "execution")
+    evidence_uri = execution_event["payload"]["artifact_uri"]
+    evidence_path = root / "run" / evidence_uri.removeprefix("run://")
+    evidence = json.loads(evidence_path.read_text())
     print(json.dumps({"root": str(root), "finished": result["finished"],
         "executions": result["executions"], "tool_calls": invoked,
-        "sensor_success": result["latest_evidence"]["sensor_report"]["sensor_success"]},
+        "sensor_success": evidence["sensor_report"]["sensor_success"],
+        "verification_receipt": evidence["verification_receipt"]},
         indent=2))
 
 
