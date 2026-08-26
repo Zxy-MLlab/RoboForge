@@ -160,7 +160,18 @@ def run_command(args) -> int:
             root=run_dir, web_search=manager.web_search,
             resume=bool(getattr(args, "resume", False)))
         task = getattr(adapter, "instruction", str(args.task))
-        if args.profile == "benchmark":
+        if args.profile == "benchmark" and args.frozen_controller:
+            from evaluation.sealed_evaluation import SealedEvaluationPolicy
+            sealed_policy = next((policy for policy in policies
+                                  if isinstance(policy, SealedEvaluationPolicy)),
+                                 SealedEvaluationPolicy(name="sealed_evaluation"))
+            output = sealed_policy.evaluate_frozen(adapter=adapter,
+                                                   runtime=loop.runtime,
+                                                   controller=workspace.controller)
+            output.update({"finished": bool(output.get("sealed_evaluation")),
+                           "completion_valid": bool(output.get("sealed_evaluation")),
+                           "steps": 0, "executions": len(output.get("sealed_evaluation_cases", []))})
+        elif args.profile == "benchmark":
             from evaluation.runner import BenchmarkRunner
             output = BenchmarkRunner(loop, policies).run(task)
         else:

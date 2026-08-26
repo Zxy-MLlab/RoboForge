@@ -65,6 +65,13 @@ class ToolRegistry:
                 "tools": [item.name for item in self._items.values()
                           if item.group == group]}
 
+    def deactivate(self, group: str):
+        group = str(group)
+        if group == "core" or group not in self._group_descriptions:
+            raise KeyError(f"unknown optional tool group: {group}")
+        self._active_groups.discard(group)
+        return {"group": group, "active": False}
+
     def invoke(self, name: str, arguments: Mapping[str, Any]):
         item = self._items.get(name)
         if item is None: raise KeyError(name)

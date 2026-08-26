@@ -85,7 +85,21 @@ class CapabilityManager:
         if self.tool_library is None: raise CapabilityError("Tool library unavailable")
         if str(tool_id) not in self._inspected_tools:
             raise CapabilityError("inspect the Tool manual and schema before loading source")
-        return self.tool_library.inspect(tool_id, include_source=True)
+        detail = self.tool_library.inspect(tool_id, include_source=True)
+        source = str(detail.get("source") or "")
+        path = self.workspace.root / "inspected_tools" / f"{str(tool_id).replace(':', '_')}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.workspace.write_file(str(path.relative_to(self.workspace.root)), source)
+        return {"tool_id": str(tool_id), "materialized": f"workspace://{path.relative_to(self.workspace.root).as_posix()}"}
+
+    def materialize_skill(self, skill_id: str):
+        if self.skill_library is None:
+            raise CapabilityError("Skill library unavailable")
+        detail = self.skill_library.inspect(str(skill_id), include_controller=True)
+        path = self.workspace.root / "skills" / f"{str(skill_id).replace(':', '_')}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.workspace.write_file(str(path.relative_to(self.workspace.root)), str(detail["controller"]))
+        return {"skill_id": str(skill_id), "materialized": f"workspace://{path.relative_to(self.workspace.root).as_posix()}"}
 
     def activate_tool(self, tool_id: str):
         """Bind exactly one model-selected promoted Tool to this Adapter."""
@@ -386,9 +400,10 @@ class CapabilityManager:
         if controller is not None and not Path(str(controller)).is_absolute():
             values["controller"] = str((self.workspace.root / str(controller)).resolve())
         values["evidence_paths"] = [self._asset_path(item) for item in values.get("evidence_paths", [])]
-        evidence = self._verified_evidence(values["evidence_paths"])
+        evidence = self._evidence_records(values["evidence_paths"], require_success=True,
+                                          require_current_controller=True)
         if not evidence:
-            raise CapabilityError("Skill requires successful Adapter evidence for the current Controller")
+            raise CapabilityError("Skill requires successful Adapter evidence for the frozen Controller")
         tested = {item["tool_id"] for item in self.tool_library.tested()} \
             if self.tool_library is not None else set()
         missing = set(values.get("tool_ids") or []) - tested
@@ -397,11 +412,11 @@ class CapabilityManager:
         values.setdefault("tools", self.tool_library)
         return self.skill_library.freeze(**values)
 
-    def _verified_evidence(self, paths: list[str]) -> list[dict[str, Any]]:
-        if not self.workspace.controller.is_file():
-            return []
-        controller_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
-        verified = []
+    def _evidence_records(self, paths: list[str], *, require_success: bool = False,
+                          require_current_controller: bool = False) -> list[dict[str, Any]]:
+        controller_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest() \
+            if self.workspace.controller.is_file() else None
+        records = []
         for value in paths:
             try:
                 evidence = json.loads(Path(value).read_text())
@@ -411,36 +426,40 @@ class CapabilityManager:
             if not isinstance(receipt, Mapping):
                 continue
             identity = evidence.get("environment_identity")
-            validator = getattr(self.adapter, "validate_historical_receipt", None)
-            historical_valid = (validator(identity, receipt) is True if callable(validator)
-                                else receipt.get("environment_identity") == identity)
-            if (receipt.get("verified") is True
-                    and evidence.get("controller_sha256") == controller_sha
-                    and receipt.get("controller_sha256") == controller_sha
-                    and receipt.get("environment_identity") == identity
-                    and receipt.get("episode_id") == (identity or {}).get("episode_id")
-                    and receipt.get("environment_generation")
-                        == (identity or {}).get("environment_generation")
-                    and historical_valid):
-                verified.append({"path": value, "controller_sha256": controller_sha,
-                    "environment_identity": identity,
-                    "verification_receipt": receipt,
+            authentic = (isinstance(identity, Mapping)
+                         and receipt.get("controller_sha256") == evidence.get("controller_sha256")
+                         and receipt.get("environment_identity") == identity
+                         and receipt.get("episode_id") == identity.get("episode_id")
+                         and receipt.get("environment_generation") == identity.get("environment_generation")
+                         and isinstance(receipt.get("verified"), bool))
+            if require_success and receipt.get("verified") is not True:
+                authentic = False
+            if require_current_controller and evidence.get("controller_sha256") != controller_sha:
+                authentic = False
+            if authentic:
+                records.append({"path": value, "controller_sha256": evidence.get("controller_sha256"),
+                    "environment_identity": identity, "verification_receipt": receipt,
                     "sha256": hashlib.sha256(Path(value).read_bytes()).hexdigest()})
-        return verified
+        return records
+
+    def _verified_evidence(self, paths: list[str]) -> list[dict[str, Any]]:
+        """Compatibility alias for authentic, successful current-controller evidence."""
+        return self._evidence_records(paths, require_success=True, require_current_controller=True)
 
     def register_experience(self, **payload):
         if self.experience_library is None: raise CapabilityError("Experience library unavailable")
         values = dict(payload)
         values["evidence_paths"] = [self._asset_path(item) for item in values.get("evidence_paths", [])]
-        if not self._verified_evidence(values["evidence_paths"]):
-            raise CapabilityError("Experience requires successful transferable evidence")
-        values["outcome"] = "success"
+        evidence = self._evidence_records(values["evidence_paths"])
+        if not evidence:
+            raise CapabilityError("Experience requires authentic evidence")
+        values["outcome"] = str(values.get("outcome") or "mixed")
         return self.experience_library.register(**values)
 
     def promote_asset(self, asset_id: str, evidence_paths: list[str],
                       applicability: Mapping[str, Any] | None = None):
         paths = [self._asset_path(item) for item in evidence_paths]
-        evidence = self._verified_evidence(paths)
+        evidence = self._evidence_records(paths)
         if not evidence:
             raise CapabilityError("asset promotion requires successful Adapter evidence")
         library = None

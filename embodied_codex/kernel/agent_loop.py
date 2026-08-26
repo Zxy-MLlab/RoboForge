@@ -74,6 +74,9 @@ class AgentLoop:
         self.research_state: dict[str, Any] = {"summary": "", "attempts": []}
         self.state: dict[str, Any] = {"finished": False, "last_tool_call": None,
                                       "completion_valid": False, "successful_cases": 0}
+        self._active_tool_call_id: str | None = None
+        self._artifact_handles: dict[str, Path] = {}
+        self._recovery_mode = False
         restored_tool_groups: list[str] = []
         restored_tool_bindings: list[str] = []
         restored_case: str | None = None
@@ -90,6 +93,8 @@ class AgentLoop:
                 self.latest_evidence = self._load_evidence_reference(
                     checkpoint.get("latest_evidence"))
                 self.state.update(checkpoint.get("state") or {})
+                self._recovery_mode = (isinstance(self.state.get("completed_execution"), Mapping)
+                                       or isinstance(self.state.get("pending_execution"), Mapping))
                 self.research_state = self._bound_research_state(
                     checkpoint.get("research_state") or self.research_state)
                 if checkpoint.get("snapshot_id"):
@@ -127,10 +132,43 @@ class AgentLoop:
         initial = getattr(self.adapter, "initial_observation", None)
         if callable(initial) and getattr(self.context_builder, "initial_observation", None) is None:
             self.context_builder.initial_observation = initial()
+        self.context_builder.initial_observation = self._register_artifacts(
+            self.context_builder.initial_observation)
 
     def _schema(self, properties=None, required=()):
         return {"type": "object", "properties": dict(properties or {}),
                 "required": list(required), "additionalProperties": False}
+
+    def _register_artifacts(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): self._register_artifacts(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._register_artifacts(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        candidate = None
+        if value.startswith("artifact://adapter/"):
+            candidate = Path(getattr(self.adapter, "artifact_dir", "")) / value.removeprefix("artifact://adapter/")
+        elif Path(value).is_absolute():
+            candidate = Path(value)
+        if candidate is None:
+            return value
+        try:
+            candidate = candidate.resolve()
+            if not candidate.is_file():
+                return value
+            allowed_roots = [self.workspace.root.resolve(), self.root.resolve()]
+            adapter_root = getattr(self.adapter, "artifact_dir", None)
+            if adapter_root:
+                allowed_roots.append(Path(adapter_root).resolve())
+            if not any(candidate == root or root in candidate.parents for root in allowed_roots):
+                return value
+            handle = "artifact://agent/" + hashlib.sha256(str(candidate).encode()).hexdigest()[:24] + "/" + candidate.name
+            self._artifact_handles[handle] = candidate
+            self._artifact_handles[value] = candidate
+            return handle
+        except OSError:
+            return value
 
     def _artifact_path(self, uri: str) -> Path:
         if not str(uri).startswith("run://"):
@@ -257,6 +295,10 @@ class AgentLoop:
                      self._schema({"group": {"type": "string", "enum": [
                          "source_inspection", "web_acquisition", "asset_authoring"]}}, ["group"]),
                      registry.activate)
+        registry.add("deactivate_tool_group", "Deactivate an optional Tool schema group.",
+                     self._schema({"group": {"type": "string", "enum": [
+                         "source_inspection", "web_acquisition", "asset_authoring"]}}, ["group"]),
+                     registry.deactivate)
         registry.add("list_files", "List files in the persistent workspace.", self._schema({"pattern": string}),
                      lambda pattern="**/*": ws.list_files(pattern))
         registry.add("read_file", "Read a bounded line range from a workspace file.", self._schema(
@@ -277,6 +319,9 @@ class AgentLoop:
                      self._schema({"tool_id": string}, ["tool_id"]), cap.activate_tool)
         registry.add("load_tool_source", "Explicitly load a Tool implementation after manual inspection.",
                      self._schema({"tool_id": string}, ["tool_id"]), cap.load_tool_source,
+                     group="source_inspection")
+        registry.add("materialize_skill", "Materialize a selected Skill controller into the workspace.",
+                     self._schema({"skill_id": string}, ["skill_id"]), cap.materialize_skill,
                      group="source_inspection")
         registry.add("search_web", "Search public web sources for a capability.",
                      self._schema({"query": string, "limit": integer}, ["query"]),
@@ -344,13 +389,19 @@ class AgentLoop:
             group="asset_authoring")
         registry.add("run_controller", "Execute the current controller once and return sensor evidence.",
                      self._schema(), lambda: self._agent_evidence(self._run_controller()))
+        registry.add("reset_case", "Create a fresh episode for the selected case when the Adapter supports it.",
+                     self._schema(), self._reset_case)
         registry.add("inspect_execution", "Inspect the latest committed execution evidence summary.",
-                     self._schema(), lambda: (self._agent_evidence(self.latest_evidence)
-                                              if isinstance(self.latest_evidence, Mapping)
-                                              else {}))
+                     self._schema({"evidence_ref": string}), self._inspect_execution)
+        registry.add("list_executions", "List opaque references to prior Controller experiments.",
+                     self._schema(), self._list_executions)
+        registry.add("list_artifacts", "List AgentArtifact handles registered for an execution.",
+                     self._schema({"evidence_ref": string}, ["evidence_ref"]), self._list_artifacts)
         registry.add("view_sensor_artifact", "Read a bounded sensor/evidence artifact path.", self._schema(
             {"path": string, "max_chars": {"type": "integer", "minimum": 1,
-                "maximum": 20000}, "offset_bytes": {"type": "integer", "minimum": 0}},
+                "maximum": 20000}, "offset_bytes": {"type": "integer", "minimum": 0},
+              "frame_indices": {"type": "array", "items": {"type": "integer", "minimum": 0},
+                                "maxItems": 16}},
             ["path"]), self._view_artifact)
         registry.add("finish", "Finish only after the task is actually verified.", self._schema({"summary": string}, ["summary"]), self._finish)
         case_ids = getattr(self.adapter, "case_ids", None)
@@ -366,6 +417,44 @@ class AgentLoop:
         return {"cases": [str(item) for item in getattr(self.adapter, "case_ids", ())],
                 "selected": str(getattr(self.adapter, "active_case", ""))}
 
+    def _list_executions(self):
+        refs = []
+        for row in self.event_store.events():
+            if row.get("kind") != "execution":
+                continue
+            payload = row.get("payload") or {}
+            if payload.get("artifact_uri"):
+                refs.append({"evidence_ref": payload.get("artifact_uri"),
+                             "summary": payload.get("summary") or {}})
+        return {"executions": refs[-64:]}
+
+    def _inspect_execution(self, evidence_ref: str | None = None):
+        if evidence_ref:
+            for row in self.event_store.events():
+                payload = row.get("payload") or {}
+                if payload.get("artifact_uri") == evidence_ref:
+                    return self._agent_evidence(self._load_evidence_reference(payload))
+            raise ProtocolError("unknown evidence reference")
+        return self._agent_evidence(self.latest_evidence) if isinstance(self.latest_evidence, Mapping) else {}
+
+    def _list_artifacts(self, evidence_ref: str):
+        evidence = self._load_evidence_reference({"artifact_uri": evidence_ref,
+                                                  "artifact_sha256": next(
+                                                      (row.get("payload", {}).get("artifact_sha256")
+                                                       for row in self.event_store.events()
+                                                       if row.get("payload", {}).get("artifact_uri") == evidence_ref), None)})
+        self._register_artifacts(evidence)
+        handles = []
+        def visit(value):
+            if isinstance(value, Mapping):
+                for item in value.values(): visit(item)
+            elif isinstance(value, list):
+                for item in value: visit(item)
+            elif isinstance(value, str) and value in self._artifact_handles:
+                handles.append(value)
+        visit(evidence.get("execution"))
+        return {"evidence_ref": evidence_ref, "artifacts": sorted(set(handles))}
+
     def _select_case(self, case_id: str):
         selector = getattr(self.adapter, "select", None)
         if not callable(selector):
@@ -373,15 +462,32 @@ class AgentLoop:
         selector(str(case_id))
         observe = getattr(self.adapter, "initial_observation", None)
         observation = observe() if callable(observe) else None
-        self.context_builder.initial_observation = observation
+        self.context_builder.initial_observation = self._register_artifacts(observation)
         # Keep full previous evidence for recovery/audit, but remove it from
         # the replaceable model view after an explicit environment switch.
         self._agent_latest_evidence = None
         return {"selected": str(getattr(self.adapter, "active_case", case_id)),
                 "observation": self.context_builder._observation_summary(observation)}
 
+    def _reset_case(self):
+        reset = getattr(self.adapter, "reset_case", None)
+        if not callable(reset):
+            reset = getattr(self.adapter, "restart_episode", None)
+        if not callable(reset):
+            raise ProtocolError("Adapter does not provide reset_case/restart_episode")
+        observation = reset()
+        if observation is None:
+            observe = getattr(self.adapter, "initial_observation", None)
+            observation = observe() if callable(observe) else None
+        self.latest_evidence = None
+        self._agent_latest_evidence = None
+        self.state.update({"completion_valid": False, "finished": False,
+                           "restored_evidence_unverified": False})
+        self.context_builder.initial_observation = observation
+        return {"reset": True, "observation": self.context_builder._observation_summary(observation)}
+
     def _view_artifact(self, path: str, max_chars: int = 12000,
-                       offset_bytes: int = 0):
+                       offset_bytes: int = 0, frame_indices: list[int] | None = None):
         candidate = Path(path)
         if not candidate.is_absolute():
             if str(path).startswith("artifact://adapter/"):
@@ -392,16 +498,18 @@ class AgentLoop:
                 candidate = self.root / str(path).removeprefix("run://")
             else:
                 candidate = self.workspace.root / candidate
-        candidate = candidate.resolve()
-        roots = [("workspace", self.workspace.root), ("run", self.root)]
-        adapter_root = getattr(self.adapter, "artifact_dir", None)
-        if adapter_root:
-            roots.append(("adapter", Path(adapter_root).resolve()))
-        owner = next(((name, root) for name, root in roots
-                      if candidate == root or root in candidate.parents), None)
-        if owner is None or not candidate.is_file():
-            raise ProtocolError("artifact is outside registered evidence roots")
-        relative = f"{owner[0]}://{candidate.relative_to(owner[1]).as_posix()}"
+        handle = str(path)
+        if handle.startswith(("artifact://", "run://")):
+            candidate = self._artifact_handles.get(handle)
+            if candidate is None:
+                raise ProtocolError("artifact handle is not registered")
+        else:
+            candidate = (self.workspace.root / handle).resolve()
+            if self.workspace.root not in candidate.parents:
+                raise ProtocolError("sensor artifacts require a registered opaque artifact handle")
+        if not candidate.is_file():
+            raise ProtocolError("registered artifact is missing")
+        relative = handle
         suffix = candidate.suffix.casefold()
         budgets = self.context_window.budgets
         size = candidate.stat().st_size
@@ -459,8 +567,11 @@ class AgentLoop:
             capture = cv2.VideoCapture(str(candidate)); frames = []
             try:
                 total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-                indices = sorted(set([0, max(0, total // 3), max(0, 2 * total // 3),
-                                      max(0, total - 1)]))[:budgets.max_video_frames]
+                indices = sorted(set(int(i) for i in (frame_indices or [])))
+                if not indices:
+                    return {"path": relative, "kind": "video", "frame_count": total,
+                            "frames": [], "requires_frame_indices": True}
+                indices = [i for i in indices if 0 <= i < total][:budgets.max_video_frames]
                 deadline = time.monotonic() + 10.0
                 total_pixels = 0
                 for index in indices:
@@ -535,10 +646,11 @@ class AgentLoop:
             finally:
                 temporary.unlink(missing_ok=True)
         summary["artifact_uri"] = f"run://artifacts/tool-results/{target.name}"
+        self._artifact_handles[summary["artifact_uri"]] = target
         return json.dumps(summary, default=str), summary
 
     @staticmethod
-    def _evidence_success(evidence: Mapping[str, Any]) -> bool:
+    def _evidence_authenticity(evidence: Mapping[str, Any]) -> bool:
         receipt = evidence.get("verification_receipt") if isinstance(evidence, Mapping) else None
         if not isinstance(receipt, Mapping):
             return False
@@ -550,6 +662,12 @@ class AgentLoop:
                     and receipt.get("episode_id") == identity.get("episode_id")
                     and receipt.get("environment_generation")
                         == identity.get("environment_generation"))
+
+    @classmethod
+    def _task_success(cls, evidence: Mapping[str, Any]) -> bool:
+        receipt = evidence.get("verification_receipt") if isinstance(evidence, Mapping) else None
+        return cls._evidence_authenticity(evidence) and isinstance(receipt, Mapping) \
+            and receipt.get("verified") is True
 
     def _execution_identity(self) -> dict[str, Any]:
         provider = getattr(self.adapter, "execution_identity", None)
@@ -591,7 +709,9 @@ class AgentLoop:
                 errors.append("restored evidence is not valid for the current Adapter generation")
             if evidence.get("controller_sha256") != current_sha:
                 errors.append("latest evidence belongs to an older Controller")
-            if not self._evidence_success(evidence):
+            if not self._evidence_authenticity(evidence):
+                errors.append("latest execution has no authentic Adapter verification receipt")
+            if not self._task_success(evidence):
                 errors.append("latest execution has no successful Adapter verification receipt")
             identity = self._execution_identity()
             recorded = evidence.get("environment_identity") or {}
@@ -609,33 +729,39 @@ class AgentLoop:
     def _run_controller(self):
         if self.runtime is None: raise RuntimeError("controller runtime is not configured")
         controller_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
-        case_handle = getattr(getattr(self.adapter, "episode", None), "case_handle", None)
         identity = self._execution_identity()
         protocol = self._resume_protocol()
-        key_material = {"controller_sha256": controller_sha, "case_handle": case_handle,
+        key_material = {"controller_sha256": controller_sha,
                         "environment_identity": identity,
                         "resume_token": (protocol or {}).get("resume_token")}
         execution_key = hashlib.sha256(json.dumps(key_material, sort_keys=True, default=str).encode()).hexdigest()
-        for row in self.event_store.events():
-            payload = row.get("payload", {})
-            validator = getattr(self.adapter, "validate_execution_receipt", None)
-            if (protocol and callable(validator) and row.get("kind") == "execution"
-                    and payload.get("execution_key") == execution_key
-                    and payload.get("environment_identity") == identity
-                    and payload.get("resume_token") == protocol.get("resume_token")
-                    and validator(payload.get("verification_receipt") or {}) is True):
-                candidate = self._load_evidence_reference(payload)
-                candidate = {"reused_committed_execution": True, **candidate}
-                self.latest_evidence = candidate
-                self._agent_latest_evidence = self._agent_evidence(candidate)
-                self.state["restored_evidence_unverified"] = False
-                return candidate
+        pending = (self.state.get("completed_execution") or self.state.get("pending_execution")) \
+            if self._recovery_mode else None
+        if isinstance(pending, Mapping) and pending.get("execution_key") == execution_key:
+            for row in self.event_store.events():
+                payload = row.get("payload", {})
+                if row.get("kind") == "execution" and payload.get("execution_key") == execution_key:
+                    candidate = self._load_evidence_reference(payload)
+                    candidate = {"reused_committed_execution": True, **candidate}
+                    self.latest_evidence = candidate
+                    self._agent_latest_evidence = self._agent_evidence(candidate)
+                    self.state["pending_execution"] = None
+                    self.state["completed_execution"] = None
+                    self._recovery_mode = False
+                    self.state["restored_evidence_unverified"] = False
+                    return candidate
+        self.state["pending_execution"] = {"execution_key": execution_key,
+                                             "controller_sha256": controller_sha,
+                                             "call_id": self._active_tool_call_id}
+        self._checkpoint()
         self.budget.executions += 1
         self.cumulative_executions += 1
         result = self.runtime.execute(self.workspace.controller, self.adapter)
+        self._register_artifacts(result)
         report = self.adapter.sensor_report(result)
         public_provider = getattr(self.adapter, "agent_evidence", None)
         public_report = public_provider(result, report) if callable(public_provider) else {}
+        public_report = self._register_artifacts(public_report)
         if not isinstance(public_report, Mapping):
             raise ProtocolError("Adapter agent_evidence must return an object")
         evidence_ref = f"evidence://execution-{self.cumulative_executions:06d}"
@@ -656,7 +782,7 @@ class AgentLoop:
                 or not isinstance(receipt.get("verified"), bool)):
             raise ProtocolError("Adapter verification receipt is not bound to this execution")
         evidence = {"execution": result, "sensor_report": report, "controller_sha256": controller_sha,
-                    "execution_key": execution_key, "case_handle": case_handle,
+                    "execution_key": execution_key,
                     "environment_identity": identity,
                     "verification_receipt": receipt,
                     "agent_evidence": agent_evidence,
@@ -690,6 +816,8 @@ class AgentLoop:
         self._agent_latest_evidence = agent_evidence
         self.state["restored_evidence_unverified"] = False
         self.event_store.commit("execution", self._evidence_reference(evidence))
+        self.state["pending_execution"] = None
+        self.state["completed_execution"] = {"execution_key": execution_key}
         return evidence
 
     def _messages(self, task: str):
@@ -764,11 +892,14 @@ class AgentLoop:
                     name = str(call.get("name") or call.get("function", {}).get("name") or "")
                     raw = call.get("arguments") or call.get("function", {}).get("arguments") or "{}"
                     arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                    self._active_tool_call_id = normalized["id"]
                     result = self.tools.invoke(name, arguments)
                     if name == "search_assets": self.retrieved_assets = result
                     payload = {"ok": True, "result": result}
                 except Exception as exc:
                     payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                finally:
+                    self._active_tool_call_id = None
                 multimodal = []
                 if payload.get("ok") and isinstance(payload.get("result"), Mapping):
                     value = payload["result"]

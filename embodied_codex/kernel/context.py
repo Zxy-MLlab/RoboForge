@@ -43,12 +43,15 @@ class ContextBuilder:
             return value
         summary = {key: value.get(key) for key in
                    ("frame_id", "step", "proprioception", "rgb_path", "depth_path",
-                    "point_cloud_path", "video_path") if key in value}
+                    "point_cloud_path", "video_path") if key in value
+                   and (not str(value.get(key)).startswith("/")
+                        and not str(value.get(key)).startswith("\\"))}
         cameras = value.get("cameras")
         if isinstance(cameras, Mapping):
             summary["cameras"] = {str(name): {key: item.get(key) for key in
                 ("rgb_path", "rgb_sha256", "depth_path", "depth_sha256", "shape",
-                 "depth_range_m") if key in item}
+                 "depth_range_m") if key in item and
+                (not key.endswith("_path") or not str(item.get(key)).startswith(("/", "\\")))}
                 for name, item in cameras.items() if isinstance(item, Mapping)}
         return summary
 

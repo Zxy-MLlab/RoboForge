@@ -49,10 +49,6 @@ class CampaignAdapter:
         """Expose case membership to external evaluation only."""
         return self._evaluator_cases
 
-    @property
-    def episode(self):
-        return getattr(self.active, "episode", None)
-
     def select(self, case_id: str) -> None:
         case_id = str(case_id)
         if case_id not in self._cases:
@@ -92,6 +88,14 @@ class CampaignAdapter:
             if adapter.execution_identity() == identity:
                 return adapter.validate_execution_receipt(receipt)
         return False
+
+    def reset_case(self):
+        reset = getattr(self.active, "reset_case", None)
+        if not callable(reset):
+            reset = getattr(self.active, "restart_episode", None)
+        if not callable(reset):
+            raise RuntimeError("active Adapter does not support reset_case")
+        return reset()
 
     def register_capability(self, tool_id, function, contract):
         # Binding is a deployment mechanism, not a test-order strategy. A Tool

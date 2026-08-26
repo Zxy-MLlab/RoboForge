@@ -720,23 +720,39 @@ class SkillLibrary(_JsonAssetLibrary):
     def freeze(self, *, name: str, task: str, controller: str | Path,
                evidence: Mapping[str, Any] | None = None, tool_ids: list[str] | None = None,
                tools: CapabilityLibrary | None = None, interface: Mapping[str, Any] | None = None,
-               evidence_paths=None, **_unused):
+               evidence_paths=None, adapter_requirements=None, runtime_requirements=None, **_unused):
         source = Path(controller).resolve()
         if not source.is_file():
             raise AssetError("Skill controller does not exist")
+        dependency_closure = []
+        for tool_id in sorted(set(tool_ids or [])):
+            if tools is None:
+                raise AssetError(f"Skill dependency cannot be resolved: {tool_id}")
+            manifest = tools.inspect(tool_id)["manifest"]
+            if manifest.get("status") != "promoted":
+                raise AssetError(f"Skill dependency is not promoted: {tool_id}")
+            dependency_closure.append({"tool_id": tool_id, "version": manifest.get("version"),
+                "source_sha256": manifest.get("source_sha256"),
+                "test_receipt_sha256": manifest.get("test_receipt_sha256"),
+                "runtime_environment": manifest.get("runtime_environment")})
         payload = {"protocol": "roboforge-skill-v1", "task": str(task), "controller_sha256": _sha256(source),
                    "tool_ids": sorted(set(tool_ids or [])), "development_evidence": dict(evidence or {}),
+                   "dependency_closure": dependency_closure,
+                   "adapter_requirements": dict(adapter_requirements or {}),
+                   "runtime_requirements": dict(runtime_requirements or {}),
                    "interface": dict(interface or {}), "status": "verified"}
         payload["controller_path"] = "controller.py"
         result = self._save(name, payload, evidence_paths, {"controller.py": source})
         return {**result, "path": str(self._id(result["skill_id"]).parent)}
 
-    def inspect(self, asset_id: str):
+    def inspect(self, asset_id: str, *, include_controller: bool = False):
         payload = super().inspect(asset_id)
         controller = self._id(asset_id).parent / str(payload.get("controller_path") or "controller.py")
         if not controller.is_file() or _sha256(controller) != payload.get("controller_sha256"):
             raise AssetError(f"Skill controller hash mismatch: {asset_id}")
-        return {**payload, "controller": controller.read_text()}
+        if include_controller:
+            return {**payload, "controller": controller.read_text()}
+        return payload
 
 
 class ExperienceLibrary(_JsonAssetLibrary):
@@ -746,11 +762,12 @@ class ExperienceLibrary(_JsonAssetLibrary):
                  keywords: list[str] | None = None, evidence_paths=None, **payload):
         if not evidence_paths:
             raise AssetError("Experience evidence is required")
-        if payload.get("outcome", "success") != "success":
-            raise AssetError("failed or unresolved findings must be recorded as a Capability Gap")
+        outcome = str(payload.get("outcome", "mixed"))
+        if outcome not in {"success", "failure", "mixed"}:
+            raise AssetError("Experience outcome must be success, failure, or mixed")
         return self._save(name, {"protocol": "roboforge-experience-v2", "summary": str(summary),
             "applicability": str(applicability), "keywords": list(keywords or []),
-            "outcome": "success", "provenance": dict(payload.get("provenance") or {}),
+            "outcome": outcome, "provenance": dict(payload.get("provenance") or {}),
             "status": "verified"}, evidence_paths)
 
 

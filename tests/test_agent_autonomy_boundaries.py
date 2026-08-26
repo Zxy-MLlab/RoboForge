@@ -76,9 +76,8 @@ def test_multicase_order_changes_only_after_explicit_model_selection(tmp_path):
         result = loop.run(adapter.instruction)
     finally:
         adapter.close()
-    # The model requested B twice. The second execution is safely deduplicated
-    # by the existing receipt protocol, and no Harness scheduler advances it.
-    assert order == ["B", "A"]
+    # Each explicit model run is a new experiment; only crash recovery may deduplicate.
+    assert order == ["B", "B", "A"]
     attempts = [row for row in loop.research_state["attempts"]
                 if row["tool"] == "run_controller"]
     assert len(attempts) == 3
@@ -262,3 +261,24 @@ def test_plain_agent_loop_has_no_evaluation_policy_hook_parameter(tmp_path):
             context_builder=ContextBuilder(adapter_index=adapter.sdk_index,
                 asset_registry=manager, workspace=workspace),
             capability_manager=manager, policies=[object()], resume=False)
+
+
+def test_model_can_choose_fresh_episode_without_forced_reset(tmp_path):
+    adapter = FakeAdapter("reset", tmp_path / "adapter")
+    workspace = PersistentWorkspace(tmp_path / "workspace")
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace, adapter=adapter)
+    loop = AgentLoop(model=object(), workspace=workspace, adapter=adapter,
+        context_builder=ContextBuilder(adapter_index=adapter.sdk_index, asset_registry=manager,
+                                       workspace=workspace), capability_manager=manager,
+        runtime=ControllerRuntime(timeout_seconds=10), root=tmp_path, resume=False)
+    adapter.value = 1
+    result = loop.tools.invoke("reset_case", {})
+    assert result["reset"] is True and adapter.value == 0
+
+
+def test_optional_tool_group_can_be_deactivated(tmp_path):
+    adapter = FakeAdapter("deactivate", tmp_path / "adapter")
+    loop = _loop(tmp_path, object(), adapter)
+    loop.tools.activate("web_acquisition")
+    loop.tools.deactivate("web_acquisition")
+    assert "search_web" not in loop.tools.names(active_only=True)

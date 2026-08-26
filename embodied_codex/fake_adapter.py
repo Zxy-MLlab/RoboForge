@@ -139,6 +139,15 @@ class FakeAdapter:
         self.value = 0
         self._persist()
 
+    def reset_case(self):
+        self.generation = uuid.uuid4().hex
+        self.resume_token = uuid.uuid4().hex
+        self.value = 0
+        self.actions = []
+        self.frame = 0
+        self._persist()
+        return self.initial_observation()
+
     def close(self):
         self._persist()
         self.closed = True
