@@ -495,7 +495,9 @@ class BubblewrapBackend(PosixSandboxBackend):
             "--dev", "/dev"]
         read_only = [Path(value).resolve() for value in read_only_paths if Path(value).exists()]
         read_only.extend(path for path in (Path("/usr"), Path("/bin"), Path("/lib"),
-            Path("/lib64"), Path("/etc"), Path(sys.prefix).resolve(), Path(__file__).resolve())
+            Path("/lib64"), Path("/etc"), Path(sys.prefix).resolve(),
+            Path(sys.base_prefix).resolve(), Path(sys.executable).resolve(),
+            Path(__file__).resolve())
             if path.exists())
         read_write = [Path(value).resolve() for value in read_write_paths if Path(value).exists()]
         if not any(cwd == path or path in cwd.parents for path in read_write):

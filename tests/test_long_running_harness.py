@@ -18,7 +18,8 @@ from embodied_codex.kernel.cas import ContentAddressedStore
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore
 from embodied_codex.kernel.runtime import ControllerRuntime
-from embodied_codex.kernel.sandbox import PosixSandboxBackend, UnsafeSandboxBackend
+from embodied_codex.kernel.sandbox import (BubblewrapBackend, PosixSandboxBackend,
+                                            UnsafeSandboxBackend)
 from embodied_codex.kernel.workspace import PersistentWorkspace
 from embodied_codex.fake_adapter import FakeAdapter
 
@@ -55,6 +56,26 @@ def test_posix_probe_never_claims_safe_without_real_path_confinement():
     if backend.landlock_abi == 0:
         assert probe.available is False
         assert "filesystem" in probe.detail.casefold()
+
+
+def test_bubblewrap_mounts_symlinked_interpreter_base_prefix(monkeypatch, tmp_path):
+    base = tmp_path / "base"
+    interpreter = base / "bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("runtime")
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    linked = environment / "python"
+    linked.symlink_to(interpreter)
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "base_prefix", str(base))
+    monkeypatch.setattr(sys, "executable", str(linked))
+
+    command = BubblewrapBackend(executable="/usr/bin/bwrap")._wrapped(
+        [str(linked), "-c", "pass"], tmp_path, (), ())
+    bindings = list(zip(command, command[1:]))
+    assert ("--ro-bind", str(base.resolve())) in bindings
+    assert command.count(str(base.resolve())) >= 2
 
 
 def test_workspace_snapshot_uses_cas_for_one_gib_sparse_file(tmp_path):
