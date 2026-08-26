@@ -42,9 +42,8 @@ def test_libero_sdk_index_preserves_canonical_method_signatures():
 
 def loop_at(tmp_path, adapter, model=None, *, resume=False, steps=2):
     workspace = PersistentWorkspace(tmp_path / "workspace")
-    tools = CapabilityLibrary(tmp_path / "assets/tools", workspace.root, python=sys.executable,
-                              allowed_input_roots=[workspace.root, tmp_path / "evidence",
-                                                   adapter.artifact_dir])
+    tools = CapabilityLibrary(tmp_path / "assets/tools", workspace.root,
+                              python=sys.executable)
     manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace,
         adapter=adapter, tool_library=tools,
         skill_library=SkillLibrary(tmp_path / "assets/skills"),

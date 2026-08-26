@@ -138,6 +138,8 @@ class LiberoDeployment:
         self._execution_index = 0
         self._execution_artifacts = {}
         self._execution_sensor_report = None
+        self._controller_artifacts: dict[str, Path] = {}
+        self._controller_artifact_paths: dict[Path, str] = {}
         # LIBERO init states can leave free objects several centimetres above
         # their support.  A generic no-motion settling period is part of the
         # deployment adapter, not learned task logic.  Reward/done/info remain
@@ -212,6 +214,8 @@ class LiberoDeployment:
         self._controller_execution_sealed = False; self._evaluator_calls = 0
         self._outcome_report = None; self._outcome_after = None
         self._execution_sensor_report = None
+        self._controller_artifacts = {}
+        self._controller_artifact_paths = {}
         if self._warmup_steps:
             for _ in range(self._warmup_steps):
                 self._sim_step(np.r_[np.zeros(6),-1.0])
@@ -248,6 +252,54 @@ class LiberoDeployment:
                 "version": version,
                 "contract_sha256": hashlib.sha256(encoded.encode()).hexdigest()}
         return result
+
+    def register_controller_artifact(self, path: str | Path) -> str:
+        """Return an opaque Controller capability for one exact Adapter file."""
+        source = Path(path).resolve()
+        if not source.is_file():
+            raise LiberoDeploymentError("Controller artifact is not an immutable file")
+        if not (source == self.artifact_dir or self.artifact_dir in source.parents):
+            raise LiberoDeploymentError("Controller artifact is outside the Adapter artifact store")
+        existing = self._controller_artifact_paths.get(source)
+        if existing is not None:
+            return existing
+        handle = f"artifact://sensor/{uuid.uuid4().hex}"
+        self._controller_artifacts[handle] = source
+        self._controller_artifact_paths[source] = handle
+        return handle
+
+    def resolve_controller_artifact(self, handle: str) -> Path:
+        """Resolve only an exact handle previously issued by this deployment."""
+        source = self._controller_artifacts.get(str(handle))
+        if source is None or not source.is_file():
+            raise LiberoDeploymentError("unknown or unavailable Controller artifact handle")
+        return source
+
+    def _tool_input(self, value):
+        if isinstance(value, Mapping):
+            return {str(key): self._tool_input(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._tool_input(item) for item in value]
+        if isinstance(value, str):
+            if value.startswith("artifact://"):
+                return str(self.resolve_controller_artifact(value))
+            if Path(value).is_absolute():
+                raise LiberoDeploymentError(
+                    "Controller Tool payloads cannot contain host filesystem paths")
+        return value
+
+    def _tool_output(self, value):
+        if isinstance(value, Mapping):
+            return {str(key): self._tool_output(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._tool_output(item) for item in value]
+        if isinstance(value, str) and Path(value).is_absolute():
+            source = Path(value).resolve()
+            if source in self._controller_artifact_paths or (
+                    source.is_file() and self.artifact_dir in source.parents):
+                return self.register_controller_artifact(source)
+            raise LiberoDeploymentError("Tool output attempted to expose a host filesystem path")
+        return value
 
     def _proprio(self):
         return {key:np.asarray(self.obs[key]).tolist() for key in PROPRIO}
@@ -292,7 +344,8 @@ class LiberoDeployment:
         for name in requested:
             rgb=np.ascontiguousarray(self.obs[f"{name}_image"][::-1]);rgb_path=folder/f"{name}_rgb.png"
             cv2.imwrite(str(rgb_path),cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR))
-            item={"rgb_path":str(rgb_path),"rgb_sha256":hashlib.sha256(rgb_path.read_bytes()).hexdigest(),
+            item={"rgb_path":self.register_controller_artifact(rgb_path),
+                  "rgb_sha256":hashlib.sha256(rgb_path.read_bytes()).hexdigest(),
                   "shape":list(rgb.shape),"intrinsic":get_camera_intrinsic_matrix(self.env.sim,name,
                   self.episode.image_size,self.episode.image_size).tolist(),
                   "camera_to_world":get_camera_extrinsic_matrix(self.env.sim,name).tolist()}
@@ -300,7 +353,8 @@ class LiberoDeployment:
                 normalized=np.ascontiguousarray(self.obs[f"{name}_depth"][::-1])
                 depth=np.asarray(get_real_depth_map(self.env.sim,normalized),np.float32)
                 depth_path=folder/f"{name}_depth_m.npy";np.save(depth_path,depth)
-                item.update({"depth_path":str(depth_path),"depth_sha256":hashlib.sha256(depth_path.read_bytes()).hexdigest(),
+                item.update({"depth_path":self.register_controller_artifact(depth_path),
+                             "depth_sha256":hashlib.sha256(depth_path.read_bytes()).hexdigest(),
                              "depth_range_m":[float(np.nanmin(depth)),float(np.nanmax(depth))]})
             cameras[name]=item
         report={"frame_id":frame_id,"step":self.step,"cameras":cameras,"proprioception":self._proprio()}
@@ -443,7 +497,12 @@ class LiberoDeployment:
         if tool_id not in self.capabilities:raise LiberoDeploymentError(f"unregistered Tool: {tool_id}")
         try:
             Draft202012Validator(self.capability_contracts[tool_id]["input_schema"]).validate(payload)
-            raw_result=self.capabilities[tool_id](dict(payload))
+            if tool_id in self._native_capability_ids:
+                raw_result=self.capabilities[tool_id](self._tool_input(dict(payload)))
+            else:
+                # Shared ToolRuntime receives opaque handles and resolves only
+                # the exact files named by this payload inside its sandbox.
+                raw_result=self.capabilities[tool_id](dict(payload))
         except ValidationError as exc:
             result={"tool_error":{"type":"ToolContractError","message":str(exc.message)[:1000]},
                     "ok":False}
@@ -463,7 +522,9 @@ class LiberoDeployment:
                                "tool_error":result["tool_error"]})
             return {"tool_id":tool_id,"step":self.step,"result":result}
         contract=self.capability_contracts[tool_id]
-        try:Draft202012Validator(contract["output_schema"]).validate(raw_result)
+        try:
+            raw_result=self._tool_output(raw_result)
+            Draft202012Validator(contract["output_schema"]).validate(raw_result)
         except ValidationError as exc:
             result={"tool_error":{"type":"ToolContractError",
                     "message":f"output: {exc.message}"[:1000]},"ok":False}

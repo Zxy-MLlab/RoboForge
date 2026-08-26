@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
-from typing import Any, Mapping
+import tempfile
+from typing import Any, Callable, Mapping
 
 from .kernel.sandbox import SandboxBackend, default_sandbox
 
@@ -55,34 +57,54 @@ except BaseException as exc:
 
 class ToolRuntime:
     def __init__(self, *, python: str|Path|None=None, timeout_seconds: float=120,
-                 allowed_input_roots: list[str|Path]|None=None,
                  sandbox: SandboxBackend|None=None):
         self.python=str(python or sys.executable)
         self.timeout_seconds=float(timeout_seconds)
-        self.allowed_input_roots=[Path(value).resolve() for value in (allowed_input_roots or [])]
         self.sandbox=sandbox or default_sandbox()
         self.sandbox.require()
 
-    def _authorized_file(self,value: str):
-        candidate=Path(value)
-        if not candidate.is_absolute() or not candidate.exists():return None
-        resolved=candidate.resolve()
+    @staticmethod
+    def _authorized_file(value: str,
+                         artifact_resolver: Callable[[str], str | Path] | None):
+        if not value.startswith("artifact://"):
+            if Path(value).is_absolute():
+                raise ToolRuntimeError(
+                    "Tool file inputs must use an opaque registered artifact handle")
+            return None
+        if not callable(artifact_resolver):
+            raise ToolRuntimeError("Tool artifact resolver is unavailable")
+        try:
+            resolved=Path(artifact_resolver(value)).resolve()
+        except Exception as exc:
+            raise ToolRuntimeError("Tool artifact handle is not authorized") from exc
         if not resolved.is_file():
-            raise ToolRuntimeError("Tool inputs may expose files, not host directories")
-        if not any(resolved==root or root in resolved.parents for root in self.allowed_input_roots):
-            raise ToolRuntimeError("Tool input file is outside the sensor-evidence roots")
+            raise ToolRuntimeError("Tool artifact handle does not resolve to a file")
         return resolved
 
-    def _rewrite_payload(self,value: Any,bindings: set[Path]):
+    def _rewrite_payload(self,value: Any,bindings: set[Path],
+                         artifact_resolver: Callable[[str], str | Path] | None,
+                         staging: Path, staged: dict[Path, Path]):
         if isinstance(value,Mapping):
-            return {str(key):self._rewrite_payload(item,bindings) for key,item in value.items()}
-        if isinstance(value,list):return [self._rewrite_payload(item,bindings) for item in value]
-        if isinstance(value,tuple):return [self._rewrite_payload(item,bindings) for item in value]
+            return {str(key):self._rewrite_payload(
+                        item,bindings,artifact_resolver,staging,staged)
+                    for key,item in value.items()}
+        if isinstance(value,list):
+            return [self._rewrite_payload(item,bindings,artifact_resolver,staging,staged)
+                    for item in value]
+        if isinstance(value,tuple):
+            return [self._rewrite_payload(item,bindings,artifact_resolver,staging,staged)
+                    for item in value]
         if isinstance(value,str):
-            source=self._authorized_file(value)
+            source=self._authorized_file(value,artifact_resolver)
             if source is not None:
-                bindings.add(source)
-                return str(source)
+                destination=staged.get(source)
+                if destination is None:
+                    destination=staging/f"input-{len(staged)+1:04d}{source.suffix}"
+                    shutil.copyfile(source,destination)
+                    destination.chmod(0o400)
+                    staged[source]=destination
+                bindings.add(destination)
+                return str(destination)
         return value
 
     @staticmethod
@@ -104,7 +126,8 @@ class ToolRuntime:
         return result
 
     def execute(self, tool_dir: str|Path, payload: Mapping[str,Any], *,
-                python: str | Path | None = None):
+                python: str | Path | None = None,
+                artifact_resolver: Callable[[str], str | Path] | None = None):
         directory=Path(tool_dir).resolve()
         manifest_path=directory/"manifest.json"
         manifest=json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
@@ -116,16 +139,19 @@ class ToolRuntime:
             entrypoint=directory/"bundle"/relative
         else:entrypoint=directory/"tool.py"
         if not entrypoint.is_file():raise ToolRuntimeError("missing Tool entrypoint")
-        bindings:set[Path]=set();rewritten=self._rewrite_payload(dict(payload),bindings)
         timeout=min(max(float(runtime_spec.get("timeout_seconds",
             self.timeout_seconds)),0.1),600)
         runtime_python = str(python or self.python)
-        completed=self.sandbox.run([runtime_python,"-u","-I","-c",_CHILD,
-            str(entrypoint),str(manifest_path)],cwd=directory,
-            input_text=json.dumps(rewritten),
-            env=self._safe_environment(str(runtime_spec.get("accelerator") or "cpu")),
-            read_only_paths=[directory,*bindings,Path(runtime_python).resolve().parents[1]],
-            timeout_seconds=timeout)
+        with tempfile.TemporaryDirectory(prefix="roboforge-tool-input-") as temporary:
+            staging=Path(temporary).resolve()
+            bindings:set[Path]=set();rewritten=self._rewrite_payload(
+                dict(payload),bindings,artifact_resolver,staging,{})
+            completed=self.sandbox.run([runtime_python,"-u","-I","-c",_CHILD,
+                str(entrypoint),str(manifest_path)],cwd=directory,
+                input_text=json.dumps(rewritten),
+                env=self._safe_environment(str(runtime_spec.get("accelerator") or "cpu")),
+                read_only_paths=[directory,*bindings,Path(runtime_python).resolve().parents[1]],
+                timeout_seconds=timeout)
         if completed.timed_out:
             raise ToolRuntimeError("Tool execution timed out")
         if completed.returncode!=0:

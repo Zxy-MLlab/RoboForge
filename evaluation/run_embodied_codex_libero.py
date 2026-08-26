@@ -142,7 +142,11 @@ def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output
                        model: str,reasoning_effort: str,device: str,python: str,
                        groundingdino_checkpoint: str,base_url: str,
                        provider: str|None=None,
-                       capabilities: str|Path|None=None):
+                       capabilities: str|Path|None=None,
+                       development_run_dir: str|Path,
+                       development_states: list[int],
+                       partition_seed: int,
+                       partition_protocol: str="embodied-codex-case-partition-v1"):
     skill_dir=Path(skill_dir).resolve()
     controller=skill_dir/"controller.py"
     if capabilities is None:
@@ -153,6 +157,10 @@ def validation_command(*, skill_dir: str|Path,task: int,states: list[int],output
         "--task",str(task),"--profile","benchmark","--run-dir",str(output),
         "--asset-root",str(Path(capabilities).resolve()),
         "--controller-source",str(controller),"--frozen-controller",
+        "--development-run-dir",str(Path(development_run_dir).resolve()),
+        "--development-cases",*[str(state) for state in development_states],
+        "--partition-protocol",partition_protocol,
+        "--partition-seed",str(partition_seed),
         "--states",*[str(state) for state in states],
         "--model-name",model,"--reasoning-effort",reasoning_effort,
         *(["--provider",provider] if provider else []),
@@ -209,7 +217,28 @@ def _sealed_status(root: Path,*,skill_id: str|None,states: list[int]):
     result=json.loads(path.read_text())
     if result.get("skill_id") != skill_id:
         raise RuntimeError("sealed result Skill id does not match the requested frozen Skill")
+    bundle_path=root/"evaluation_manifest.json"
+    if not bundle_path.is_file():
+        raise RuntimeError("sealed result has no immutable evaluation manifest")
+    bundle=json.loads(bundle_path.read_text())
+    from evaluation.frozen_runner import validate_evaluation_bundle
+    bundle=validate_evaluation_bundle(bundle,str(result.get("controller_sha256") or ""))
+    recorded=bundle.get("bundle_sha256")
+    if (result.get("evaluation_bundle_sha256")!=recorded
+            or result.get("controller_sha256")!=bundle.get("controller_sha256")):
+        raise RuntimeError("sealed result evaluation bundle provenance is invalid")
+    policies={str(row.get("name")):row.get("passed") is True
+              for row in result.get("evaluation_policies") or []
+              if isinstance(row,dict)}
+    required={"frozen_controller","provenance","anti_cheating",
+              "generalization","sealed_evaluation"}
+    integrity=required-{"sealed_evaluation"}
+    if (not required.issubset(policies) or not all(policies[name] for name in integrity)
+            or policies["sealed_evaluation"] != (result.get("evaluation_passed") is True)):
+        raise RuntimeError("sealed result evaluation policy record is invalid")
     cases=list(result.get("sealed_evaluation_cases") or [])
+    if {str(row.get("case")) for row in cases}!={str(state) for state in states}:
+        raise RuntimeError("sealed result cases do not match the requested partition")
     episodes=int(result.get("episodes",len(cases)))
     successes=int(result.get("evaluator_successes",0))
     return {"protocol":"roboforge-libero-sealed-v1","skill_id":result.get("skill_id"),
@@ -420,7 +449,9 @@ def main():
                     states=plans[task],output=sealed,model=args.model,
                     reasoning_effort=args.reasoning_effort,device=args.device,
                     python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
-                    base_url=args.base_url,provider=args.provider,capabilities=capabilities),
+                    base_url=args.base_url,provider=args.provider,capabilities=capabilities,
+                    development_run_dir=development,
+                    development_states=development_plans[task],partition_seed=args.seed),
                     cwd=ROOT,env=runtime_env)
                 row["sealed_returncode"]=evaluated.returncode
                 summary=_sealed_status(sealed,skill_id=evaluated_skill.get("skill_id"),

@@ -155,6 +155,13 @@ class AgentLoop:
         candidate = None
         if value.startswith("artifact://adapter/"):
             candidate = Path(getattr(self.adapter, "artifact_dir", "")) / value.removeprefix("artifact://adapter/")
+        elif value.startswith("artifact://"):
+            resolver = getattr(self.adapter, "resolve_controller_artifact", None)
+            if callable(resolver):
+                try:
+                    candidate = Path(resolver(value))
+                except Exception:
+                    candidate = None
         elif Path(value).is_absolute():
             candidate = Path(value)
         if candidate is None:
@@ -505,10 +512,21 @@ class AgentLoop:
             reset = getattr(self.adapter, "restart_episode", None)
         if not callable(reset):
             raise ProtocolError("Adapter does not provide reset_case/restart_episode")
+        before_identity = self._execution_identity()
         observation = reset()
         if observation is None:
             observe = getattr(self.adapter, "initial_observation", None)
             observation = observe() if callable(observe) else None
+        after_identity = self._execution_identity()
+        before_generation = before_identity.get("environment_generation")
+        after_generation = after_identity.get("environment_generation")
+        if not after_generation or after_generation == before_generation:
+            raise ProtocolError("Adapter reset did not create a fresh environment generation")
+        # The successful fresh generation is the only operation that can make
+        # an unknown prior physical execution irrelevant without replaying it.
+        self.state["pending_execution"] = None
+        self.state["completed_execution"] = None
+        self._recovery_mode = False
         self.latest_evidence = None
         self._agent_latest_evidence = None
         self.state.update({"completion_valid": False, "finished": False,

@@ -87,8 +87,8 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="roboforge-live-agent-"))
     workspace = PersistentWorkspace(root / "run/workspace")
     adapter = FakeAdapter("acquire target", root / "run")
-    tools = CapabilityLibrary(root / "assets/tools", workspace.root, python=sys.executable,
-        allowed_input_roots=[workspace.root, adapter.artifact_dir])
+    tools = CapabilityLibrary(root / "assets/tools", workspace.root,
+        python=sys.executable)
     manager = CapabilityManager(asset_root=root / "assets", workspace=workspace, adapter=adapter,
         tool_library=tools, skill_library=SkillLibrary(root / "assets/skills"),
         experience_library=ExperienceLibrary(root / "assets/experiences"),

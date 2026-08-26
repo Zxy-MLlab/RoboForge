@@ -47,13 +47,8 @@ def _model(args, configuration=None):
 def _libraries(asset_root: Path, workspace: PersistentWorkspace, adapter=None, sandbox=None):
     # A shared scope intentionally makes immutable tested assets reusable by independent runs.
     workspace.add_protected_path(asset_root)
-    roots = [workspace.root, workspace.root.parent / "evidence"]
-    if getattr(adapter, "artifact_dir", None):
-        roots.append(Path(adapter.artifact_dir).resolve())
-    roots.extend(Path(value).resolve() for value in
-                 getattr(adapter, "artifact_roots", []) or [])
     tools = CapabilityLibrary(asset_root / "tools", workspace.root, python=sys.executable,
-                              scope_id="shared01", allowed_input_roots=roots, sandbox=sandbox)
+                              scope_id="shared01", sandbox=sandbox)
     return tools, SkillLibrary(asset_root / "skills"), ExperienceLibrary(asset_root / "experiences"), CapabilityGapLibrary(asset_root / "gaps")
 
 
@@ -79,7 +74,8 @@ def _run_frozen_benchmark(args, *, sandbox, run_dir: Path, asset_root: Path,
                           source: Path) -> dict:
     """Evaluation-owned path: no coding model, AgentLoop, or model Tool registry."""
     from evaluation.frozen_runner import (FrozenDependencyResolver,
-        FrozenEvaluationRunner, load_frozen_skill)
+        FrozenEvaluationRunner, build_evaluation_bundle,
+        load_evaluation_bundle, load_frozen_skill)
     cases = []
     try:
         states = list(args.states or [None])
@@ -95,15 +91,40 @@ def _run_frozen_benchmark(args, *, sandbox, run_dir: Path, asset_root: Path,
         expected = hashlib.sha256(source.read_bytes()).hexdigest()
         if skill is not None and skill.get("controller_sha256") != expected:
             raise RuntimeError("frozen Skill Controller hash mismatch")
-        roots = [source.parent, run_dir]
         tools = CapabilityLibrary(asset_root / "tools", source.parent, python=sys.executable,
-            scope_id="sealed", allowed_input_roots=roots, sandbox=sandbox)
-        resolver = FrozenDependencyResolver(skill=skill, tool_library=tools)
+            scope_id="sealed", sandbox=sandbox)
+        manifest_path = getattr(args, "evaluation_manifest", None)
+        if manifest_path:
+            bundle = load_evaluation_bundle(controller=source,
+                manifest_path=manifest_path)
+        else:
+            development_root = getattr(args, "development_run_dir", None)
+            development_cases = getattr(args, "development_cases", None)
+            partition_protocol = getattr(args, "partition_protocol", None)
+            if not development_root or not development_cases or not partition_protocol:
+                raise RuntimeError(
+                    "formal frozen evaluation requires an evaluation manifest or complete development provenance")
+            evidence_paths = sorted(Path(development_root).resolve().glob("evidence/*.json"))
+            native_manifests = []
+            for _case_id, adapter in cases:
+                provider = getattr(adapter, "native_capability_manifest", None)
+                native_manifests.append(dict(provider() or {}) if callable(provider) else {})
+            if any(value != native_manifests[0] for value in native_manifests[1:]):
+                raise RuntimeError("sealed cases expose inconsistent Adapter-native capabilities")
+            bundle = build_evaluation_bundle(controller=source,
+                evidence_paths=evidence_paths, tool_library=tools,
+                native_capabilities=native_manifests[0] if native_manifests else {},
+                development_cases=development_cases,
+                sealed_cases=[case_id for case_id, _adapter in cases],
+                partition_protocol=partition_protocol,
+                partition_seed=getattr(args, "partition_seed", None),
+                destination=run_dir / "evaluation_manifest.json", skill=skill)
+        resolver = FrozenDependencyResolver(bundle=bundle, tool_library=tools)
         runner = FrozenEvaluationRunner(cases=cases,
             runtime=ControllerRuntime(timeout_seconds=args.controller_timeout,
                 sandbox=sandbox, protected_paths=[asset_root]),
             controller=source, expected_sha256=expected, resolver=resolver,
-            skill_id=(skill or {}).get("skill_id"))
+            bundle=bundle, skill_id=bundle.get("source_skill_id"))
         return runner.run()
     finally:
         for _case_id, adapter in cases:
@@ -399,6 +420,14 @@ def main(argv=None) -> int:
         command.add_argument("--controller-source", help="load a frozen controller into the workspace before running")
         command.add_argument("--frozen-controller", action="store_true",
                              help="evaluation-owned immutable Controller mode")
+        command.add_argument("--evaluation-manifest",
+                             help="immutable evaluator-owned frozen bundle")
+        command.add_argument("--development-run-dir",
+                             help="private development run used to package frozen provenance")
+        command.add_argument("--development-cases", nargs="+",
+                             help="private development partition identities")
+        command.add_argument("--partition-protocol")
+        command.add_argument("--partition-seed")
         command.add_argument("--states", type=int, nargs="+", help="run the same Kernel over multiple Adapter cases")
         command.add_argument("--provider", choices=("openai", "apex")); command.add_argument("--base-url")
         command.add_argument("--reasoning-effort", default="high")

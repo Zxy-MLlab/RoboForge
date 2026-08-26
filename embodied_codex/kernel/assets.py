@@ -142,7 +142,6 @@ class CapabilityLibrary:
 
     def __init__(self, root: str | Path, workspace_root: str | Path | None = None,
                  *, python: str | Path | None = None, scope_id: str | None = None,
-                 allowed_input_roots: list[str | Path] | None = None,
                  sandbox: Any = None, require_runtime: bool = True,
                  cas: ContentAddressedStore | None = None,
                  runtime_environment_manager: RuntimeEnvironmentManager | None = None):
@@ -157,8 +156,8 @@ class CapabilityLibrary:
             self.runtime_environments = RuntimeEnvironmentManager(
                 self.root.parent / "runtimes", cas=self.cas, python=python,
                 sandbox=sandbox)
-        self.runtime = (ToolRuntime(python=python, allowed_input_roots=allowed_input_roots,
-                                    sandbox=sandbox) if require_runtime else None)
+        self.runtime = (ToolRuntime(python=python, sandbox=sandbox)
+                        if require_runtime else None)
 
     def _seal_runtime(self, value: Mapping[str, Any] | None) -> dict[str, Any] | None:
         if self.runtime_environments is None:
@@ -446,7 +445,8 @@ class CapabilityLibrary:
                 temporary_path.unlink(missing_ok=True)
         return {"tool_id": tool_id, "manual_revision": revision}
 
-    def run(self, tool_id: str, payload: Mapping[str, Any]):
+    def run(self, tool_id: str, payload: Mapping[str, Any], *,
+            artifact_resolver=None):
         if self.runtime is None:
             raise AssetError("Tool runtime was not configured for this registry process")
         inspected = self.inspect(tool_id)
@@ -467,7 +467,8 @@ class CapabilityLibrary:
             except RuntimeEnvironmentError as exc:
                 raise AssetError(str(exc)) from exc
         result = self.runtime.execute(self._path(tool_id), dict(payload),
-                                      python=runtime_python)
+                                      python=runtime_python,
+                                      artifact_resolver=artifact_resolver)
         _validate(result, manifest["output_schema"], "Tool output")
         return result
 
@@ -551,12 +552,13 @@ class CapabilityLibrary:
         return {row["tool_id"]: (lambda payload, _id=row["tool_id"]: self.run(_id, payload))
                 for row in self.tested()}
 
-    def runtime_function(self, tool_id: str):
+    def runtime_function(self, tool_id: str, *, artifact_resolver=None):
         """Resolve one tested Tool without enumerating or loading its siblings."""
         inspected = self.inspect(str(tool_id))
         if inspected["manifest"].get("status") not in {"verified", "promoted"}:
             raise AssetError("Tool must pass contract tests before runtime binding")
-        return lambda payload, _id=str(tool_id): self.run(_id, payload)
+        return lambda payload, _id=str(tool_id): self.run(
+            _id, payload, artifact_resolver=artifact_resolver)
 
     def _promotion_receipts(self, tool_id: str) -> list[dict[str, Any]]:
         directory = self.root / "_admissions" / tool_id.partition(":")[0] / tool_id.partition(":")[2]

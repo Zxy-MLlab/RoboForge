@@ -193,10 +193,14 @@ def test_validation_command_requires_three_state_runner_inputs():
         output=Path("validation"),model="gpt-5.6-sol",
         reasoning_effort="high",device="cuda",python="python",
         groundingdino_checkpoint="groundingdino.pth",base_url="https://api.example/v1",
+        development_run_dir=Path("development"),development_states=[0,4,5],
+        partition_seed=2909,
     )
     assert "embodied_codex" in command
     assert "evaluate_libero_skill_sealed" not in " ".join(command)
     assert command[command.index("--adapter")+1] == "libero"
     assert command[command.index("--states")+1:command.index("--model-name")] == ["1", "2", "3"]
     assert "--controller-source" in command and "--frozen-controller" in command
+    assert command[command.index("--development-cases")+1:
+                   command.index("--partition-protocol")] == ["0", "4", "5"]
     assert command[command.index("--asset-root")+1] == str(Path("skills/learned_transfer/v001").resolve().parents[2])

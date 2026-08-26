@@ -112,6 +112,12 @@ class CampaignAdapter:
             raise RuntimeError("Campaign cases expose different native capability contracts")
         return manifests[0]
 
+    def resolve_controller_artifact(self, handle: str):
+        resolver = getattr(self.active, "resolve_controller_artifact", None)
+        if not callable(resolver):
+            raise RuntimeError("active Adapter does not expose an artifact resolver")
+        return resolver(handle)
+
     def close(self):
         errors = []
         for adapter in self._cases.values():

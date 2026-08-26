@@ -113,7 +113,8 @@ class CapabilityManager:
         manifest = self.tool_library.inspect(tool_id)["manifest"]
         if manifest.get("status") != "promoted":
             raise CapabilityError("only a promoted shared Tool can be activated")
-        function = self.tool_library.runtime_function(tool_id)
+        function = self.tool_library.runtime_function(tool_id,
+            artifact_resolver=getattr(self.adapter, "resolve_controller_artifact", None))
         self.adapter.register_capability(tool_id, function, manifest)
         self._bound[tool_id] = function
         return {"tool_id": tool_id, "bound": True, "already_bound": False}
@@ -132,7 +133,8 @@ class CapabilityManager:
         manifest = self.tool_library.inspect(tool_id)["manifest"]
         if manifest.get("status") not in {"verified", "promoted"}:
             raise CapabilityError("checkpoint Tool is no longer verified")
-        function = self.tool_library.runtime_function(tool_id)
+        function = self.tool_library.runtime_function(tool_id,
+            artifact_resolver=getattr(self.adapter, "resolve_controller_artifact", None))
         self.adapter.register_capability(tool_id, function, manifest)
         self._bound[tool_id] = function
 
@@ -387,7 +389,8 @@ class CapabilityManager:
         result = self.tool_library.test_tool(tool_id, cases)
         if result.get("status") != "verified": raise CapabilityError("Tool contract tests failed")
         manifest = self.tool_library.inspect(tool_id)["manifest"]
-        function = self.tool_library.runtime_functions().get(tool_id)
+        function = self.tool_library.runtime_function(tool_id,
+            artifact_resolver=getattr(self.adapter, "resolve_controller_artifact", None))
         if function is None: raise CapabilityError("tested Tool has no runtime function")
         self.adapter.register_capability(tool_id, function, manifest)
         self._bound[tool_id] = function
@@ -513,9 +516,19 @@ class CapabilityManager:
                 if execution.get("completed") is not True or execution.get("error"):
                     continue
                 for event in execution.get("rpc_events", []):
+                    envelope = event.get("result")
+                    tool_result = envelope.get("result") if isinstance(envelope, Mapping) else None
                     if (event.get("method") == "use"
                             and (event.get("arguments") or {}).get("tool_id") == asset_id
-                            and not (event.get("result") or {}).get("tool_error")):
+                            and not event.get("error")
+                            and isinstance(envelope, Mapping)
+                            and envelope.get("tool_id") in {None, asset_id}
+                            and "result" in envelope
+                            and not envelope.get("tool_error")
+                            and envelope.get("ok") is not False
+                            and not (isinstance(tool_result, Mapping)
+                                     and (tool_result.get("tool_error")
+                                          or tool_result.get("ok") is False))):
                         integration_ok = True
                         break
             if not integration_ok:

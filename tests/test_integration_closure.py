@@ -49,19 +49,36 @@ class ToolLibrary:
     def inspect(self, tool_id):
         if tool_id != self.manifest["tool_id"]: raise FileNotFoundError(tool_id)
         return {"manifest": dict(self.manifest)}
-    def runtime_function(self, tool_id): return lambda payload: payload
+    def runtime_function(self, tool_id, *, artifact_resolver=None): return lambda payload: payload
 
 
 def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def evaluation_bundle(controller, sealed_cases):
+    partition = {"protocol": "test-partition-v1", "seed": 1,
+        "development_cases": ["development"],
+        "sealed_cases": [str(value) for value in sealed_cases]}
+    partition["digest"] = hashlib.sha256(json.dumps(partition, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    payload = {"protocol": "roboforge-evaluation-bundle-v1",
+        "controller_sha256": sha(controller), "observed_tool_dependencies": [],
+        "dependency_closure": [], "adapter_requirements": {"capabilities": []},
+        "development_provenance": [{"sha256": "a" * 64}],
+        "development_partition": partition, "source_skill_id": None}
+    payload["bundle_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    return payload
 
 
 @pytest.mark.parametrize("successes", range(4))
 def test_frozen_runner_aggregates_each_hidden_evaluator_case(tmp_path, successes):
     controller = tmp_path / "controller.py"; controller.write_text("def run(robot): return {}\n")
     cases = [(str(i), SealedCase(i < successes)) for i in range(3)]
+    bundle = evaluation_bundle(controller, range(3))
     result = FrozenEvaluationRunner(cases=cases, runtime=Runtime(), controller=controller,
         expected_sha256=sha(controller), resolver=FrozenDependencyResolver(
-            skill=None, tool_library=None)).run()
+            bundle=bundle, tool_library=None), bundle=bundle).run()
     assert result["episodes"] == 3
     assert result["evaluator_successes"] == successes
     assert result["success_rate"] == successes / 3
@@ -106,13 +123,32 @@ def test_frozen_dependency_mismatch_and_missing_native_fail_closed():
 
 
 def test_sealed_campaign_status_consumes_canonical_case_results(tmp_path):
-    rows = [{"case": str(i), "evaluator_success": i < 2,
-             "controller_sha256": "f" * 64} for i in range(3)]
+    rows = [{"case": str(state), "evaluator_success": index < 2,
+             "controller_sha256": "f" * 64}
+            for index, state in enumerate((4, 5, 6))]
+    partition = {"protocol": "partition-v1", "seed": 1,
+        "development_cases": ["0"], "sealed_cases": ["4", "5", "6"]}
+    partition["digest"] = hashlib.sha256(json.dumps(partition, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    bundle = {"protocol": "roboforge-evaluation-bundle-v1",
+        "controller_sha256": "f" * 64, "observed_tool_dependencies": [],
+        "dependency_closure": [], "adapter_requirements": {"capabilities": []},
+        "development_provenance": [{"sha256": "a" * 64,
+                                     "controller_sha256": "f" * 64}],
+        "development_partition": partition, "source_skill_id": "skill:v001"}
+    bundle["bundle_sha256"] = hashlib.sha256(json.dumps(bundle, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    (tmp_path / "evaluation_manifest.json").write_text(json.dumps(bundle))
     (tmp_path / "result.json").write_text(json.dumps({
         "skill_id": "skill:v001",
         "sealed_evaluation_cases": rows, "episodes": 3,
         "evaluator_successes": 2, "success_rate": 2 / 3,
-        "controller_sha256": "f" * 64}))
+        "controller_sha256": "f" * 64,
+        "evaluation_passed": False,
+        "evaluation_bundle_sha256": bundle["bundle_sha256"],
+        "evaluation_policies": [{"name": name, "passed": name != "sealed_evaluation"}
+            for name in ("frozen_controller", "provenance", "anti_cheating",
+                          "generalization", "sealed_evaluation")]}))
     result = _sealed_status(tmp_path, skill_id="skill:v001", states=[4, 5, 6])
     assert result["episodes"] == 3 and result["evaluator_successes"] == 2
     assert result["success_rate"] == 2 / 3 and result["cases"] == rows
@@ -249,7 +285,12 @@ def test_reset_observation_is_registered_as_opaque_agent_artifact(tmp_path):
     image = tmp_path / "adapter" / "fresh.png"; image.parent.mkdir(); image.write_bytes(b"png")
     class Adapter:
         artifact_dir = image.parent
-        def reset_case(self): return {"rgb_path": str(image)}
+        generation = "before"
+        def execution_identity(self):
+            return {"episode_id": "opaque", "environment_generation": self.generation}
+        def reset_case(self):
+            self.generation = "after"
+            return {"rgb_path": str(image)}
     loop = AgentLoop.__new__(AgentLoop)
     loop.adapter = Adapter(); loop.workspace = type("W", (), {"root": tmp_path / "workspace"})()
     loop.root = tmp_path; loop._artifact_handles = {}; loop.latest_evidence = {"old": True}

@@ -223,7 +223,7 @@ def test_shared_tools_require_per_tool_inspection_and_activation(tmp_path):
                 result["source"] = "def run(payload): return payload"
             return result
 
-        def runtime_function(self, tool_id):
+        def runtime_function(self, tool_id, *, artifact_resolver=None):
             self.loaded.append(tool_id)
             return lambda payload: payload
 
