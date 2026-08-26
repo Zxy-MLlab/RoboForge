@@ -10,6 +10,8 @@ import cv2
 import numpy as np
 import pytest
 
+from scripts.download_libero_text_encoder import acquire_text_encoder
+
 from embodied_codex.adapters.factory import adapter_preflight
 from embodied_codex.adapters.libero import _sdk_index
 from embodied_codex.capabilities.graspnet_rgbd import GraspNetRGBD
@@ -422,6 +424,50 @@ def test_libero_preflight_requires_verified_local_text_encoder(monkeypatch, tmp_
     assert text_encoder["available"] is False
     assert text_encoder["valid"] is False
     assert report["ok"] is False
+
+
+def test_libero_text_encoder_download_is_streamed_verified_and_atomic(monkeypatch,
+                                                                      tmp_path):
+    import scripts.download_libero_text_encoder as downloader
+
+    payload = b"model-data" * 200_000
+    expected = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(downloader, "ASSETS", {"model.bin": {
+        "url": "https://example.invalid/model.bin", "sha256": expected}})
+
+    class Response:
+        def __init__(self):
+            self.offset = 0
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self, size):
+            chunk = payload[self.offset:self.offset + min(size, 8192)]
+            self.offset += len(chunk)
+            return chunk
+
+    monkeypatch.setattr(downloader, "urlopen", lambda *_args, **_kwargs: Response())
+    original = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda path: (_ for _ in ()).throw(
+        AssertionError("download target was read into memory"))
+        if path.name == "model.bin" else original(path))
+    result = acquire_text_encoder(tmp_path / "encoder")
+    assert result == [{"filename": "model.bin", "sha256": expected,
+                       "status": "downloaded", "bytes": len(payload)}]
+    assert downloader.sha256(tmp_path / "encoder/model.bin") == expected
+    assert not list((tmp_path / "encoder").glob("*.partial"))
+
+    monkeypatch.setattr(downloader, "ASSETS", {"bad.bin": {
+        "url": "https://example.invalid/bad.bin", "sha256": "0" * 64}})
+    bad_destination = tmp_path / "bad"
+    bad_destination.mkdir()
+    (bad_destination / "existing.txt").write_text("preserve me")
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        acquire_text_encoder(bad_destination)
+    assert (bad_destination / "existing.txt").read_text() == "preserve me"
+    assert not (bad_destination / "bad.bin").exists()
+    assert not list(bad_destination.parent.glob("bad.*.staging"))
 
 
 def test_graspnet_wrapper_passes_external_source_root_to_real_backend(tmp_path):

@@ -44,20 +44,8 @@ mkdir -p "$vendor_root/graspnet-baseline/pointnet2/pointnet2"
 touch "$vendor_root/graspnet-baseline/pointnet2/pointnet2/__init__.py"
 "$python_bin" -m pip install --no-build-isolation -e "$vendor_root/graspnet-baseline/pointnet2"
 
-"$python_bin" - "$vendor_root/bert-base-uncased" <<'PY'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-import sys
-
-destination = Path(sys.argv[1]).resolve()
-snapshot_download(
-    repo_id="google-bert/bert-base-uncased",
-    revision="86b5e0934494bd15c9632b12f734a8a67f723594",
-    local_dir=str(destination),
-    allow_patterns=["config.json", "pytorch_model.bin", "tokenizer.json",
-                    "tokenizer_config.json", "vocab.txt"],
-)
-PY
+"$python_bin" "$repo_root/scripts/download_libero_text_encoder.py" \
+    --destination "$vendor_root/bert-base-uncased"
 
 mkdir -p "$(dirname "$vendor_config")"
 "$python_bin" - "$vendor_config" "$vendor_root" <<'PY'

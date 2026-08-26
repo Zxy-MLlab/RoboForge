@@ -64,10 +64,12 @@ roboforge run --adapter libero --task 0 --profile autonomous \
 会明确报告 `model` 不可用并返回非零状态。
 
 也可通过 `ROBOFORGE_GROUNDINGDINO_ROOT`、`ROBOFORGE_GROUNDINGDINO_CONFIG`、
-`ROBOFORGE_GROUNDINGDINO_CHECKPOINT`、`ROBOFORGE_SAM_ROOT`、
+`ROBOFORGE_GROUNDINGDINO_CHECKPOINT`、`ROBOFORGE_GROUNDINGDINO_TEXT_ENCODER`、
+`ROBOFORGE_SAM_ROOT`、
 `ROBOFORGE_SAM_CHECKPOINT`、`ROBOFORGE_GRASPNET_ROOT` 和
 `ROBOFORGE_GRASPNET_CHECKPOINT` 使用外部安装目录。LIBERO 缺少依赖、源码、扩展、GPU
 或 checkpoint 时，preflight 会列出每项失败并以非零状态退出，正式 run 不会继续。
+上游 `LIBERO_CONFIG_PATH` 必须指向包含 `config.yaml` 的配置目录，而不是 YAML 文件本身。
 
 Profile 只负责组合可选能力：`dev` 适合快速调试，`autonomous` 开启资产检索和沉淀，
 `benchmark` 由外部评测 runner 额外加载研究 policy。自定义 Adapter 必须实现
