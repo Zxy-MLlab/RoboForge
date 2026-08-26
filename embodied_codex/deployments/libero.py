@@ -340,7 +340,8 @@ class LiberoDeployment:
         from robosuite.utils.camera_utils import get_camera_extrinsic_matrix,get_camera_intrinsic_matrix,get_real_depth_map
         requested=request.get("cameras") or list(CAMERAS)
         if not isinstance(requested,list) or set(requested)-set(CAMERAS):raise LiberoDeploymentError("invalid cameras")
-        self.frame+=1;frame_id=f"frame-{self.frame:06d}";folder=self.artifact_dir/"sensors"/frame_id
+        self.frame+=1;frame_id=f"frame-{self.frame:06d}"
+        folder=self.artifact_dir/"sensors"/self.environment_generation/frame_id
         folder.mkdir(parents=True,exist_ok=False);cameras={}
         for name in requested:
             rgb=np.ascontiguousarray(self.obs[f"{name}_image"][::-1]);rgb_path=folder/f"{name}_rgb.png"

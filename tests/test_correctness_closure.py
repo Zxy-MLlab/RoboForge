@@ -322,6 +322,7 @@ def test_libero_controller_observe_rpc_contains_only_opaque_sensor_handles(
     deployment.closed = False
     deployment._controller_execution_sealed = False
     deployment._instruction = "opaque observation"
+    deployment.environment_generation = "generation"
     deployment.frame = 0
     deployment.episode = type("Episode", (), {"image_size": 4})()
     deployment.env = type("Env", (), {"sim": object()})()
@@ -350,6 +351,61 @@ def test_libero_controller_observe_rpc_contains_only_opaque_sensor_handles(
     assert handles and all(value.startswith("artifact://sensor/") for value in handles)
     assert all(deployment.resolve_controller_artifact(value).is_file() for value in handles)
     assert private not in {deployment.resolve_controller_artifact(value) for value in handles}
+
+
+def test_libero_sensor_artifacts_are_isolated_by_environment_generation(
+        tmp_path, monkeypatch):
+    from embodied_codex.deployments.libero import CAMERAS, LiberoDeployment, PROPRIO
+
+    deployment = LiberoDeployment.__new__(LiberoDeployment)
+    deployment.closed = False
+    deployment._controller_execution_sealed = False
+    deployment.artifact_dir = (tmp_path / "adapter").resolve()
+    deployment.artifact_dir.mkdir(parents=True)
+    deployment.episode = type("Episode", (), {"image_size": 4, "initial_state_index": 0,
+                                                "horizon": 20})()
+    deployment._init_states = ["initial"]
+    deployment._warmup_steps = 0
+    deployment._capture_outcome_rgb = lambda name: None
+    deployment.env = type("Env", (), {
+        "reset": lambda self: deployment.obs,
+        "set_init_state": lambda self, state: deployment.obs,
+        "sim": object(),
+    })()
+    deployment.obs = {key: np.zeros(3) for key in PROPRIO}
+    for camera in CAMERAS:
+        deployment.obs[f"{camera}_image"] = np.zeros((4, 4, 3), dtype=np.uint8)
+        deployment.obs[f"{camera}_depth"] = np.ones((4, 4, 1), dtype=np.float32)
+    camera_utils = types.ModuleType("robosuite.utils.camera_utils")
+    camera_utils.get_camera_extrinsic_matrix = lambda *args: np.eye(4)
+    camera_utils.get_camera_intrinsic_matrix = lambda *args: np.eye(3)
+    camera_utils.get_real_depth_map = lambda sim, value: value
+    monkeypatch.setitem(sys.modules, "robosuite.utils.camera_utils", camera_utils)
+
+    deployment._reset_to_initial_condition()
+    generation_a = deployment.environment_generation
+    first = deployment.project_rpc_output("observe", {}, deployment.dispatch(
+        "observe", {"channel": "rgbd", "request": {}}))
+    first_handle = first["cameras"][CAMERAS[0]]["rgb_path"]
+    first_path = deployment.resolve_controller_artifact(first_handle)
+    assert first["frame_id"] == "frame-000001"
+    assert generation_a in str(first_path)
+
+    deployment._reset_to_initial_condition()
+    generation_b = deployment.environment_generation
+    second = deployment.project_rpc_output("observe", {}, deployment.dispatch(
+        "observe", {"channel": "rgbd", "request": {}}))
+    second_handle = second["cameras"][CAMERAS[0]]["rgb_path"]
+    second_path = deployment.resolve_controller_artifact(second_handle)
+    assert second["frame_id"] == "frame-000001"
+    assert generation_b != generation_a
+    assert first_path != second_path
+    assert first_path.is_file() and second_path.is_file()
+    assert first_path.parent.parent.name == generation_a
+    assert second_path.parent.parent.name == generation_b
+    assert first_path.exists()
+    assert all(token not in first_handle and token not in second_handle
+               for token in (generation_a, generation_b, "task", "seed", str(tmp_path)))
 
 
 def _recovery_loop(tmp_path, adapter):
