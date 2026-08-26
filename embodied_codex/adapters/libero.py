@@ -297,7 +297,9 @@ def create(*, task: str, state: int = 0, root: str | Path,
     config = os.environ.get("LIBERO_CONFIG_PATH")
     episode = LiberoEpisode("libero_spatial", int(task), int(state), config_path=config,
                             case_handle=f"libero-task-{task}-state-{state}")
-    model_name = os.environ.get("ROBOFORGE_MODEL", "gpt-5.6-sol")
+    adapter_configuration = dict(configuration or {})
+    model_name = str(adapter_configuration.get("verifier_model")
+                     or os.environ.get("ROBOFORGE_MODEL", "gpt-5.6-sol"))
     perception = OpenVocabularyRGBD(groundingdino_root=paths["groundingdino_root"],
         groundingdino_config=paths["groundingdino_config"],
         groundingdino_checkpoint=paths["groundingdino_checkpoint"],
@@ -310,14 +312,18 @@ def create(*, task: str, state: int = 0, root: str | Path,
     verifiers = {"visual_attachment": perception.verify_attachment,
                  "visual_support_relation": perception.verify_support_relation}
     outcome = None
-    if os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY"):
-        adapter_configuration = dict(configuration or {})
-        provider = resolve_provider(provider=adapter_configuration.get("model_provider")
+    if (not adapter_configuration.get("disable_agent_verifier")
+            and (os.environ.get("OPENAI_API_KEY") or os.environ.get("APEX_API_KEY"))):
+        provider = resolve_provider(provider=adapter_configuration.get("verifier_provider")
+            or adapter_configuration.get("model_provider")
             or os.environ.get("ROBOFORGE_MODEL_PROVIDER"),
-            base_url=adapter_configuration.get("model_base_url")
+            base_url=adapter_configuration.get("verifier_base_url")
+            or adapter_configuration.get("model_base_url")
             or os.environ.get("ROBOFORGE_MODEL_BASE_URL"))
         outcome = VLMVisualTaskOutcomeVerifier(api_key=provider.api_key,
-            base_url=provider.endpoint, model=model_name).verify
+            base_url=provider.endpoint, model=model_name,
+            reasoning_effort=str(adapter_configuration.get("verifier_reasoning_effort")
+                                 or "low")).verify
     capabilities = {"libero.rgbd_perception:v001": perception.detect,
                     "libero.grasp_proposals:v001": grasp.infer}
     contracts = {"libero.rgbd_perception:v001": _perception_contract(),

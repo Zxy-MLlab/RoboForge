@@ -103,6 +103,15 @@ class CampaignAdapter:
         for adapter in self._cases.values():
             adapter.register_capability(tool_id, function, contract)
 
+    def native_capability_manifest(self):
+        manifests = []
+        for adapter in self._cases.values():
+            provider = getattr(adapter, "native_capability_manifest", None)
+            manifests.append(dict(provider() or {}) if callable(provider) else {})
+        if any(value != manifests[0] for value in manifests[1:]):
+            raise RuntimeError("Campaign cases expose different native capability contracts")
+        return manifests[0]
+
     def close(self):
         errors = []
         for adapter in self._cases.values():

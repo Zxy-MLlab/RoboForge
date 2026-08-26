@@ -75,6 +75,43 @@ def _benchmark_policies():
             ProvenancePolicy(name="provenance"), SealedEvaluationPolicy(name="sealed_evaluation")]
 
 
+def _run_frozen_benchmark(args, *, sandbox, run_dir: Path, asset_root: Path,
+                          source: Path) -> dict:
+    """Evaluation-owned path: no coding model, AgentLoop, or model Tool registry."""
+    from evaluation.frozen_runner import (FrozenDependencyResolver,
+        FrozenEvaluationRunner, load_frozen_skill)
+    cases = []
+    try:
+        states = list(args.states or [None])
+        for index, state in enumerate(states, 1):
+            case_root = run_dir / "sealed_cases" / f"case-{index:03d}"
+            case_root.mkdir(parents=True, exist_ok=True)
+            configuration = {"disable_agent_verifier": True}
+            with contextlib.redirect_stdout(sys.stderr):
+                adapter = load_adapter(args.adapter, task=str(args.task), run_dir=case_root,
+                    case=state, configuration=configuration)
+            cases.append((str(state) if state is not None else "default", adapter))
+        skill = load_frozen_skill(source, asset_root)
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+        if skill is not None and skill.get("controller_sha256") != expected:
+            raise RuntimeError("frozen Skill Controller hash mismatch")
+        roots = [source.parent, run_dir]
+        tools = CapabilityLibrary(asset_root / "tools", source.parent, python=sys.executable,
+            scope_id="sealed", allowed_input_roots=roots, sandbox=sandbox)
+        resolver = FrozenDependencyResolver(skill=skill, tool_library=tools)
+        runner = FrozenEvaluationRunner(cases=cases,
+            runtime=ControllerRuntime(timeout_seconds=args.controller_timeout,
+                sandbox=sandbox, protected_paths=[asset_root]),
+            controller=source, expected_sha256=expected, resolver=resolver,
+            skill_id=(skill or {}).get("skill_id"))
+        return runner.run()
+    finally:
+        for _case_id, adapter in cases:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+
+
 def run_command(args) -> int:
     sandbox = select_sandbox(args.sandbox)
     sandbox.require()
@@ -92,11 +129,28 @@ def run_command(args) -> int:
     asset_root.mkdir(parents=True, exist_ok=True)
     source = Path(args.controller_source).resolve() if args.controller_source else None
     if source is not None and not source.is_file(): raise FileNotFoundError(source)
+    if args.profile == "benchmark" and args.frozen_controller:
+        if source is None:
+            raise ValueError("--frozen-controller requires --controller-source")
+        output = _run_frozen_benchmark(args, sandbox=sandbox, run_dir=run_dir,
+                                       asset_root=asset_root, source=source)
+        output["profile"] = args.profile
+        result_path = run_dir / "result.json"; temporary = result_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(output, indent=2, default=str) + "\n")
+        temporary.replace(result_path)
+        print(json.dumps(output, indent=2, default=str))
+        return 0 if output.get("evaluation_passed") is True else 2
     provider_configuration = (None if args.model else resolve_provider(
         provider=args.provider, base_url=args.base_url))
-    adapter_configuration = ({"model_provider": provider_configuration.provider,
-        "model_base_url": provider_configuration.endpoint}
-        if provider_configuration is not None else {})
+    adapter_configuration = {
+        "model_provider": (provider_configuration.provider
+                           if provider_configuration is not None else None),
+        "model_base_url": (provider_configuration.endpoint
+                           if provider_configuration is not None else None),
+        "verifier_provider": getattr(args, "verifier_provider", None),
+        "verifier_base_url": getattr(args, "verifier_base_url", None),
+        "verifier_model": getattr(args, "verifier_model_name", None) or args.model_name,
+        "verifier_reasoning_effort": getattr(args, "verifier_reasoning_effort", "low")}
     workspace = PersistentWorkspace(run_dir / "workspace", sandbox=sandbox)
     adapter = None
     policies = _benchmark_policies() if args.profile == "benchmark" else []
@@ -142,12 +196,6 @@ def run_command(args) -> int:
                                    experience_library=experiences, gap_library=gaps)
         contract = getattr(adapter, "sdk_index", None) or getattr(adapter, "sdk_contract", None) or {
             "protocol": "adapter-provided", "operations": ["observe", "use", "act", "verify", "record"]}
-        if args.frozen_controller:
-            from evaluation.generalization import FrozenControllerPolicy
-            if source is None:
-                raise ValueError("--frozen-controller requires --controller-source")
-            policies.insert(0, FrozenControllerPolicy(
-                expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest()))
         loop = loop_type(model=model, workspace=workspace, adapter=adapter,
             context_builder=ContextBuilder(adapter_index=contract, asset_registry=manager,
                 workspace=workspace, initial_observation=initial_observation),
@@ -160,18 +208,7 @@ def run_command(args) -> int:
             root=run_dir, web_search=manager.web_search,
             resume=bool(getattr(args, "resume", False)))
         task = getattr(adapter, "instruction", str(args.task))
-        if args.profile == "benchmark" and args.frozen_controller:
-            from evaluation.sealed_evaluation import SealedEvaluationPolicy
-            sealed_policy = next((policy for policy in policies
-                                  if isinstance(policy, SealedEvaluationPolicy)),
-                                 SealedEvaluationPolicy(name="sealed_evaluation"))
-            output = sealed_policy.evaluate_frozen(adapter=adapter,
-                                                   runtime=loop.runtime,
-                                                   controller=workspace.controller)
-            output.update({"finished": bool(output.get("sealed_evaluation")),
-                           "completion_valid": bool(output.get("sealed_evaluation")),
-                           "steps": 0, "executions": len(output.get("sealed_evaluation_cases", []))})
-        elif args.profile == "benchmark":
+        if args.profile == "benchmark":
             from evaluation.runner import BenchmarkRunner
             output = BenchmarkRunner(loop, policies).run(task)
         else:
@@ -365,6 +402,10 @@ def main(argv=None) -> int:
         command.add_argument("--states", type=int, nargs="+", help="run the same Kernel over multiple Adapter cases")
         command.add_argument("--provider", choices=("openai", "apex")); command.add_argument("--base-url")
         command.add_argument("--reasoning-effort", default="high")
+        command.add_argument("--verifier-provider", choices=("openai", "apex"))
+        command.add_argument("--verifier-base-url")
+        command.add_argument("--verifier-model-name")
+        command.add_argument("--verifier-reasoning-effort", default="low")
         command.add_argument("--max-steps", type=int, default=60)
         command.add_argument("--max-executions", type=int, default=20)
         command.add_argument("--session-timeout", type=float, default=3600)

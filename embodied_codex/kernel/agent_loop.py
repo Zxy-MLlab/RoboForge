@@ -129,11 +129,12 @@ class AgentLoop:
             if not valid:
                 self.state["finished"] = False
                 self.state["completion_valid"] = False
-                # A stale generation cannot be resumed or replayed.  The next
-                # explicit run_controller is a new experiment in this state.
-                self.state["completed_execution"] = None
-                self.state["pending_execution"] = None
-                self._recovery_mode = False
+                # Historical evidence validity cannot resolve an in-flight
+                # physical execution. Preserve pending uncertainty so the
+                # execution path can require exact durable recovery or fail.
+                if not isinstance(self.state.get("pending_execution"), Mapping):
+                    self.state["completed_execution"] = None
+                    self._recovery_mode = False
         initial = getattr(self.adapter, "initial_observation", None)
         if callable(initial) and getattr(self.context_builder, "initial_observation", None) is None:
             self.context_builder.initial_observation = initial()
@@ -512,6 +513,7 @@ class AgentLoop:
         self._agent_latest_evidence = None
         self.state.update({"completion_valid": False, "finished": False,
                            "restored_evidence_unverified": False})
+        observation = self._register_artifacts(observation)
         self.context_builder.initial_observation = observation
         return {"reset": True, "observation": self.context_builder._observation_summary(observation)}
 

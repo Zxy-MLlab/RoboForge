@@ -122,7 +122,6 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
                         capabilities: Path,model: str,reasoning_effort: str,device: str,
                         python: str,groundingdino_checkpoint: str,base_url: str,
                         provider: str|None=None,
-                        retry_locked_validation: bool=False,
                         verifier_reasoning_effort: str="low"):
     # Development uses the autonomous Harness over every predeclared case.  No
     # sealed result is exposed while the model can still change the Controller.
@@ -131,6 +130,9 @@ def development_command(*, task: int,states: list[int],max_iterations: int,outpu
         "--asset-root",str(capabilities),"--model-name",model,
         "--reasoning-effort",reasoning_effort,
         *(["--provider",provider] if provider else []),"--base-url",base_url,
+        *(["--verifier-provider",provider] if provider else []),
+        "--verifier-base-url",base_url,"--verifier-model-name",model,
+        "--verifier-reasoning-effort",verifier_reasoning_effort,
         "--max-steps",str(max_iterations),"--controller-timeout","600",
         "--states",*[str(state) for state in states]])
     return command
@@ -204,14 +206,17 @@ def _development_status(root: Path,asset_root: Path|None=None):
 def _sealed_status(root: Path,*,skill_id: str|None,states: list[int]):
     path=root/"result.json"
     if not path.is_file():return None
-    result=json.loads(path.read_text());cases=list(result.get("cases") or [result])
-    successes=sum(bool(case.get("finished") is True
-        and case.get("evaluation_passed") is True) for case in cases)
-    return {"protocol":"roboforge-libero-sealed-v1","skill_id":skill_id,
-            "states":list(states),"episodes":len(cases),
+    result=json.loads(path.read_text())
+    if result.get("skill_id") != skill_id:
+        raise RuntimeError("sealed result Skill id does not match the requested frozen Skill")
+    cases=list(result.get("sealed_evaluation_cases") or [])
+    episodes=int(result.get("episodes",len(cases)))
+    successes=int(result.get("evaluator_successes",0))
+    return {"protocol":"roboforge-libero-sealed-v1","skill_id":result.get("skill_id"),
+            "states":list(states),"episodes":episodes,
             "evaluator_successes":successes,
-            "controller_sha256":result.get("cross_case_controller_sha256")
-                or cases[0].get("latest_evidence",{}).get("controller_sha256")}
+            "success_rate":float(result.get("success_rate",0.0)),
+            "cases":cases,"controller_sha256":result.get("controller_sha256")}
 
 
 def _resolve_packaging_skill(skill_dir: str|Path):
@@ -277,8 +282,6 @@ def main():
         "EMBODIED_CODEX_GROUNDINGDINO_CHECKPOINT","checkpoints/groundingdino_swint_ogc.pth"))
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--capability-library",type=Path)
-    parser.add_argument("--retry-locked-validation",action="store_true",
-        help="Replay the current immutable Controller once after a verifier/Adapter correction")
     args=parser.parse_args()
     provider=resolve_provider(provider=args.provider,base_url=args.base_url)
     args.provider=provider.provider
@@ -359,7 +362,6 @@ def main():
                 model=args.model,reasoning_effort=args.reasoning_effort,device=args.device,
                 python=args.python,groundingdino_checkpoint=args.groundingdino_checkpoint,
                 base_url=args.base_url,provider=args.provider,
-                retry_locked_validation=args.retry_locked_validation,
                 verifier_reasoning_effort=args.verifier_reasoning_effort)
             completed=subprocess.run(command,cwd=ROOT,env=runtime_env)
             status=_development_status(development,capabilities);development_returncode=completed.returncode

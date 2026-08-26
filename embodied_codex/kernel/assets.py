@@ -720,7 +720,8 @@ class SkillLibrary(_JsonAssetLibrary):
     def freeze(self, *, name: str, task: str, controller: str | Path,
                evidence: Mapping[str, Any] | None = None, tool_ids: list[str] | None = None,
                tools: CapabilityLibrary | None = None, interface: Mapping[str, Any] | None = None,
-               evidence_paths=None, adapter_requirements=None, runtime_requirements=None, **_unused):
+               evidence_paths=None, adapter_requirements=None, runtime_requirements=None,
+               observed_tool_ids=None, **_unused):
         source = Path(controller).resolve()
         if not source.is_file():
             raise AssetError("Skill controller does not exist")
@@ -737,6 +738,7 @@ class SkillLibrary(_JsonAssetLibrary):
                 "runtime_environment": manifest.get("runtime_environment")})
         payload = {"protocol": "roboforge-skill-v1", "task": str(task), "controller_sha256": _sha256(source),
                    "tool_ids": sorted(set(tool_ids or [])), "development_evidence": dict(evidence or {}),
+                   "observed_tool_ids": sorted(set(observed_tool_ids or tool_ids or [])),
                    "dependency_closure": dependency_closure,
                    "adapter_requirements": dict(adapter_requirements or {}),
                    "runtime_requirements": dict(runtime_requirements or {}),

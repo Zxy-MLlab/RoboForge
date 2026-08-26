@@ -115,9 +115,9 @@ class LiberoDeployment:
         self.env=OffScreenRenderEnv(bddl_file_name=bddl,camera_names=list(CAMERAS),
             camera_heights=episode.image_size,camera_widths=episode.image_size,
             camera_depths=True,ignore_done=True,horizon=episode.horizon)
-        self.env.seed(episode.seed);self.obs=self.env.reset()
-        self.obs=self.env.set_init_state(states[episode.initial_state_index])
+        self.env.seed(episode.seed);self.obs=None
         self._instruction=str(task.language);self.capabilities=dict(capabilities or {})
+        self._native_capability_ids = frozenset(str(key) for key in self.capabilities)
         self.capability_contracts={str(key):dict(value) for key,value in
                                    (capability_contracts or {}).items()}
         if set(self.capabilities)!=set(self.capability_contracts):
@@ -131,29 +131,26 @@ class LiberoDeployment:
         self.verifiers=dict(verifiers or {});self.references={};self.trace=[];self.video=[]
         self.verified_attachments=set()
         self.step=0;self.frame=0;self.closed=False;self.last_verify=False
-        self.environment_generation=uuid.uuid4().hex
+        self.environment_generation=""
         self._controller_execution_sealed=False;self._evaluator_calls=0
         self.outcome_verifier=outcome_verifier;self._outcome_report=None
         self._outcome_after=None
         self._execution_index = 0
         self._execution_artifacts = {}
+        self._execution_sensor_report = None
         # LIBERO init states can leave free objects several centimetres above
         # their support.  A generic no-motion settling period is part of the
         # deployment adapter, not learned task logic.  Reward/done/info remain
         # discarded exactly as during controller execution.
-        warmup=int(np.clip(episode.warmup_steps,0,60))
-        if warmup:
-            for _ in range(warmup):self._sim_step(np.r_[np.zeros(6),-1.0])
-            self.trace.append({"event":"adapter_warmup","steps":warmup,
-                               "controller_visible":True})
-        self._outcome_before=self._capture_outcome_rgb("before")
+        self._warmup_steps=int(np.clip(episode.warmup_steps,0,60))
+        self._reset_to_initial_condition()
         (self.artifact_dir/"deployment.json").write_text(json.dumps({
             "protocol":"embodied-codex-libero-deployment-v1","suite":episode.suite,
             "task_index":episode.task_index,"state_index":episode.initial_state_index,
             "instruction":self._instruction,"controller_visible":["language","RGB-D",
             "calibration","proprioception","Tool output","action history"],
             "controller_hidden":["reward","done","evaluator","BDDL","object state","sim IDs"],
-            "adapter_warmup_steps":warmup,
+            "adapter_warmup_steps":self._warmup_steps,
             "created_unix":time.time()},indent=2)+"\n")
 
     @property
@@ -179,6 +176,7 @@ class LiberoDeployment:
         self.last_verify = False
         self._outcome_report = None
         self._outcome_after = None
+        self._execution_sensor_report = None
         self._controller_execution_sealed = False
         self._outcome_before = self._capture_outcome_rgb("before")
         self._evaluator_calls = 0
@@ -201,14 +199,25 @@ class LiberoDeployment:
     def reset_case(self):
         if self.closed:
             raise LiberoDeploymentError("deployment closed")
-        self.env.reset()
+        self._reset_to_initial_condition()
+        return self.initial_observation()
+
+    def _reset_to_initial_condition(self):
+        self.obs = self.env.reset()
         self.obs = self.env.set_init_state(self._init_states[self.episode.initial_state_index])
         self.environment_generation = uuid.uuid4().hex
         self.step = 0; self.frame = 0; self.trace = []; self.video = []
         self.references = {}; self.last_verify = False
+        self.verified_attachments = set()
         self._controller_execution_sealed = False; self._evaluator_calls = 0
         self._outcome_report = None; self._outcome_after = None
-        return self.initial_observation()
+        self._execution_sensor_report = None
+        if self._warmup_steps:
+            for _ in range(self._warmup_steps):
+                self._sim_step(np.r_[np.zeros(6),-1.0])
+            self.trace.append({"event":"adapter_warmup","steps":self._warmup_steps,
+                               "controller_visible":True})
+        self._outcome_before = None
 
     def resume_protocol(self):
         # A fresh simulator instance does not preserve physical state across a
@@ -228,6 +237,17 @@ class LiberoDeployment:
             raise LiberoDeploymentError(f"invalid dynamic Tool contract {tool_id}: {exc}") from exc
         self.capabilities[str(tool_id)]=function
         self.capability_contracts[str(tool_id)]=value
+
+    def native_capability_manifest(self):
+        result = {}
+        for capability_id in sorted(self._native_capability_ids):
+            contract = self.capability_contracts[capability_id]
+            encoded = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+            version = capability_id.rpartition(":")[2] or None
+            result[capability_id] = {"capability_id": capability_id,
+                "version": version,
+                "contract_sha256": hashlib.sha256(encoded.encode()).hexdigest()}
+        return result
 
     def _proprio(self):
         return {key:np.asarray(self.obs[key]).tolist() for key in PROPRIO}
@@ -486,6 +506,8 @@ class LiberoDeployment:
         self.last_verify=result["verified"];self.trace.append({"event":"verify","name":name,"result":result});return result
 
     def sensor_report(self,execution):
+        if self._execution_sensor_report is not None:
+            return dict(self._execution_sensor_report)
         independent=True
         if self.outcome_verifier is not None:
             if self._outcome_report is None:
@@ -503,7 +525,7 @@ class LiberoDeployment:
                                    "result":self._outcome_report})
             independent=bool(self._outcome_report.get("verified"))
         self._finalize_execution_artifacts()
-        return {"sensor_verification_passed":bool(self.last_verify and independent),
+        report = {"sensor_verification_passed":bool(self.last_verify and independent),
                 "controller_visual_verification_passed":bool(self.last_verify),
                 "independent_task_outcome":self._outcome_report,
                 # Canonical task-level sensor evidence. Exposing immutable
@@ -518,6 +540,8 @@ class LiberoDeployment:
                 # Consumed only by the Harness generalization gate.  Keys
                 # prefixed with _harness_ are removed from model evidence.
                 "_harness_case_id":self.episode.case_handle}
+        self._execution_sensor_report = report
+        return dict(report)
 
     def agent_evidence(self, execution, sensor_report):
         """Project diagnostic sensor artifacts without evaluator/Harness truth."""

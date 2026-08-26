@@ -416,11 +416,21 @@ class CapabilityManager:
             except (OSError, json.JSONDecodeError):
                 continue
         declared = set(values.get("tool_ids") or [])
-        if observed and declared != observed:
+        if declared != observed:
             raise CapabilityError(f"Skill Tool dependency declaration differs from execution evidence: declared={sorted(declared)}, observed={sorted(observed)}")
-        values["tool_ids"] = sorted(declared or observed)
+        all_dependencies = observed
+        native_provider = getattr(self.adapter, "native_capability_manifest", None)
+        native_manifest = dict(native_provider() or {}) if callable(native_provider) else {}
+        native_ids = set(native_manifest) & all_dependencies
+        shared_ids = all_dependencies - native_ids
+        values["tool_ids"] = sorted(shared_ids)
+        values["observed_tool_ids"] = sorted(all_dependencies)
+        existing_requirements = dict(values.get("adapter_requirements") or {})
+        existing_requirements["capabilities"] = [dict(native_manifest[item])
+            for item in sorted(native_ids)]
+        values["adapter_requirements"] = existing_requirements
         tested = {item["tool_id"] for item in self.tool_library.tested()} if self.tool_library is not None else set()
-        missing = set(values.get("tool_ids") or []) - tested
+        missing = shared_ids - tested
         if missing:
             raise CapabilityError(f"Skill references untested Tools: {sorted(missing)}")
         values.setdefault("tools", self.tool_library)

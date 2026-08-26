@@ -17,15 +17,17 @@ class SealedEvaluationPolicy(BenchmarkPolicy):
         reports = []
         for case_id, case in targets:
             reset = getattr(case, "reset_case", None)
-            if callable(reset):
-                reset()
+            if not callable(reset):
+                raise RuntimeError("sealed evaluation requires a fresh episode reset")
+            reset()
             begin = getattr(case, "begin_controller_execution", None)
             if callable(begin):
                 begin()
             execution = runtime.execute(controller, case)
             seal = getattr(case, "seal_controller_execution", None)
-            if callable(seal):
-                seal()
+            if not callable(seal):
+                raise RuntimeError("sealed evaluation requires an I/O seal barrier")
+            seal()
             receipt_provider = getattr(case, "verification_receipt", None)
             receipt = dict(receipt_provider(execution)) if callable(receipt_provider) else {}
             case_evaluator = hidden_evaluator
@@ -41,16 +43,19 @@ class SealedEvaluationPolicy(BenchmarkPolicy):
                 evaluator_success = evaluator_result.get("success") is True
             else:
                 evaluator_success = evaluator_result is True
-            reports.append({"case": str(case_id), "execution_status": "completed" if execution.get("completed") is True else "failed",
-                            "passed": evaluator_success, "evaluator_success": evaluator_success,
+            execution_completed = execution.get("completed") is True and not execution.get("error")
+            reports.append({"case": str(case_id), "execution_status": "completed" if execution_completed else "failed",
+                            "passed": bool(execution_completed and evaluator_success),
+                            "evaluator_success": evaluator_success,
                             "controller_sha256": receipt.get("controller_sha256") or execution.get("program_sha256")})
         successes = sum(1 for row in reports if row["evaluator_success"])
-        return {"sealed_evaluation": bool(reports) and successes == len(reports),
+        passed = bool(reports) and all(row["passed"] for row in reports)
+        return {"sealed_evaluation": passed,
                 "sealed_evaluation_cases": reports,
                 "episodes": len(reports), "evaluator_successes": successes,
                 "success_rate": successes / len(reports) if reports else 0.0,
                 "controller_sha256": reports[0].get("controller_sha256") if reports else None,
-                "evaluation_passed": bool(reports) and successes == len(reports)}
+                "evaluation_passed": passed}
 
     def before_run(self, loop):
         loop.event_store.commit("evaluation_policy", {"policy": self.name, "phase": "before_run"})
