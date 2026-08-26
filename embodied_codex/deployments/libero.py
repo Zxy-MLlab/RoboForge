@@ -110,6 +110,8 @@ class LiberoDeployment:
         suite=benchmark.get_benchmark_dict()[episode.suite]();task=suite.get_task(episode.task_index)
         bddl=os.path.join(get_libero_path("bddl_files"),task.problem_folder,task.bddl_file)
         states=suite.get_task_init_states(episode.task_index)
+        self._init_states = states
+        self._suite = suite
         self.env=OffScreenRenderEnv(bddl_file_name=bddl,camera_names=list(CAMERAS),
             camera_heights=episode.image_size,camera_widths=episode.image_size,
             camera_depths=True,ignore_done=True,horizon=episode.horizon)
@@ -133,6 +135,8 @@ class LiberoDeployment:
         self._controller_execution_sealed=False;self._evaluator_calls=0
         self.outcome_verifier=outcome_verifier;self._outcome_report=None
         self._outcome_after=None
+        self._execution_index = 0
+        self._execution_artifacts = {}
         # LIBERO init states can leave free objects several centimetres above
         # their support.  A generic no-motion settling period is part of the
         # deployment adapter, not learned task logic.  Reward/done/info remain
@@ -163,6 +167,48 @@ class LiberoDeployment:
     def initial_observation(self):
         arguments={"channel":"rgbd","request":{}}
         return self.project_rpc_output("observe",arguments,self.dispatch("observe",arguments))
+
+    def begin_controller_execution(self):
+        """Start an execution-scoped trace and outcome collection."""
+        if self.closed:
+            raise LiberoDeploymentError("deployment closed")
+        self._execution_index += 1
+        self.trace = []
+        self.video = []
+        self.references = {}
+        self.last_verify = False
+        self._outcome_report = None
+        self._outcome_after = None
+        self._controller_execution_sealed = False
+        self._outcome_before = self._capture_outcome_rgb("before")
+        self._evaluator_calls = 0
+
+    def _finalize_execution_artifacts(self):
+        directory = self.artifact_dir / "executions" / f"execution-{self._execution_index:06d}"
+        directory.mkdir(parents=True, exist_ok=True)
+        trace_path = directory / "trace.json"
+        trace_path.write_text(json.dumps(self.trace, indent=2, default=str) + "\n")
+        video_path = directory / "rollout.mp4"
+        if self.video:
+            h, w = self.video[0].shape[:2]
+            writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 20, (w, h))
+            for frame in self.video:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
+        self._execution_artifacts = {"trace_path": str(trace_path),
+                                     "rollout_path": str(video_path)}
+
+    def reset_case(self):
+        if self.closed:
+            raise LiberoDeploymentError("deployment closed")
+        self.env.reset()
+        self.obs = self.env.set_init_state(self._init_states[self.episode.initial_state_index])
+        self.environment_generation = uuid.uuid4().hex
+        self.step = 0; self.frame = 0; self.trace = []; self.video = []
+        self.references = {}; self.last_verify = False
+        self._controller_execution_sealed = False; self._evaluator_calls = 0
+        self._outcome_report = None; self._outcome_after = None
+        return self.initial_observation()
 
     def resume_protocol(self):
         # A fresh simulator instance does not preserve physical state across a
@@ -248,7 +294,8 @@ class LiberoDeployment:
         if self.step%3==0:self.video.append(np.ascontiguousarray(self.obs["agentview_image"][::-1]))
 
     def _capture_outcome_rgb(self, name):
-        folder=self.artifact_dir/"outcome";folder.mkdir(parents=True,exist_ok=True)
+        folder=self.artifact_dir/"executions"/f"execution-{self._execution_index:06d}" if self._execution_index else self.artifact_dir/"outcome"
+        folder.mkdir(parents=True,exist_ok=True)
         external=np.ascontiguousarray(self.obs["agentview_image"][::-1])
         wrist=np.ascontiguousarray(self.obs["robot0_eye_in_hand_image"][::-1])
         if wrist.shape[:2]!=external.shape[:2]:
@@ -455,6 +502,7 @@ class LiberoDeployment:
                 self.trace.append({"event":"independent_task_outcome_verify",
                                    "result":self._outcome_report})
             independent=bool(self._outcome_report.get("verified"))
+        self._finalize_execution_artifacts()
         return {"sensor_verification_passed":bool(self.last_verify and independent),
                 "controller_visual_verification_passed":bool(self.last_verify),
                 "independent_task_outcome":self._outcome_report,
@@ -465,8 +513,8 @@ class LiberoDeployment:
                 "outcome_observations":{"before":self._outcome_before,
                     "after":self._outcome_after},
                 "final_step":self.step,
-                "final_proprioception":self._proprio(),"trace_path":str(self.artifact_dir/"adapter_trace.json"),
-                "rollout_path":str(self.artifact_dir/"rollout.mp4"),"benchmark_signal_exposed":False,
+                "final_proprioception":self._proprio(),"trace_path":self._execution_artifacts.get("trace_path"),
+                "rollout_path":self._execution_artifacts.get("rollout_path"),"benchmark_signal_exposed":False,
                 # Consumed only by the Harness generalization gate.  Keys
                 # prefixed with _harness_ are removed from model evidence.
                 "_harness_case_id":self.episode.case_handle}
@@ -509,6 +557,9 @@ class LiberoDeployment:
             raise LiberoDeploymentError("evaluator already consumed")
         self._evaluator_calls=1
         return bool(self.env.check_success())
+
+    def hidden_evaluator(self, execution=None):
+        return self._sealed_check_once()
 
     def close(self):
         if self.closed:return

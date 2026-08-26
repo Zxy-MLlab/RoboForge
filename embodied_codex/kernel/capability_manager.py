@@ -404,8 +404,22 @@ class CapabilityManager:
                                           require_current_controller=True)
         if not evidence:
             raise CapabilityError("Skill requires successful Adapter evidence for the frozen Controller")
-        tested = {item["tool_id"] for item in self.tool_library.tested()} \
-            if self.tool_library is not None else set()
+        observed = set()
+        for record in evidence:
+            try:
+                execution = json.loads(Path(record["path"]).read_text()).get("execution") or {}
+                for event in execution.get("rpc_events") or []:
+                    if event.get("method") == "use":
+                        tool_id = (event.get("arguments") or {}).get("tool_id")
+                        if tool_id:
+                            observed.add(str(tool_id))
+            except (OSError, json.JSONDecodeError):
+                continue
+        declared = set(values.get("tool_ids") or [])
+        if observed and declared != observed:
+            raise CapabilityError(f"Skill Tool dependency declaration differs from execution evidence: declared={sorted(declared)}, observed={sorted(observed)}")
+        values["tool_ids"] = sorted(declared or observed)
+        tested = {item["tool_id"] for item in self.tool_library.tested()} if self.tool_library is not None else set()
         missing = set(values.get("tool_ids") or []) - tested
         if missing:
             raise CapabilityError(f"Skill references untested Tools: {sorted(missing)}")
@@ -454,6 +468,8 @@ class CapabilityManager:
         if not evidence:
             raise CapabilityError("Experience requires authentic evidence")
         values["outcome"] = str(values.get("outcome") or "mixed")
+        if values["outcome"] not in {"success", "failure", "mixed"}:
+            raise CapabilityError("Experience outcome must be success, failure, or mixed")
         return self.experience_library.register(**values)
 
     def promote_asset(self, asset_id: str, evidence_paths: list[str],
@@ -478,12 +494,22 @@ class CapabilityManager:
         if library is None:
             raise CapabilityError(f"unknown promotable asset: {asset_id}")
         if library is self.tool_library:
-            used = any(any(event.get("method") == "use"
-                and (event.get("arguments") or {}).get("tool_id") == asset_id
-                for event in (json.loads(Path(row["path"]).read_text()).get("execution", {})
-                              .get("rpc_events", []))) for row in evidence)
-            if not used:
-                raise CapabilityError("Tool promotion evidence does not contain robot.use()")
+            integration_ok = False
+            for row in evidence:
+                try:
+                    execution = json.loads(Path(row["path"]).read_text()).get("execution", {})
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if execution.get("completed") is not True or execution.get("error"):
+                    continue
+                for event in execution.get("rpc_events", []):
+                    if (event.get("method") == "use"
+                            and (event.get("arguments") or {}).get("tool_id") == asset_id
+                            and not (event.get("result") or {}).get("tool_error")):
+                        integration_ok = True
+                        break
+            if not integration_ok:
+                raise CapabilityError("Tool promotion requires a successful robot.use() integration evidence")
         return library.promote(asset_id, evidence=evidence,
                                applicability=applicability)
 
