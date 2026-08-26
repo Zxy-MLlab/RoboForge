@@ -3,7 +3,10 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 python_bin=${PYTHON:-python}
-vendor_root=${ROBOFORGE_VENDOR_ROOT:-"$repo_root/third_party"}
+data_home=${XDG_DATA_HOME:-"${HOME:?HOME is required}/.local/share"}
+config_home=${XDG_CONFIG_HOME:-"${HOME:?HOME is required}/.config"}
+vendor_root=${ROBOFORGE_VENDOR_ROOT:-"$data_home/roboforge/vendor"}
+vendor_config=${ROBOFORGE_LIBERO_VENDOR_CONFIG:-"$config_home/roboforge/libero_vendor.json"}
 
 clone_at() {
     local url=$1
@@ -31,11 +34,38 @@ clone_at https://github.com/facebookresearch/segment-anything.git \
 clone_at https://github.com/graspnet/graspnet-baseline.git \
     280c215129f759ed8649cb4e89fc5dfee55f4f80 "$vendor_root/graspnet-baseline"
 
-"$python_bin" -m pip install -e "$vendor_root/GroundingDINO"
+"$python_bin" -m pip install --no-build-isolation -e "$vendor_root/GroundingDINO"
 "$python_bin" -m pip install -e "$vendor_root/segment-anything"
 "$python_bin" -m pip install -r "$vendor_root/graspnet-baseline/requirements.txt"
-"$python_bin" -m pip install -e "$vendor_root/graspnet-baseline/knn"
-"$python_bin" -m pip install -e "$vendor_root/graspnet-baseline/pointnet2"
+mkdir -p "$vendor_root/graspnet-baseline/knn/knn_pytorch"
+touch "$vendor_root/graspnet-baseline/knn/knn_pytorch/__init__.py"
+"$python_bin" -m pip install --no-build-isolation -e "$vendor_root/graspnet-baseline/knn"
+mkdir -p "$vendor_root/graspnet-baseline/pointnet2/pointnet2"
+touch "$vendor_root/graspnet-baseline/pointnet2/pointnet2/__init__.py"
+"$python_bin" -m pip install --no-build-isolation -e "$vendor_root/graspnet-baseline/pointnet2"
+
+mkdir -p "$(dirname "$vendor_config")"
+"$python_bin" - "$vendor_config" "$vendor_root" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+target = Path(sys.argv[1]).expanduser().resolve()
+vendor = Path(sys.argv[2]).expanduser().resolve()
+payload = {"protocol": "roboforge-libero-vendor-v1", "sources": {
+    "groundingdino": str(vendor / "GroundingDINO"),
+    "segment_anything": str(vendor / "segment-anything"),
+    "graspnet": str(vendor / "graspnet-baseline"),
+}}
+temporary = target.with_suffix(target.suffix + ".tmp")
+with temporary.open("w") as stream:
+    json.dump(payload, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, target)
+PY
 
 cat <<EOF
 Pinned LIBERO source and optional perception sources installed. The package uses
@@ -44,4 +74,5 @@ metadata is not consistently installable by pip.
 ROBOFORGE_GROUNDINGDINO_ROOT=$vendor_root/GroundingDINO
 ROBOFORGE_SAM_ROOT=$vendor_root/segment-anything
 ROBOFORGE_GRASPNET_ROOT=$vendor_root/graspnet-baseline
+ROBOFORGE_LIBERO_VENDOR_CONFIG=$vendor_config
 EOF

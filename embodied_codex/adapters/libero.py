@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -64,6 +65,35 @@ def _sdk_index(capabilities, verifiers, contracts=None):
 
 def _path(env_name: str, default: str) -> Path:
     return Path(os.environ.get(env_name, default)).expanduser().resolve()
+
+
+def _vendor_configuration() -> dict[str, str]:
+    configured = os.environ.get("ROBOFORGE_LIBERO_VENDOR_CONFIG")
+    if configured:
+        path = Path(configured).expanduser().resolve()
+    else:
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME",
+            str(Path.home() / ".config"))).expanduser().resolve()
+        path = config_home / "roboforge" / "libero_vendor.json"
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid LIBERO vendor configuration: {path}") from exc
+    if not isinstance(value, dict) or value.get("protocol") != "roboforge-libero-vendor-v1":
+        raise RuntimeError(f"unsupported LIBERO vendor configuration: {path}")
+    sources = value.get("sources")
+    if not isinstance(sources, dict) or not all(isinstance(key, str)
+            and isinstance(item, str) for key, item in sources.items()):
+        raise RuntimeError(f"invalid LIBERO vendor source map: {path}")
+    return dict(sources)
+
+
+def _configured_path(environment: str, key: str, default: Path,
+                     configuration: dict[str, str]) -> Path:
+    value = os.environ.get(environment) or configuration.get(key) or str(default)
+    return Path(value).expanduser().resolve()
 
 
 def _array(item, length: int | None = None):
@@ -183,11 +213,13 @@ def _sha256(path: Path):
 
 def _paths():
     package_root = Path(__file__).resolve().parents[2]
-    dino_root = _path("ROBOFORGE_GROUNDINGDINO_ROOT",
-                      str(package_root / "third_party/GroundingDINO"))
-    sam_root = _path("ROBOFORGE_SAM_ROOT", str(package_root / "third_party/segment-anything"))
-    grasp_root = _path("ROBOFORGE_GRASPNET_ROOT",
-                       str(package_root / "third_party/graspnet-baseline"))
+    configuration = _vendor_configuration()
+    dino_root = _configured_path("ROBOFORGE_GROUNDINGDINO_ROOT", "groundingdino",
+                                 package_root / "third_party/GroundingDINO", configuration)
+    sam_root = _configured_path("ROBOFORGE_SAM_ROOT", "segment_anything",
+                                package_root / "third_party/segment-anything", configuration)
+    grasp_root = _configured_path("ROBOFORGE_GRASPNET_ROOT", "graspnet",
+                                  package_root / "third_party/graspnet-baseline", configuration)
     return {"package_root": package_root, "groundingdino_root": dino_root,
         "groundingdino_config": _path("ROBOFORGE_GROUNDINGDINO_CONFIG",
             str(dino_root / "groundingdino/config/GroundingDINO_SwinT_OGC.py")),

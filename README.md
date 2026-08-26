@@ -42,7 +42,15 @@ doctor/run 中传入 `--provider openai` 或 `--provider apex`；内置 provider
 endpoint。
 
 LIBERO 是 optional Adapter。安装脚本固定 LIBERO、GroundingDINO、SAM 和 GraspNet
-上游 revision；checkpoint 下载脚本在原子替换前校验 SHA256：
+上游 revision，并把源码安装到普通用户的数据目录；生成的
+`~/.config/roboforge/libero_vendor.json` 会由 Adapter 自动读取。checkpoint 下载脚本在
+原子替换前校验 SHA256。只安装 Python optional dependencies 可以执行：
+
+```bash
+python -m pip install -e ".[libero]"
+```
+
+完整安装和验证执行：
 
 ```bash
 bash scripts/install_libero.sh
@@ -89,15 +97,6 @@ checkpoint、events 和 evidence 不直接暴露为可写目标。
 `--sandbox bubblewrap` 是探测成功后才可选择的 namespace 增强项，不是依赖。只有
 `--profile dev --sandbox unsafe` 能显式使用无 syscall 隔离的调试模式；autonomous 和
 benchmark 会拒绝 unsafe backend。
-
-可复现的容器入口使用同一个 `auto` backend。容器宿主机必须提供 Landlock，或允许镜像
-内显式安装并探测通过 bubblewrap；Docker 本身不能替代 Controller 子进程的隔离探测：
-
-```bash
-docker build -t roboforge:0.5.0 .
-docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=512m \
-  -v "$PWD/runs:/runs" -v "$PWD/assets:/assets" roboforge:0.5.0
-```
 
 RPC 使用正向字段投影和严格 JSON 校验。Tool 版本以 SHA256 标识且不可变，调用前后执行
 JSON Schema。Workspace 事务、事件日志和执行快照支持幂等提交与中断恢复。Adapter 负责

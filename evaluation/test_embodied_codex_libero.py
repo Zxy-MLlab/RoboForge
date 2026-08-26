@@ -31,6 +31,43 @@ def test_libero_sdk_index_exposes_machine_action_and_verifier_contracts():
         "type": "object", "required": [], "fields": []}
 
 
+def test_libero_vendor_configuration_is_portable_and_environment_overrides(monkeypatch,
+                                                                            tmp_path):
+    from embodied_codex.adapters.libero import _paths
+
+    vendor = tmp_path / "vendor"
+    config = tmp_path / "config/libero_vendor.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"protocol": "roboforge-libero-vendor-v1",
+        "sources": {"groundingdino": str(vendor / "dino"),
+                    "segment_anything": str(vendor / "sam"),
+                    "graspnet": str(vendor / "grasp")}}))
+    monkeypatch.setenv("ROBOFORGE_LIBERO_VENDOR_CONFIG", str(config))
+    for name in ("ROBOFORGE_GROUNDINGDINO_ROOT", "ROBOFORGE_SAM_ROOT",
+                 "ROBOFORGE_GRASPNET_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    paths = _paths()
+    assert paths["groundingdino_root"] == (vendor / "dino").resolve()
+    assert paths["sam_root"] == (vendor / "sam").resolve()
+    assert paths["graspnet_root"] == (vendor / "grasp").resolve()
+
+    override = tmp_path / "override"
+    monkeypatch.setenv("ROBOFORGE_GROUNDINGDINO_ROOT", str(override))
+    assert _paths()["groundingdino_root"] == override.resolve()
+
+
+def test_libero_installer_builds_torch_extensions_in_host_environment():
+    installer = (Path(__file__).parents[1] / "scripts/install_libero.sh").read_text()
+    for relative in ("GroundingDINO", "graspnet-baseline/knn",
+                     "graspnet-baseline/pointnet2"):
+        assert (f'pip install --no-build-isolation -e "$vendor_root/{relative}"'
+                in installer)
+    assert 'mkdir -p "$vendor_root/graspnet-baseline/knn/knn_pytorch"' in installer
+    assert 'mkdir -p "$vendor_root/graspnet-baseline/pointnet2/pointnet2"' in installer
+    metadata = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    assert '"numpy<2"' in metadata
+
+
 def test_anti_cheating_audits_deduplicated_execution_artifact(tmp_path):
     from embodied_codex.kernel.events import EventStore
     from evaluation.anti_cheating import AntiCheatingPolicy
