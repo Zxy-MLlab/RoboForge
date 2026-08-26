@@ -281,6 +281,70 @@ def test_libero_hidden_evaluator_reads_env_success_only_after_seal():
     assert deployment.hidden_evaluator() is True
 
 
+def test_libero_verify_exception_diagnostic_is_projectable_and_blind(tmp_path):
+    from embodied_codex.deployments.libero import LiberoDeployment
+
+    deployment = LiberoDeployment.__new__(LiberoDeployment)
+    deployment.closed = False
+    deployment._controller_execution_sealed = False
+    deployment.references = {"artifact://source": {"world_xyz": [0.0, 0.0, 0.0]}}
+    deployment.verifiers = {
+        "visual_attachment": lambda payload: (_ for _ in ()).throw(
+            RuntimeError("synthetic verifier failure"))
+    }
+    deployment.verified_attachments = set()
+    deployment.trace = []
+    deployment.step = 3
+    deployment.last_verify = False
+
+    raw = deployment.dispatch("verify", {
+        "verifier": "visual_attachment",
+        "payload": {
+            "frame": {"frame_id": "frame-1", "cameras": {}},
+            "object_query": "object",
+            "source_ref": "artifact://source",
+        },
+    })
+    projected = deployment.project_rpc_output("verify", {}, raw)
+
+    assert projected["verified"] is False
+    assert projected["sensor_only"] is True
+    assert projected["verifier_error"] == {
+        "type": "RuntimeError", "message": "synthetic verifier failure"}
+    assert not {"reward", "done", "hidden_evaluator", "check_success"} & set(projected)
+
+
+def test_libero_verify_projection_rejects_undeclared_fields_and_never_evaluates_hidden_state():
+    from embodied_codex.deployments.libero import LiberoDeployment, LiberoDeploymentError
+
+    deployment = LiberoDeployment.__new__(LiberoDeployment)
+    deployment.closed = False
+    deployment._controller_execution_sealed = False
+    deployment.references = {"artifact://source": {"world_xyz": [0.0, 0.0, 0.0]}}
+    deployment.verifiers = {"visual_attachment": lambda payload: {"verified": True}}
+    deployment.verified_attachments = set()
+    deployment.trace = []
+    deployment.step = 3
+    deployment.last_verify = False
+    class Env:
+        def check_success(self):
+            raise AssertionError("hidden evaluator must not run during verify")
+    deployment.env = Env()
+
+    raw = deployment.dispatch("verify", {
+        "verifier": "visual_attachment",
+        "payload": {
+            "frame": {"frame_id": "frame-1", "cameras": {}},
+            "object_query": "object",
+            "source_ref": "artifact://source",
+        },
+    })
+    projected = deployment.project_rpc_output("verify", {}, raw)
+    assert projected == {"verified": True}
+    with pytest.raises(LiberoDeploymentError, match="undeclared verify output fields"):
+        deployment.project_rpc_output("verify", {}, {"verified": False, "unexpected": True})
+
+
 def test_reset_observation_is_registered_as_opaque_agent_artifact(tmp_path):
     image = tmp_path / "adapter" / "fresh.png"; image.parent.mkdir(); image.write_bytes(b"png")
     class Adapter:
