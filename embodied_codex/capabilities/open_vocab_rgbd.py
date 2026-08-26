@@ -25,17 +25,20 @@ class OpenVocabularyRGBD:
     def __init__(
         self, *, groundingdino_root: str | Path,
         groundingdino_config: str | Path, groundingdino_checkpoint: str | Path,
+        groundingdino_text_encoder: str | Path,
         sam_root: str | Path, sam_checkpoint: str | Path,
         device: str = "cuda:0",
     ) -> None:
         self.groundingdino_root = Path(groundingdino_root).resolve()
         self.groundingdino_config = Path(groundingdino_config).resolve()
         self.groundingdino_checkpoint = Path(groundingdino_checkpoint).resolve()
+        self.groundingdino_text_encoder = Path(groundingdino_text_encoder).resolve()
         self.sam_root = Path(sam_root).resolve()
         self.sam_checkpoint = Path(sam_checkpoint).resolve()
         for path in (
             self.groundingdino_root, self.groundingdino_config,
-            self.groundingdino_checkpoint, self.sam_root, self.sam_checkpoint,
+            self.groundingdino_checkpoint, self.groundingdino_text_encoder,
+            self.sam_root, self.sam_checkpoint,
         ):
             if not path.exists(): raise FileNotFoundError(path)
         self.device = device
@@ -110,6 +113,7 @@ class OpenVocabularyRGBD:
         from groundingdino.util.slconfig import SLConfig
         configuration = SLConfig.fromfile(str(self.groundingdino_config))
         configuration.device = self.device
+        configuration.text_encoder_type = str(self.groundingdino_text_encoder)
         model = build_model(configuration)
         checkpoint = torch.load(str(self.groundingdino_checkpoint), map_location="cpu")
         model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)

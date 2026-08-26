@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from embodied_codex.adapters.factory import adapter_preflight
+from embodied_codex.adapters.libero import _sdk_index
 from embodied_codex.capabilities.graspnet_rgbd import GraspNetRGBD
 from embodied_codex.fake_adapter import FakeAdapter
 from embodied_codex.kernel.agent_loop import AgentLoop, LoopBudget, ProtocolError
@@ -29,6 +30,12 @@ class FinishModel:
     def decide(self, *, messages, tools):
         return {"content": "", "tool_calls": [{"id": "finish", "name": "finish",
             "arguments": json.dumps({"summary": "model says success"})}]}
+
+
+def test_libero_sdk_index_preserves_canonical_method_signatures():
+    index = _sdk_index({}, {})
+    assert index["methods"]["use"]["signature"] == "robot.use(tool_id, payload)"
+    assert index["methods"]["verify"]["signature"] == "robot.verify(verifier, payload)"
 
 
 def loop_at(tmp_path, adapter, model=None, *, resume=False, steps=2):
@@ -392,6 +399,8 @@ def test_libero_preflight_reports_structured_missing_runtime(monkeypatch, tmp_pa
     monkeypatch.setenv("ROBOFORGE_GROUNDINGDINO_ROOT", str(missing / "dino"))
     monkeypatch.setenv("ROBOFORGE_SAM_ROOT", str(missing / "sam"))
     monkeypatch.setenv("ROBOFORGE_GRASPNET_ROOT", str(missing / "graspnet"))
+    monkeypatch.setenv("ROBOFORGE_GROUNDINGDINO_TEXT_ENCODER",
+                       str(missing / "bert-base-uncased"))
     monkeypatch.setenv("ROBOFORGE_GROUNDINGDINO_CHECKPOINT", str(missing / "dino.pth"))
     monkeypatch.setenv("ROBOFORGE_SAM_CHECKPOINT", str(missing / "sam.pth"))
     monkeypatch.setenv("ROBOFORGE_GRASPNET_CHECKPOINT", str(missing / "graspnet.tar"))
@@ -402,6 +411,17 @@ def test_libero_preflight_reports_structured_missing_runtime(monkeypatch, tmp_pa
     assert all(item["valid"] is False for item in report["checkpoints"].values())
     assert all(value is False for value in report["sources"].values())
     assert report["accelerator"] == {"requested": "cpu", "available": True}
+
+
+def test_libero_preflight_requires_verified_local_text_encoder(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBOFORGE_DEVICE", "cpu")
+    monkeypatch.setenv("ROBOFORGE_GROUNDINGDINO_TEXT_ENCODER",
+                       str(tmp_path / "missing-bert"))
+    report = adapter_preflight("libero")
+    text_encoder = report["checkpoints"]["groundingdino_text_encoder"]
+    assert text_encoder["available"] is False
+    assert text_encoder["valid"] is False
+    assert report["ok"] is False
 
 
 def test_graspnet_wrapper_passes_external_source_root_to_real_backend(tmp_path):

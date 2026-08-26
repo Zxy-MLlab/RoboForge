@@ -24,6 +24,14 @@ _CHECKPOINT_SHA256 = {
     "graspnet": "60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868",
 }
 
+_TEXT_ENCODER_SHA256 = {
+    "config.json": "7160e1553ad2ca51d8c1cb066be533db31826e12d173824c1bb0cb1a4f187d20",
+    "pytorch_model.bin": "097417381d6c7230bd9e3557456d726de6e83245ec8b24f529f60198a67b203a",
+    "tokenizer.json": "ce64fce797c24f68df90b40a3f74f579b336a493db14bd583fd520ea0d8c9a98",
+    "tokenizer_config.json": "a025160ef0431f1a392f6f050c1310f4c5d9fb6f275932dbccba73c4d214bf10",
+    "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+}
+
 
 def _sdk_index(capabilities, verifiers, contracts=None):
     """Return the bounded SDK index needed to form valid RPC requests.
@@ -42,6 +50,7 @@ def _sdk_index(capabilities, verifiers, contracts=None):
     return {
         "protocol": "embodied-codex-libero-robot-sdk-v1",
         "operations": ["observe", "use", "act", "verify", "record"],
+        "methods": LIBERO_ROBOT_SDK_CONTRACT["methods"],
         "action_contracts": {
             name: {key: value for key, value in contract.items()
                    if key in {"required", "any_of", "enum", "optional", "field_semantics",
@@ -220,11 +229,15 @@ def _paths():
                                 package_root / "third_party/segment-anything", configuration)
     grasp_root = _configured_path("ROBOFORGE_GRASPNET_ROOT", "graspnet",
                                   package_root / "third_party/graspnet-baseline", configuration)
+    text_encoder = _configured_path("ROBOFORGE_GROUNDINGDINO_TEXT_ENCODER",
+        "groundingdino_text_encoder", dino_root.parent / "bert-base-uncased",
+        configuration)
     return {"package_root": package_root, "groundingdino_root": dino_root,
         "groundingdino_config": _path("ROBOFORGE_GROUNDINGDINO_CONFIG",
             str(dino_root / "groundingdino/config/GroundingDINO_SwinT_OGC.py")),
         "groundingdino_checkpoint": _path("ROBOFORGE_GROUNDINGDINO_CHECKPOINT",
             str(package_root / "checkpoints/groundingdino_swint_ogc.pth")),
+        "groundingdino_text_encoder": text_encoder,
         "sam_root": sam_root, "sam_checkpoint": _path("ROBOFORGE_SAM_CHECKPOINT",
             str(package_root / "checkpoints/sam_vit_b_01ec64.pth")),
         "graspnet_root": grasp_root, "graspnet_checkpoint": _path(
@@ -252,6 +265,19 @@ def doctor_checks():
         checkpoints[name] = {"path": str(path), "available": path.is_file(),
             "sha256": actual, "expected_sha256": _CHECKPOINT_SHA256[name],
             "valid": actual == _CHECKPOINT_SHA256[name]}
+    text_encoder = paths["groundingdino_text_encoder"]
+    encoder_files = {}
+    for name, expected in _TEXT_ENCODER_SHA256.items():
+        path = text_encoder / name
+        actual = _sha256(path) if path.is_file() else None
+        encoder_files[name] = {"available": path.is_file(), "sha256": actual,
+                               "expected_sha256": expected, "valid": actual == expected}
+    checkpoints["groundingdino_text_encoder"] = {
+        "path": str(text_encoder),
+        "available": all(item["available"] for item in encoder_files.values()),
+        "valid": all(item["valid"] for item in encoder_files.values()),
+        "files": encoder_files,
+    }
     device = os.environ.get("ROBOFORGE_DEVICE", "cuda")
     accelerator = {"requested": device, "available": True}
     if device.startswith("cuda") and modules["torch"]:
@@ -275,6 +301,7 @@ def create(*, task: str, state: int = 0, root: str | Path,
     perception = OpenVocabularyRGBD(groundingdino_root=paths["groundingdino_root"],
         groundingdino_config=paths["groundingdino_config"],
         groundingdino_checkpoint=paths["groundingdino_checkpoint"],
+        groundingdino_text_encoder=paths["groundingdino_text_encoder"],
         sam_root=paths["sam_root"], sam_checkpoint=paths["sam_checkpoint"],
         device=os.environ.get("ROBOFORGE_DEVICE", "cuda"))
     grasp = GraspNetRGBD(backend_script=package_root / "embodied_codex/capabilities/graspnet_backend.py",
