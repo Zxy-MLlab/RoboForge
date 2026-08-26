@@ -471,6 +471,19 @@ class LiberoDeployment:
                 # prefixed with _harness_ are removed from model evidence.
                 "_harness_case_id":self.episode.case_handle}
 
+    def agent_evidence(self, execution, sensor_report):
+        """Project diagnostic sensor artifacts without evaluator/Harness truth."""
+        outcome = sensor_report.get("independent_task_outcome")
+        verifier_diagnostic = None
+        if isinstance(outcome, Mapping) and outcome.get("error"):
+            verifier_diagnostic = {"error": str(outcome["error"])[:1000]}
+        return {"outcome_observations": sensor_report.get("outcome_observations"),
+                "final_step": sensor_report.get("final_step"),
+                "final_proprioception": sensor_report.get("final_proprioception"),
+                "trace_path": sensor_report.get("trace_path"),
+                "rollout_path": sensor_report.get("rollout_path"),
+                "verifier_diagnostic": verifier_diagnostic}
+
     def verification_receipt(self, execution):
         report=self.sensor_report(execution)
         return {"verified":bool(execution.get("completed") is True

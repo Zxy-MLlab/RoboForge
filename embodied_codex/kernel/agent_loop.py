@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from .capability_manager import CapabilityManager
 from .context import ContextBuilder
 from .context_window import ContextWindowManager
+from .evidence import AgentEvidence, HarnessMetadata
 from .events import EventStore
 from .recovery import load_checkpoint, save_checkpoint
 from .tools import ToolRegistry
@@ -47,7 +48,7 @@ class AgentLoop:
                  context_builder: ContextBuilder, capability_manager: CapabilityManager,
                  runtime: Any = None, event_store: EventStore | None = None,
                  budget: LoopBudget | None = None, root: str | Path | None = None,
-                 web_search: Any = None, policies: list[Any] | None = None,
+                 web_search: Any = None,
                  resume: bool = True,
                  context_window: ContextWindowManager | None = None,
                  max_evidence_bytes: int = 20 * 1024 * 1024 * 1024):
@@ -56,8 +57,9 @@ class AgentLoop:
         self.runtime = runtime; self.root = Path(root or workspace.root.parent).resolve()
         self.event_store = event_store or EventStore(self.root / "events", protect=True)
         self.budget = budget or LoopBudget()
-        self.web_search = web_search; self.policies = list(policies or [])
+        self.web_search = web_search
         self.latest_evidence = None; self.retrieved_assets = None; self.messages: list[dict[str, Any]] = []
+        self._agent_latest_evidence: dict[str, Any] | None = None
         self.context_window = context_window or ContextWindowManager()
         self.max_context_chars = self.context_window.max_message_chars
         self.max_tool_result_chars = self.context_window.max_tool_result_chars
@@ -72,6 +74,9 @@ class AgentLoop:
         self.research_state: dict[str, Any] = {"summary": "", "attempts": []}
         self.state: dict[str, Any] = {"finished": False, "last_tool_call": None,
                                       "completion_valid": False, "successful_cases": 0}
+        restored_tool_groups: list[str] = []
+        restored_tool_bindings: list[str] = []
+        restored_case: str | None = None
         if resume:
             checkpoint = load_checkpoint(self.root)
             if checkpoint:
@@ -90,8 +95,24 @@ class AgentLoop:
                 if checkpoint.get("snapshot_id"):
                     self.workspace.restore(checkpoint["snapshot_id"])
                 self.retrieved_assets = checkpoint.get("retrieved_assets")
+                restored_tool_groups = [str(item) for item in
+                                        checkpoint.get("active_tool_groups") or []]
+                restored_tool_bindings = [str(item) for item in
+                                          checkpoint.get("active_shared_tools") or []]
+                restored_case = (str(checkpoint["selected_case"])
+                                 if checkpoint.get("selected_case") is not None else None)
+        if restored_case is not None:
+            selector = getattr(self.adapter, "select", None)
+            if callable(selector):
+                selector(restored_case)
         self.tools = self._build_tools()
+        for group in restored_tool_groups:
+            if group != "core":
+                self.tools.activate(group)
+        for tool_id in restored_tool_bindings:
+            self.capability_manager.restore_tool_binding(tool_id)
         if self.latest_evidence is not None:
+            self._agent_latest_evidence = self._agent_evidence(self.latest_evidence)
             protocol = self._resume_protocol()
             identity = self._execution_identity()
             validator = getattr(self.adapter, "validate_execution_receipt", None)
@@ -136,21 +157,23 @@ class AgentLoop:
                 "artifact_sha256": value["artifact_sha256"]}
 
     def _evidence_reference(self, evidence: Mapping[str, Any]) -> dict[str, Any]:
-        summary = self.context_builder._evidence_summary(evidence)
+        summary = self._agent_evidence(evidence)
         encoded_summary = json.dumps(summary, sort_keys=True, default=str)
         if len(encoded_summary) > self.context_window.budgets.max_evidence_chars:
             summary = {"truncated": True,
                        "original_chars": len(encoded_summary),
                        "sha256": hashlib.sha256(encoded_summary.encode()).hexdigest(),
                        "preview": encoded_summary[:8000]}
-        return {"artifact_uri": evidence.get("artifact_uri"),
-                "artifact_sha256": evidence.get("artifact_sha256"),
-                "controller_sha256": evidence.get("controller_sha256"),
-                "execution_key": evidence.get("execution_key"),
-                "environment_identity": evidence.get("environment_identity"),
-                "verification_receipt": evidence.get("verification_receipt"),
-                "resume_token": evidence.get("resume_token"),
-                "summary": summary}
+        return HarnessMetadata.from_evidence(evidence).as_reference(summary=summary)
+
+    def _agent_evidence(self, evidence: Mapping[str, Any]) -> dict[str, Any]:
+        value = evidence.get("agent_evidence")
+        if isinstance(value, Mapping):
+            return self.context_builder._evidence_summary(value)
+        execution = evidence.get("execution") if isinstance(evidence.get("execution"), Mapping) else {}
+        # Legacy evidence has no explicit public projection. Expose execution
+        # status only; never infer public diagnostics from internal reports.
+        return AgentEvidence.from_execution(execution).as_dict()
 
     @staticmethod
     def _bound_research_state(value: Any) -> dict[str, Any]:
@@ -172,6 +195,12 @@ class AgentLoop:
 
     def _build_tools(self):
         registry = ToolRegistry(); ws = self.workspace; cap = self.capability_manager
+        registry.declare_group("source_inspection",
+            "Selective Tool implementation inspection after reading its manual and schema.")
+        registry.declare_group("web_acquisition",
+            "Public web search, verified download, safe unpack, and isolated build tools.")
+        registry.declare_group("asset_authoring",
+            "Register, test, revise, promote, and persist Tool/Skill/Experience/Gap assets.")
         string = {"type": "string", "minLength": 1}; integer = {"type": "integer"}
         schema_document = {"type": "object", "properties": {
             "type": {"type": "string"}, "properties": {"type": "object"},
@@ -222,6 +251,12 @@ class AgentLoop:
             "platform": platform_runtime_schema, "cuda": cuda_runtime_schema},
             "required": ["python", "dependencies", "accelerator", "platform"],
             "additionalProperties": False}
+        registry.add("list_tool_groups", "List optional Tool groups without loading their schemas.",
+                     self._schema(), registry.group_index)
+        registry.add("activate_tool_group", "Explicitly activate one optional Tool schema group.",
+                     self._schema({"group": {"type": "string", "enum": [
+                         "source_inspection", "web_acquisition", "asset_authoring"]}}, ["group"]),
+                     registry.activate)
         registry.add("list_files", "List files in the persistent workspace.", self._schema({"pattern": string}),
                      lambda pattern="**/*": ws.list_files(pattern))
         registry.add("read_file", "Read a bounded line range from a workspace file.", self._schema(
@@ -238,15 +273,26 @@ class AgentLoop:
         registry.add("search_assets", "Search promoted shared Tool, Skill and Experience summaries.", self._schema(
             {"query": string, "limit": integer, "include_gaps": {"type": "boolean"}}, ["query"]), cap.search)
         registry.add("inspect_asset", "Load selected asset manual/contract detail.", self._schema({"asset_id": string}, ["asset_id"]), cap.inspect)
-        registry.add("load_tool_source", "Explicitly load a Tool implementation after manual inspection.", self._schema({"tool_id": string}, ["tool_id"]), cap.load_tool_source)
-        registry.add("search_web", "Search public web sources for a capability.", self._schema({"query": string, "limit": integer}, ["query"]), cap.web_search)
-        registry.add("fetch_web_page", "Open one HTTPS public page.", self._schema({"url": string, "max_chars": integer}, ["url"]), cap.fetch_page)
+        registry.add("activate_shared_tool", "Bind one inspected promoted Tool to the current Adapter.",
+                     self._schema({"tool_id": string}, ["tool_id"]), cap.activate_tool)
+        registry.add("load_tool_source", "Explicitly load a Tool implementation after manual inspection.",
+                     self._schema({"tool_id": string}, ["tool_id"]), cap.load_tool_source,
+                     group="source_inspection")
+        registry.add("search_web", "Search public web sources for a capability.",
+                     self._schema({"query": string, "limit": integer}, ["query"]),
+                     cap.web_search, group="web_acquisition")
+        registry.add("fetch_web_page", "Open one HTTPS public page.",
+                     self._schema({"url": string, "max_chars": integer}, ["url"]),
+                     cap.fetch_page, group="web_acquisition")
         registry.add("download_public_asset", "Download one HTTPS asset into the workspace with optional SHA256.", self._schema(
-            {"url": string, "filename": string, "sha256": string}, ["url", "filename"]), cap.download)
+            {"url": string, "filename": string, "sha256": string}, ["url", "filename"]),
+            cap.download, group="web_acquisition")
         registry.add("unpack_public_asset", "Safely unpack a downloaded archive inside the workspace.", self._schema(
-            {"path": string, "destination": string}, ["path", "destination"]), cap.unpack)
+            {"path": string, "destination": string}, ["path", "destination"]),
+            cap.unpack, group="web_acquisition")
         registry.add("build_capability", "Build or compile-check an acquired capability bundle in isolation.", self._schema(
-            {"directory": string, "argv": {"type": "array", "items": string}}, ["directory"]), cap.build)
+            {"directory": string, "argv": {"type": "array", "items": string}}, ["directory"]),
+            cap.build, group="web_acquisition")
         tool_schema = self._schema({"name": string, "source_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
             "source_urls": {"type": "array", "items": string},
@@ -264,33 +310,42 @@ class AgentLoop:
             "input_schema": schema_document, "output_schema": schema_document,
             "package_spec": package_spec_schema, "source_urls": {"type": "array", "items": string}},
             ["name", "bundle_path", "description", "input_schema", "output_schema", "package_spec"])
-        registry.add("register_tool", "Register an immutable Tool version; call test_tool before it can be bound.", tool_schema, cap.register_tool)
-        registry.add("register_capability_package", "Register an acquired bundle for isolated execution.", package_schema, cap.register_package)
+        registry.add("register_tool", "Register an immutable Tool version; call test_tool before it can be bound.",
+                     tool_schema, cap.register_tool, group="asset_authoring")
+        registry.add("register_capability_package", "Register an acquired bundle for isolated execution.",
+                     package_schema, cap.register_package, group="asset_authoring")
         registry.add("revise_tool_manual", "Update a Tool manual using explicit execution evidence.", self._schema(
             {"tool_id": string, "manual": manual_schema, "evidence_paths": {"type": "array", "items": string, "minItems": 1}},
-            ["tool_id", "manual", "evidence_paths"]), cap.revise_manual)
+            ["tool_id", "manual", "evidence_paths"]), cap.revise_manual,
+            group="asset_authoring")
         registry.add("test_tool", "Run JSON contract tests against a registered Tool.", self._schema(
-            {"tool_id": string, "cases": {"type": "array", "items": test_case_schema, "minItems": 1}}, ["tool_id", "cases"]), cap.test_tool)
+            {"tool_id": string, "cases": {"type": "array", "items": test_case_schema, "minItems": 1}}, ["tool_id", "cases"]),
+            cap.test_tool, group="asset_authoring")
         registry.add("register_skill", "Persist a successful reusable Skill.", self._schema(
             {"name": string, "task": string, "controller": string, "tool_ids": {"type": "array", "items": string},
              "evidence_paths": {"type": "array", "items": string}, "evidence": {"type": "object"}},
-            ["name", "task", "controller", "tool_ids", "evidence_paths"]), cap.register_skill)
+            ["name", "task", "controller", "tool_ids", "evidence_paths"]), cap.register_skill,
+            group="asset_authoring")
         registry.add("register_experience", "Persist an evidence-backed Experience.", self._schema(
             {"name": string, "summary": string, "applicability": string, "keywords": {"type": "array", "items": string},
              "evidence_paths": {"type": "array", "items": string}},
-            ["name", "summary", "applicability", "evidence_paths"]), cap.register_experience)
+            ["name", "summary", "applicability", "evidence_paths"]), cap.register_experience,
+            group="asset_authoring")
         registry.add("promote_asset", "Promote a verified asset after successful integration evidence.", self._schema(
             {"asset_id": string, "evidence_paths": {"type": "array", "items": string, "minItems": 1},
-             "applicability": {"type": "object"}}, ["asset_id", "evidence_paths"]), cap.promote_asset)
+             "applicability": {"type": "object"}}, ["asset_id", "evidence_paths"]), cap.promote_asset,
+            group="asset_authoring")
         registry.add("record_gap", "Persist an unresolved capability Gap.", self._schema(
             {"name": string, "task": string, "failure_summary": string, "evidence_paths": {"type": "array", "items": string},
              "attempted_methods": {"type": "array", "items": string}, "missing_capability": string,
              "blocked_reason": string, "next_steps": {"type": "array", "items": string}},
             ["name", "task", "failure_summary", "evidence_paths", "attempted_methods",
-             "missing_capability", "blocked_reason", "next_steps"]), cap.record_gap)
-        registry.add("run_controller", "Execute the current controller once and return sensor evidence.", self._schema(), self._run_controller)
+             "missing_capability", "blocked_reason", "next_steps"]), cap.record_gap,
+            group="asset_authoring")
+        registry.add("run_controller", "Execute the current controller once and return sensor evidence.",
+                     self._schema(), lambda: self._agent_evidence(self._run_controller()))
         registry.add("inspect_execution", "Inspect the latest committed execution evidence summary.",
-                     self._schema(), lambda: (self._evidence_reference(self.latest_evidence)
+                     self._schema(), lambda: (self._agent_evidence(self.latest_evidence)
                                               if isinstance(self.latest_evidence, Mapping)
                                               else {}))
         registry.add("view_sensor_artifact", "Read a bounded sensor/evidence artifact path.", self._schema(
@@ -298,7 +353,32 @@ class AgentLoop:
                 "maximum": 20000}, "offset_bytes": {"type": "integer", "minimum": 0}},
             ["path"]), self._view_artifact)
         registry.add("finish", "Finish only after the task is actually verified.", self._schema({"summary": string}, ["summary"]), self._finish)
+        case_ids = getattr(self.adapter, "case_ids", None)
+        selector = getattr(self.adapter, "select", None)
+        if case_ids is not None and callable(selector):
+            registry.add("list_cases", "List model-selectable environment cases.",
+                         self._schema(), self._list_cases)
+            registry.add("select_case", "Select the case used by the next Controller execution.",
+                         self._schema({"case_id": string}, ["case_id"]), self._select_case)
         return registry
+
+    def _list_cases(self):
+        return {"cases": [str(item) for item in getattr(self.adapter, "case_ids", ())],
+                "selected": str(getattr(self.adapter, "active_case", ""))}
+
+    def _select_case(self, case_id: str):
+        selector = getattr(self.adapter, "select", None)
+        if not callable(selector):
+            raise ProtocolError("Adapter does not provide selectable cases")
+        selector(str(case_id))
+        observe = getattr(self.adapter, "initial_observation", None)
+        observation = observe() if callable(observe) else None
+        self.context_builder.initial_observation = observation
+        # Keep full previous evidence for recovery/audit, but remove it from
+        # the replaceable model view after an explicit environment switch.
+        self._agent_latest_evidence = None
+        return {"selected": str(getattr(self.adapter, "active_case", case_id)),
+                "observation": self.context_builder._observation_summary(observation)}
 
     def _view_artifact(self, path: str, max_chars: int = 12000,
                        offset_bytes: int = 0):
@@ -547,12 +627,20 @@ class AgentLoop:
                 candidate = self._load_evidence_reference(payload)
                 candidate = {"reused_committed_execution": True, **candidate}
                 self.latest_evidence = candidate
+                self._agent_latest_evidence = self._agent_evidence(candidate)
                 self.state["restored_evidence_unverified"] = False
                 return candidate
         self.budget.executions += 1
         self.cumulative_executions += 1
         result = self.runtime.execute(self.workspace.controller, self.adapter)
         report = self.adapter.sensor_report(result)
+        public_provider = getattr(self.adapter, "agent_evidence", None)
+        public_report = public_provider(result, report) if callable(public_provider) else {}
+        if not isinstance(public_report, Mapping):
+            raise ProtocolError("Adapter agent_evidence must return an object")
+        evidence_ref = f"evidence://execution-{self.cumulative_executions:06d}"
+        agent_evidence = AgentEvidence.from_execution(
+            result, public_report, evidence_ref=evidence_ref).as_dict()
         verifier = getattr(self.adapter, "verification_receipt", None)
         if not callable(verifier):
             raise ProtocolError("Adapter must implement verification_receipt(execution)")
@@ -571,6 +659,7 @@ class AgentLoop:
                     "execution_key": execution_key, "case_handle": case_handle,
                     "environment_identity": identity,
                     "verification_receipt": receipt,
+                    "agent_evidence": agent_evidence,
                     "resume_token": (protocol or {}).get("resume_token"),
                     "environment_generation": (protocol or {}).get("environment_generation")}
         evidence_dir = self.root / "evidence"
@@ -598,17 +687,23 @@ class AgentLoop:
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
         evidence["artifact_sha256"] = _file_sha256(evidence_path)
         self.latest_evidence = evidence
+        self._agent_latest_evidence = agent_evidence
         self.state["restored_evidence_unverified"] = False
         self.event_store.commit("execution", self._evidence_reference(evidence))
         return evidence
 
     def _messages(self, task: str):
-        evidence = (self._evidence_reference(self.latest_evidence)
-                    if isinstance(self.latest_evidence, Mapping) else None)
+        evidence = self._agent_latest_evidence
+        public_state = {"research": self.research_state,
+                        "session_index": self.session_index,
+                        "active_tool_groups": list(self.tools.active_groups),
+                        "active_shared_tools": list(
+                            self.capability_manager.bound_tool_ids)}
+        if hasattr(self.adapter, "active_case"):
+            public_state["selected_case"] = str(self.adapter.active_case)
         context = self.context_builder.build(task=task, latest_evidence=evidence,
                                              retrieved_assets=self.retrieved_assets,
-                                             state={**self.state,
-                                                    "research": self.research_state})
+                                             state=public_state)
         context = self.context_window.bound_context(
             context, artifact_root=self.root / "artifacts")
         if not self.messages:
@@ -634,9 +729,6 @@ class AgentLoop:
         if self.checkpoint_task is not None and self.checkpoint_task != task:
             raise ProtocolError("run directory checkpoint belongs to a different task")
         self.current_task = task
-        for policy in self.policies:
-            before = getattr(policy, "before_run", None)
-            if callable(before): before(self)
         while not self.budget.exhausted() and not self.state.get("finished"):
             self.budget.steps += 1
             self.cumulative_steps += 1
@@ -722,9 +814,6 @@ class AgentLoop:
                   "latest_evidence": (self._evidence_reference(self.latest_evidence)
                                       if isinstance(self.latest_evidence, Mapping)
                                       else None)}
-        for policy in self.policies:
-            after = getattr(policy, "after_run", None)
-            if callable(after): after(self, result)
         return result
 
     def _checkpoint(self):
@@ -742,6 +831,9 @@ class AgentLoop:
             "latest_evidence": (self._evidence_reference(self.latest_evidence)
                                 if isinstance(self.latest_evidence, Mapping) else None),
             "snapshot_id": snapshot.snapshot_id,
+            "active_tool_groups": list(self.tools.active_groups),
+            "active_shared_tools": list(self.capability_manager.bound_tool_ids),
+            "selected_case": getattr(self.adapter, "active_case", None),
             "retrieved_assets": self.retrieved_assets, "state": self.state,
             "research_state": self._bound_research_state(self.research_state)})
 

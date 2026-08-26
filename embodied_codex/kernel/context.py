@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .evidence import AgentEvidence
+
 
 class MinimalSystemPrompt:
     text = (
@@ -67,29 +69,21 @@ class ContextBuilder:
 
     @staticmethod
     def _evidence_summary(value: Any):
+        if isinstance(value, AgentEvidence):
+            value = value.as_dict()
         if not isinstance(value, Mapping):
             return value
-        if "summary" in value and "execution" not in value and "sensor_report" not in value:
-            return {key: value.get(key) for key in
-                    ("artifact_uri", "artifact_sha256", "controller_sha256",
-                     "execution_key", "environment_identity",
-                     "verification_receipt", "summary") if key in value}
         execution = value.get("execution") if isinstance(value.get("execution"), Mapping) else {}
-        report = value.get("sensor_report") if isinstance(value.get("sensor_report"), Mapping) else {}
-        diagnostic = {key: ContextBuilder._bounded_diagnostic(item)
-                      for key, item in report.items()
-                      if key not in {"action_log", "rpc_events"}}
-        action_log = report.get("action_log")
-        if isinstance(action_log, list):
-            diagnostic["action_log_summary"] = {"entries": len(action_log)}
-        return {"artifact_uri": value.get("artifact_uri"),
-                "controller_sha256": value.get("controller_sha256"),
-                "case_handle": value.get("case_handle"),
-                "environment_identity": value.get("environment_identity"),
-                "verification_receipt": value.get("verification_receipt"),
-                "execution": {key: execution.get(key) for key in
-                    ("completed", "error", "sensor_verification_observed", "program_sha256")},
-                "sensor_report": diagnostic}
+        diagnostics = (value.get("diagnostics")
+                       if isinstance(value.get("diagnostics"), Mapping) else {})
+        # This is a positive projection of the AgentEvidence API. Harness and
+        # evaluator metadata are not filtered by naming convention because
+        # they are never accepted into this view in the first place.
+        result = {"execution": {key: execution.get(key) for key in ("completed", "error")},
+                  "diagnostics": ContextBuilder._bounded_diagnostic(diagnostics)}
+        if isinstance(value.get("evidence_ref"), str):
+            result["evidence_ref"] = value["evidence_ref"]
+        return result
 
     def _controller_summary(self):
         if not self.workspace or not self.workspace.controller.is_file(): return None

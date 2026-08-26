@@ -604,6 +604,9 @@ class _CampaignCase(FakeAdapter):
                 "value": self.value, "expected": self.expected,
                 "case": self.case, "action_log": list(self.actions)}
 
+    def agent_evidence(self, execution, sensor_report):
+        return {"observed_value": self.value, "target_value": self.expected}
+
     def verification_receipt(self, execution):
         return {"verified": bool(self.value == self.expected
             and execution.get("completed") is True and not execution.get("error")
@@ -625,11 +628,14 @@ def _decision(name, arguments):
 
 
 class _EvidenceReactiveCampaignModel:
-    """Chooses from current evidence/state, without a turn-number script."""
+    """Selects cases itself and reacts to public failure evidence."""
 
     def __init__(self):
         self.saw_second_failure = False
         self.writes = 0
+        self.first_passed = False
+        self.second_passed = False
+        self.regression_passed = False
 
     @staticmethod
     def _context(messages):
@@ -656,9 +662,10 @@ class _EvidenceReactiveCampaignModel:
         context = self._context(messages)
         last_call = self._last_call(messages)
         controller = context.get("controller")
-        campaign = (context.get("state") or {}).get("campaign") or {}
+        state = context.get("state") or {}
+        selected = state.get("selected_case")
         latest = context.get("latest_evidence") or {}
-        receipt = latest.get("verification_receipt") or {}
+        diagnostics = latest.get("diagnostics") or {}
         if controller is None:
             self.writes += 1
             return _decision("write_file", {"path": "controller.py", "content":
@@ -666,9 +673,10 @@ class _EvidenceReactiveCampaignModel:
                 "    return robot.verify('target', {})\n"})
         if last_call == "write_file":
             return _decision("run_controller", {})
-        if receipt.get("verified") is False:
-            if campaign.get("failure_focus") == "B":
-                self.saw_second_failure = True
+        observed = diagnostics.get("observed_value")
+        target = diagnostics.get("target_value")
+        if observed is not None and observed != target:
+            if selected == "case-002": self.saw_second_failure = True
             if last_call != "read_file":
                 return _decision("read_file", {"path": "controller.py"})
             assert self.saw_second_failure
@@ -677,7 +685,16 @@ class _EvidenceReactiveCampaignModel:
                 "def run(robot):\n    state=robot.observe('proprioception', {})\n"
                 "    robot.act({'type':'set_value','value':state['proprioception']['target']})\n"
                 "    return robot.verify('target', {})\n"})
-        if campaign.get("all_cases_verified"):
+        if observed is not None and observed == target:
+            if selected == "case-001" and not self.first_passed:
+                self.first_passed = True
+                return _decision("select_case", {"case_id": "case-002"})
+            if selected == "case-002" and self.saw_second_failure:
+                self.second_passed = True
+                return _decision("select_case", {"case_id": "case-001"})
+            if selected == "case-001" and self.second_passed:
+                self.regression_passed = True
+        if self.regression_passed:
             return _decision("finish", {"summary": "one Controller passed every case"})
         return _decision("run_controller", {})
 
@@ -705,11 +722,9 @@ def test_campaign_converges_one_controller_after_second_case_failure(tmp_path):
     finally:
         adapter.close()
     assert result["finished"] is True
-    assert result["campaign"]["all_cases_verified"] is True
     assert model.saw_second_failure is True and model.writes == 2
     assert len(case_a.actions) == 2
     assert len(case_b.actions) == 2
-    validations = result["campaign"]["validated_cases"]
-    assert set(validations) == {"A", "B"}
-    assert {item["controller_sha256"] for item in validations.values()} == {
-        result["campaign"]["controller_sha256"]}
+    assert model.first_passed and model.second_passed and model.regression_passed
+    assert result["selected_case"] == "case-001"
+    assert "campaign" not in loop.state

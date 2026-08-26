@@ -557,7 +557,14 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
     assert first.returncode == 0, first.stdout
     first_result = json.loads(first.stdout)
     assert first_result["finished"] is True and first_result["executions"] == 3
-    assert first_result["campaign"]["all_cases_verified"] is True
+    assert first_result["available_cases"] == ["case-001", "case-002"]
+    first_events = [json.loads(line) for line in
+                    (tmp_path / "run-a/events/events.jsonl").read_text().splitlines()]
+    verified = [row["payload"] for row in first_events if row["kind"] == "execution"
+                and row["payload"]["verification_receipt"]["verified"] is True]
+    assert {row["environment_identity"]["episode_id"] for row in verified} == {
+        "fake:0", "fake:1"}
+    assert len({row["controller_sha256"] for row in verified}) == 1
     assert (assets / "tools/fake_target/v001/manifest.json").is_file()
     assert (assets / "skills/verified_target_skill/v001/controller.py").is_file()
     assert (assets / "experiences/verified_target_repair/v001/manifest.json").is_file()
@@ -588,10 +595,15 @@ def test_generic_cli_end_to_end_recovery_multicase_and_cross_task_reuse(tmp_path
         stderr=subprocess.STDOUT, timeout=90)
     assert multicase.returncode == 0, multicase.stdout
     multi_result = json.loads(multicase.stdout)
-    assert multi_result["finished"] is True and multi_result["cases"] == ["0", "1"]
-    assert multi_result["campaign"]["all_cases_verified"] is True
-    assert len({row["controller_sha256"] for row in
-                multi_result["campaign"]["validated_cases"].values()}) == 1
+    assert multi_result["finished"] is True
+    assert multi_result["available_cases"] == ["case-001", "case-002"]
+    multi_events = [json.loads(line) for line in
+                    (tmp_path / "multi/events/events.jsonl").read_text().splitlines()]
+    multi_verified = [row["payload"] for row in multi_events if row["kind"] == "execution"
+                      and row["payload"]["verification_receipt"]["verified"] is True]
+    assert {row["environment_identity"]["episode_id"] for row in multi_verified} == {
+        "fake:0", "fake:1"}
+    assert len({row["controller_sha256"] for row in multi_verified}) == 1
 
     doctor = subprocess.run([sys.executable, "-m", "embodied_codex", "doctor", "--adapter", adapter,
         "--model", model, "--run-dir", str(tmp_path / "doctor")], env=env, text=True,

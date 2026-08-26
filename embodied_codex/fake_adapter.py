@@ -115,6 +115,10 @@ class FakeAdapter:
         return {"sensor_success": bool(self.value == 1), "value": self.value,
                 "action_log": list(self.actions), "case": self.case}
 
+    def agent_evidence(self, execution, sensor_report):
+        return {"observed_value": self.value,
+                "actions": len(self.actions)}
+
     def verification_receipt(self, execution):
         return {"verified": bool(self.value == 1 and execution.get("completed") is True
                                  and not execution.get("error")
@@ -153,6 +157,7 @@ class FakeModel:
         self.searched = False
         self.reuse = False
         self.inspected = False
+        self.shared_bound = False
         self.tool_id = "fake_target:v001"
         self.bad_controller_written = False
         self.execution_inspected = False
@@ -166,6 +171,9 @@ class FakeModel:
         self.experience_promoted = False
         self.skill_id = None
         self.skill_promoted = False
+        self.cases = None
+        self.passed_cases = set()
+        self.evidence_refs = []
 
     @staticmethod
     def _documents(messages):
@@ -222,14 +230,8 @@ class FakeModel:
 
     @staticmethod
     def _evidence_paths(context):
-        campaign = (context.get("state") or {}).get("campaign") or {}
-        records = campaign.get("validated_cases") or {}
-        values = [item.get("artifact_uri") for item in records.values()
-                  if isinstance(item, dict) and item.get("artifact_uri")]
-        if values:
-            return values
         latest = context.get("latest_evidence") or {}
-        return [latest["artifact_uri"]] if latest.get("artifact_uri") else []
+        return [latest["evidence_ref"]] if latest.get("evidence_ref") else []
 
     def _consume_result(self, messages):
         name = self._last_call(messages)
@@ -244,6 +246,10 @@ class FakeModel:
                 self.tool_id = promoted["tool_id"]
         elif name == "inspect_asset" and payload.get("ok"):
             self.inspected = True
+        elif name == "activate_shared_tool" and payload.get("ok"):
+            self.shared_bound = True
+        elif name == "list_cases" and isinstance(result, dict):
+            self.cases = [str(item) for item in result.get("cases") or []]
         elif name == "write_file" and payload.get("ok"):
             changed = set((result or {}).get("changed") or [])
             if "target_tool.py" in changed:
@@ -274,6 +280,12 @@ class FakeModel:
                 self.experience_promoted = True
             elif asset_id == self.skill_id:
                 self.skill_promoted = True
+        elif name == "run_controller" and isinstance(result, dict):
+            diagnostics = result.get("diagnostics") or {}
+            if diagnostics.get("observed_value") == 1:
+                evidence_ref = result.get("evidence_ref")
+                if evidence_ref and evidence_ref not in self.evidence_refs:
+                    self.evidence_refs.append(evidence_ref)
 
     def decide(self, *, messages, tools):
         self.turn += 1
@@ -281,8 +293,13 @@ class FakeModel:
         self._consume_result(messages)
         context = self._current_context(documents)
         latest = context.get("latest_evidence") or {}
-        verified = (latest.get("verification_receipt") or {}).get("verified")
-        campaign = (context.get("state") or {}).get("campaign") or {}
+        diagnostics = latest.get("diagnostics") or {}
+        observed_value = diagnostics.get("observed_value")
+        state = context.get("state") or {}
+        selected_case = str(state.get("selected_case")) if state.get("selected_case") is not None else "default"
+        schema_names = {item.get("function", {}).get("name") for item in tools}
+        if observed_value == 1 and self.fixed_controller_written:
+            self.passed_cases.add(selected_case)
         workspace_files = {item.get("path") for item in context.get("workspace", [])}
         last_call = self._last_call(messages)
         last_payload = self._latest_tool_payload(messages)
@@ -293,13 +310,19 @@ class FakeModel:
         if self.reuse:
             if not self.inspected:
                 return _call(self.turn, "inspect_asset", {"asset_id": self.tool_id})
+            if not self.shared_bound:
+                return _call(self.turn, "activate_shared_tool", {"tool_id": self.tool_id})
+            if "list_cases" in schema_names and self.cases is None:
+                return _call(self.turn, "list_cases", {})
             if not self.fixed_controller_written:
                 source = ("def run(robot):\n    target=robot.use(%r,{})\n    robot.act({'type':'set_value','value':target['value']})\n"
                           "    return robot.verify('target', {})\n") % self.tool_id
                 return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
-            if campaign and not campaign.get("all_cases_verified"):
-                return _call(self.turn, "run_controller", {})
-            if verified is not True:
+            required_cases = set(self.cases or ["default"])
+            remaining = sorted(required_cases - self.passed_cases)
+            if remaining and remaining[0] != selected_case:
+                return _call(self.turn, "select_case", {"case_id": remaining[0]})
+            if remaining:
                 return _call(self.turn, "run_controller", {})
             return _call(self.turn, "finish", {"summary": "reused promoted shared Tool"})
 
@@ -308,7 +331,7 @@ class FakeModel:
             return _call(self.turn, "write_file", {"path": "controller.py", "content": bad})
         if last_call == "write_file" and "controller.py" in last_changed:
             return _call(self.turn, "run_controller", {})
-        if verified is False:
+        if observed_value == 0:
             if not self.execution_inspected:
                 return _call(self.turn, "inspect_execution", {})
             if not self.image_viewed:
@@ -317,6 +340,8 @@ class FakeModel:
         if not self.tool_source_written:
             return _call(self.turn, "write_file", {"path": "target_tool.py",
                 "content": "def run(payload):\n    return {'value': 1}\n"})
+        if "register_tool" not in schema_names:
+            return _call(self.turn, "activate_tool_group", {"group": "asset_authoring"})
         if not self.tool_registered:
             return _call(self.turn, "register_tool", {"name": "fake_target", "source_path": "target_tool.py",
                 "description": "Return the generic target value", "input_schema": {"type": "object", "properties": {},
@@ -329,11 +354,15 @@ class FakeModel:
             source = ("def run(robot):\n    target=robot.use(%r,{})\n    robot.act({'type':'set_value','value':target['value']})\n"
                       "    return robot.verify('target', {})\n") % self.tool_id
             return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
-        if campaign and not campaign.get("all_cases_verified"):
+        if "list_cases" in schema_names and self.cases is None:
+            return _call(self.turn, "list_cases", {})
+        required_cases = set(self.cases or ["default"])
+        remaining = sorted(required_cases - self.passed_cases)
+        if remaining and remaining[0] != selected_case:
+            return _call(self.turn, "select_case", {"case_id": remaining[0]})
+        if remaining:
             return _call(self.turn, "run_controller", {})
-        if verified is not True:
-            return _call(self.turn, "run_controller", {})
-        evidence_paths = self._evidence_paths(context)
+        evidence_paths = list(self.evidence_refs) or self._evidence_paths(context)
         if not self.tool_promoted:
             return _call(self.turn, "promote_asset", {"asset_id": self.tool_id,
                 "evidence_paths": evidence_paths, "applicability": {"adapter_contract": "target-value"}})

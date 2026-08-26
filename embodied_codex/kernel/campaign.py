@@ -1,21 +1,27 @@
-"""Environment-neutral multi-case convergence on one Controller workspace."""
+"""Environment-neutral case routing controlled explicitly by the model."""
 from __future__ import annotations
 
-import hashlib
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
-from .agent_loop import AgentLoop, ProtocolError
+from .agent_loop import AgentLoop
 
 
 class CampaignAdapter:
-    """Route one canonical Controller to a selected Adapter case."""
+    """Route one canonical Controller workspace to a model-selected Adapter case.
+
+    The adapter only supplies list/select/run mechanics. It does not order
+    cases, focus failures, schedule retries, or decide regression coverage.
+    """
 
     def __init__(self, cases: Sequence[tuple[str, Any]]):
         if not cases:
             raise ValueError("a Campaign requires at least one Adapter case")
-        self._cases = {str(name): adapter for name, adapter in cases}
-        if len(self._cases) != len(cases):
+        internal_names = [str(name) for name, _adapter in cases]
+        if len(set(internal_names)) != len(cases):
             raise ValueError("Campaign case identifiers must be unique")
+        self._cases = {f"case-{index:03d}": adapter
+                       for index, (_name, adapter) in enumerate(cases, 1)}
+        self._evaluator_cases = tuple((str(name), adapter) for name, adapter in cases)
         self.case_ids = tuple(self._cases)
         self.active_case = self.case_ids[0]
         first = self._cases[self.active_case]
@@ -40,8 +46,8 @@ class CampaignAdapter:
                 if getattr(adapter, "artifact_dir", None)]
 
     def case_adapters(self):
-        """Expose case membership to external orchestration such as evaluation."""
-        return tuple(self._cases.items())
+        """Expose case membership to external evaluation only."""
+        return self._evaluator_cases
 
     @property
     def episode(self):
@@ -65,6 +71,10 @@ class CampaignAdapter:
     def sensor_report(self, execution):
         return self.active.sensor_report(execution)
 
+    def agent_evidence(self, execution, sensor_report):
+        provider = getattr(self.active, "agent_evidence", None)
+        return provider(execution, sensor_report) if callable(provider) else {}
+
     def verification_receipt(self, execution):
         return self.active.verification_receipt(execution)
 
@@ -84,6 +94,8 @@ class CampaignAdapter:
         return False
 
     def register_capability(self, tool_id, function, contract):
+        # Binding is a deployment mechanism, not a test-order strategy. A Tool
+        # selected by the model is made available to every selectable case.
         for adapter in self._cases.values():
             adapter.register_capability(tool_id, function, contract)
 
@@ -99,7 +111,7 @@ class CampaignAdapter:
 
 
 class CampaignRunner(AgentLoop):
-    """AgentLoop completion gate requiring one SHA to pass every Adapter case."""
+    """Thin compatibility entry point for an explicitly selected case set."""
 
     adapter: CampaignAdapter
 
@@ -107,140 +119,12 @@ class CampaignRunner(AgentLoop):
         if not isinstance(kwargs.get("adapter"), CampaignAdapter):
             raise TypeError("CampaignRunner requires CampaignAdapter")
         super().__init__(**kwargs)
-        campaign = self.state.get("campaign")
-        if not isinstance(campaign, Mapping) or campaign.get("cases") != list(self.adapter.case_ids):
-            campaign = {"cases": list(self.adapter.case_ids),
-                        "active_case": self.adapter.case_ids[0],
-                        "controller_sha256": None, "queue": list(self.adapter.case_ids),
-                        "validated_cases": {}, "failure_focus": None}
-        self.state["campaign"] = dict(campaign)
-        active = str(self.state["campaign"].get("active_case") or self.adapter.case_ids[0])
-        self.adapter.select(active if active in self.adapter.case_ids else self.adapter.case_ids[0])
-        if self.latest_evidence is not None:
-            identity = self.latest_evidence.get("environment_identity")
-            receipt = self.latest_evidence.get("verification_receipt") or {}
-            valid = self.adapter.validate_historical_receipt(identity, receipt)
-            self.state["restored_evidence_unverified"] = not valid
-            campaign_valid = valid and bool(self.state["campaign"].get("all_cases_verified"))
-            if campaign_valid:
-                records = self.state["campaign"].get("validated_cases") or {}
-                digest = self.state["campaign"].get("controller_sha256")
-                for case_id in self.adapter.case_ids:
-                    record = records.get(case_id) or {}
-                    self.adapter.select(case_id)
-                    campaign_valid = bool(campaign_valid
-                        and record.get("controller_sha256") == digest
-                        and record.get("environment_identity") == self.adapter.execution_identity()
-                        and self.adapter.validate_execution_receipt(
-                            record.get("verification_receipt") or {}))
-                self.adapter.select(active if active in self.adapter.case_ids
-                                    else self.adapter.case_ids[0])
-            if campaign_valid:
-                self.state["finished"] = True
-                self.state["completion_valid"] = True
-                self.state["successful_cases"] = len(self.adapter.case_ids)
-            else:
-                self.state["finished"] = False
-                self.state["completion_valid"] = False
-
-    @staticmethod
-    def _unique(values):
-        result = []
-        for value in values:
-            value = str(value)
-            if value not in result:
-                result.append(value)
-        return result
-
-    def _prepare_controller(self, digest: str) -> dict[str, Any]:
-        campaign = dict(self.state["campaign"])
-        if campaign.get("controller_sha256") != digest:
-            old_validated = list((campaign.get("validated_cases") or {}).keys())
-            focus = campaign.get("failure_focus") or campaign.get("active_case")
-            campaign.update({"controller_sha256": digest, "validated_cases": {},
-                "queue": self._unique([focus, *old_validated, *self.adapter.case_ids]),
-                "failure_focus": None})
-        queue = [case for case in campaign.get("queue", [])
-                 if case in self.adapter.case_ids]
-        if not queue:
-            queue = [case for case in self.adapter.case_ids
-                     if case not in (campaign.get("validated_cases") or {})]
-        if queue:
-            campaign["active_case"] = queue[0]
-            self.adapter.select(queue[0])
-        campaign["queue"] = queue
-        self.state["campaign"] = campaign
-        return campaign
-
-    def _run_controller(self):
-        if not self.workspace.controller.is_file():
-            raise ProtocolError("controller.py does not exist")
-        digest = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
-        campaign = self._prepare_controller(digest)
-        case_id = str(campaign["active_case"])
-        evidence = super()._run_controller()
-        evidence["campaign_case"] = case_id
-        campaign = dict(self.state["campaign"])
-        validated = dict(campaign.get("validated_cases") or {})
-        queue = list(campaign.get("queue") or [])
-        if self._evidence_success(evidence):
-            validated[case_id] = {"controller_sha256": digest,
-                "artifact_uri": evidence.get("artifact_uri"),
-                "environment_identity": evidence.get("environment_identity"),
-                "verification_receipt": evidence.get("verification_receipt"),
-                "resume_token": evidence.get("resume_token")}
-            queue = [value for value in queue if value != case_id]
-            campaign["failure_focus"] = None
-        else:
-            campaign["failure_focus"] = case_id
-            queue = self._unique([case_id, *queue])
-        campaign["validated_cases"] = validated
-        campaign["queue"] = queue
-        if queue:
-            campaign["active_case"] = queue[0]
-        campaign["all_cases_verified"] = (
-            set(validated) == set(self.adapter.case_ids)
-            and all(item.get("controller_sha256") == digest for item in validated.values()))
-        self.state["campaign"] = campaign
-        return {**evidence, "campaign": campaign}
-
-    def _finish(self, summary: str):
-        if not self.workspace.controller.is_file():
-            raise ProtocolError("completion rejected: controller has not been executed")
-        digest = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
-        campaign = self._prepare_controller(digest)
-        validated = dict(campaign.get("validated_cases") or {})
-        errors = []
-        missing = [case for case in self.adapter.case_ids if case not in validated]
-        if missing:
-            errors.append(f"cases have no current verification: {missing}")
-        previous = self.adapter.active_case
-        try:
-            for case_id, record in validated.items():
-                if record.get("controller_sha256") != digest:
-                    errors.append(f"case {case_id} belongs to an older Controller")
-                    continue
-                self.adapter.select(case_id)
-                if self.adapter.execution_identity() != record.get("environment_identity"):
-                    errors.append(f"case {case_id} environment identity changed")
-                elif not self.adapter.validate_execution_receipt(
-                        record.get("verification_receipt") or {}):
-                    errors.append(f"case {case_id} Adapter receipt is no longer valid")
-        finally:
-            self.adapter.select(previous)
-        if errors:
-            raise ProtocolError("completion rejected: " + "; ".join(errors))
-        self.state.update({"finished": True, "completion_valid": True,
-                           "completion_summary": str(summary),
-                           "successful_cases": len(self.adapter.case_ids)})
-        campaign["all_cases_verified"] = True
-        self.state["campaign"] = campaign
-        return dict(self.state)
 
     def run(self, task: str | None = None):
         result = super().run(task)
-        return {**result, "campaign": self.state.get("campaign"),
-                "cases": list(self.adapter.case_ids)}
+        return {**result,
+                "available_cases": list(self.adapter.case_ids),
+                "selected_case": self.adapter.active_case}
 
 
 __all__ = ["CampaignAdapter", "CampaignRunner"]

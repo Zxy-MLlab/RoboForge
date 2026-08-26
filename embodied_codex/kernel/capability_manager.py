@@ -53,6 +53,7 @@ class CapabilityManager:
         self.experience_library, self.gap_library = experience_library, gap_library
         self.extraction_limits = extraction_limits or ExtractionLimits()
         self._bound: dict[str, Any] = {}
+        self._inspected_tools: set[str] = set()
 
     def search(self, query: str, limit: int = 5, *, include_gaps: bool = False,
                statuses: set[str] | None = None):
@@ -69,13 +70,57 @@ class CapabilityManager:
     def inspect(self, asset_id: str):
         for library in (self.tool_library, self.skill_library, self.experience_library, self.gap_library):
             if library is None: continue
-            try: return library.inspect(asset_id)
+            try:
+                result = library.inspect(asset_id)
+                manifest = result.get("manifest") if isinstance(result, Mapping) else None
+                if library is self.tool_library and isinstance(manifest, Mapping):
+                    tool_id = manifest.get("tool_id")
+                    if tool_id:
+                        self._inspected_tools.add(str(tool_id))
+                return result
             except (FileNotFoundError, KeyError, ValueError): pass
         raise CapabilityError(f"unknown asset: {asset_id}")
 
     def load_tool_source(self, tool_id: str):
         if self.tool_library is None: raise CapabilityError("Tool library unavailable")
+        if str(tool_id) not in self._inspected_tools:
+            raise CapabilityError("inspect the Tool manual and schema before loading source")
         return self.tool_library.inspect(tool_id, include_source=True)
+
+    def activate_tool(self, tool_id: str):
+        """Bind exactly one model-selected promoted Tool to this Adapter."""
+        tool_id = str(tool_id)
+        if self.tool_library is None:
+            raise CapabilityError("Tool library unavailable")
+        if tool_id in self._bound:
+            return {"tool_id": tool_id, "bound": True, "already_bound": True}
+        if tool_id not in self._inspected_tools:
+            raise CapabilityError("inspect the Tool manual and schema before activation")
+        manifest = self.tool_library.inspect(tool_id)["manifest"]
+        if manifest.get("status") != "promoted":
+            raise CapabilityError("only a promoted shared Tool can be activated")
+        function = self.tool_library.runtime_function(tool_id)
+        self.adapter.register_capability(tool_id, function, manifest)
+        self._bound[tool_id] = function
+        return {"tool_id": tool_id, "bound": True, "already_bound": False}
+
+    @property
+    def bound_tool_ids(self):
+        return tuple(sorted(self._bound))
+
+    def restore_tool_binding(self, tool_id: str):
+        """Restore one previously checkpointed binding, never the whole store."""
+        tool_id = str(tool_id)
+        if tool_id in self._bound:
+            return
+        if self.tool_library is None:
+            raise CapabilityError("Tool library unavailable")
+        manifest = self.tool_library.inspect(tool_id)["manifest"]
+        if manifest.get("status") not in {"verified", "promoted"}:
+            raise CapabilityError("checkpoint Tool is no longer verified")
+        function = self.tool_library.runtime_function(tool_id)
+        self.adapter.register_capability(tool_id, function, manifest)
+        self._bound[tool_id] = function
 
     def web_search(self, query: str, limit: int = 5): return search_web(query, limit)
     def fetch_page(self, url: str, max_chars: int = 30000): return fetch_web_page(url, max_chars)
@@ -431,7 +476,16 @@ class CapabilityManager:
 
     def _asset_path(self, value: Any) -> str:
         encoded = str(value)
-        if encoded.startswith("workspace://"):
+        if encoded.startswith("evidence://execution-"):
+            sequence = encoded.removeprefix("evidence://execution-")
+            if not sequence.isdigit():
+                raise CapabilityError("invalid evidence reference")
+            matches = list((self.workspace.root.parent / "evidence").glob(
+                f"execution-{int(sequence):06d}-*.json"))
+            if len(matches) != 1:
+                raise CapabilityError("evidence reference is missing or ambiguous")
+            path = matches[0]
+        elif encoded.startswith("workspace://"):
             path = self.workspace.root / encoded.removeprefix("workspace://")
         elif encoded.startswith("run://"):
             path = self.workspace.root.parent / encoded.removeprefix("run://")
@@ -451,17 +505,5 @@ class CapabilityManager:
         if not any(path == root or root in path.parents for root in roots):
             raise CapabilityError("asset evidence must be inside a registered artifact root")
         return str(path)
-
-    def bind_shared_tools(self):
-        if self.tool_library is None: return []
-        bound = []
-        for manifest in self.tool_library.promoted():
-            tool_id = manifest["tool_id"]
-            function = self.tool_library.runtime_functions().get(tool_id)
-            if function is None: continue
-            self.adapter.register_capability(tool_id, function, manifest)
-            self._bound[tool_id] = function; bound.append(tool_id)
-        return sorted(bound)
-
 
 __all__ = ["CapabilityError", "CapabilityManager", "ExtractionLimits"]

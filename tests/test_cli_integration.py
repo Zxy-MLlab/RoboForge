@@ -26,6 +26,7 @@ class Adapter:
     def project_rpc_output(self, method, arguments, result): return dict(result)
     def register_capability(self, tool_id, function, contract): pass
     def sensor_report(self, execution): return {"success": self.value == 1}
+    def agent_evidence(self, execution, sensor_report): return {"value": self.value}
     def execution_identity(self): return {"episode_id": "cli-fake", "environment_generation": self.generation}
     def resume_protocol(self): return {"supports_resume": True, "resume_token": "cli-resume",
         "environment_generation": self.generation, "actions_idempotent": False, "replay_allowed": True}

@@ -391,6 +391,10 @@ class CapabilityLibrary:
         if receipts:
             manifest = {**manifest, "status": receipts[-1]["status"],
                         "test_receipt_sha256": receipts[-1]["receipt_sha256"]}
+        promotions = self._promotion_receipts(tool_id)
+        if promotions:
+            manifest = {**manifest, "status": "promoted",
+                        "promotion_receipt_sha256": promotions[-1]["receipt_sha256"]}
         result = {"manifest": manifest, "manual": self.manual(tool_id)}
         if include_source:
             result["source"] = source.read_text()
@@ -533,8 +537,7 @@ class CapabilityLibrary:
 
     def list_summaries(self):
         return [{key: row.get(key) for key in ("tool_id", "name", "version", "description",
-            "input_schema", "output_schema", "status", "runtime_spec",
-            "runtime_environment", "dependencies")}
+            "status", "runtime_spec", "runtime_environment", "dependencies")}
             for row in self.list_all()]
 
     def search(self, query: str, limit: int = 8, statuses: set[str] | None = None):
@@ -547,6 +550,13 @@ class CapabilityLibrary:
     def runtime_functions(self):
         return {row["tool_id"]: (lambda payload, _id=row["tool_id"]: self.run(_id, payload))
                 for row in self.tested()}
+
+    def runtime_function(self, tool_id: str):
+        """Resolve one tested Tool without enumerating or loading its siblings."""
+        inspected = self.inspect(str(tool_id))
+        if inspected["manifest"].get("status") not in {"verified", "promoted"}:
+            raise AssetError("Tool must pass contract tests before runtime binding")
+        return lambda payload, _id=str(tool_id): self.run(_id, payload)
 
     def _promotion_receipts(self, tool_id: str) -> list[dict[str, Any]]:
         directory = self.root / "_admissions" / tool_id.partition(":")[0] / tool_id.partition(":")[2]

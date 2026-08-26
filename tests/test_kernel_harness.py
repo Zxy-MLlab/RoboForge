@@ -182,7 +182,12 @@ def test_shared_tool_is_bound_and_reused_by_independent_workspace(tmp_path):
     library_b = CapabilityLibrary(asset_root / "tools", workspace_b.root, python=sys.executable, scope_id="shared01")
     manager_b = CapabilityManager(asset_root=asset_root, workspace=workspace_b, adapter=adapter_b,
                                   tool_library=library_b)
-    assert registration["tool_id"] in manager_b.bind_shared_tools()
+    assert adapter_b.capabilities == {}
+    found = manager_b.search("increment a value")
+    assert [row["tool_id"] for row in found["tools"]] == [registration["tool_id"]]
+    detail = manager_b.inspect(registration["tool_id"])
+    assert "source" not in detail
+    assert manager_b.activate_tool(registration["tool_id"])["bound"] is True
     result = ControllerRuntime(timeout_seconds=10).execute(workspace_b.controller, adapter_b)
     assert result["completed"] is True
     assert result["result"] == {"value": 5}
@@ -217,7 +222,10 @@ def test_cross_task_reuse_needs_fewer_robot_executions_than_no_asset_baseline(tm
     library_b = CapabilityLibrary(asset_root / "tools", task_b.root, python=sys.executable, scope_id="shared01")
     manager_b = CapabilityManager(asset_root=asset_root, workspace=task_b, adapter=adapter_b,
                                   tool_library=library_b)
-    assert manager_b.bind_shared_tools() == ["task_target:v001"]
+    assert adapter_b.capabilities == {}
+    manager_b.search("task target")
+    manager_b.inspect("task_target:v001")
+    assert manager_b.activate_tool("task_target:v001")["tool_id"] == "task_target:v001"
     task_b.write_file("controller.py", "def run(robot):\n    target = robot.use('task_target:v001', {})\n    robot.act(target)\n    return robot.verify('goal', {})\n")
     reused = ControllerRuntime(timeout_seconds=10).execute(task_b.controller, adapter_b)
     assert adapter_b.sensor_report(reused)["sensor_success"] is True
@@ -277,15 +285,21 @@ def test_restart_resumes_after_committed_execution_without_repeating_action(tmp_
 
 
 def test_benchmark_policies_execute_before_after_and_sealed_evaluator(tmp_path):
+    from evaluation.runner import BenchmarkRunner
+
     adapter = SealedAdapter(); workspace = PersistentWorkspace(tmp_path / "workspace")
     manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=workspace, adapter=adapter)
     policies = [AntiCheatingPolicy(name="anti_cheating"), GeneralizationPolicy(name="generalization"),
                 ProvenancePolicy(name="provenance"), SealedEvaluationPolicy(name="sealed_evaluation")]
-    result = AgentLoop(model=FakeModel(), workspace=workspace, adapter=adapter,
+    loop = AgentLoop(model=FakeModel(), workspace=workspace, adapter=adapter,
         context_builder=ContextBuilder(adapter_index={"protocol": "fake-v1"}, asset_registry=None, workspace=workspace),
         capability_manager=manager, runtime=ControllerRuntime(timeout_seconds=10),
-        event_store=EventStore(tmp_path), root=tmp_path, policies=policies).run()
+        event_store=EventStore(tmp_path), root=tmp_path)
+    runner = BenchmarkRunner(loop, policies)
+    result = runner.run()
     assert result["sealed_evaluation"] is True
+    assert runner.latest_evidence is not None
+    assert runner.latest_evidence.payload["verification_receipt"]["verified"] is True
     records = [event["payload"] for event in EventStore(tmp_path).events()
                if event["kind"] == "evaluation_policy"]
     assert {(item["policy"], item["phase"]) for item in records} == {

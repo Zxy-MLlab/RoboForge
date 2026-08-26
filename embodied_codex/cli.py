@@ -140,7 +140,6 @@ def run_command(args) -> int:
         manager = CapabilityManager(asset_root=asset_root, workspace=workspace, adapter=adapter,
                                    tool_library=tools, skill_library=skills,
                                    experience_library=experiences, gap_library=gaps)
-        manager.bind_shared_tools()
         contract = getattr(adapter, "sdk_index", None) or getattr(adapter, "sdk_contract", None) or {
             "protocol": "adapter-provided", "operations": ["observe", "use", "act", "verify", "record"]}
         if args.frozen_controller:
@@ -158,17 +157,23 @@ def run_command(args) -> int:
             event_store=EventStore(run_dir / "events", protect=True),
             budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions,
                               timeout_seconds=args.session_timeout),
-            root=run_dir, web_search=manager.web_search, policies=policies,
+            root=run_dir, web_search=manager.web_search,
             resume=bool(getattr(args, "resume", False)))
-        output = loop.run(getattr(adapter, "instruction", str(args.task)))
+        task = getattr(adapter, "instruction", str(args.task))
+        if args.profile == "benchmark":
+            from evaluation.runner import BenchmarkRunner
+            output = BenchmarkRunner(loop, policies).run(task)
+        else:
+            output = loop.run(task)
     finally:
         close = getattr(adapter, "close", None) if adapter is not None else None
         if callable(close):
             close()
     output["profile"] = args.profile
     output["evaluation_policies"] = [policy.name for policy in policies]
-    if args.states:
-        output["cross_case_controller_sha256"] = ((output.get("campaign") or {})
+    if (args.states and args.profile == "benchmark"
+            and output.get("evaluation_passed") is True):
+        output["cross_case_controller_sha256"] = ((output.get("latest_evidence") or {})
                                                    .get("controller_sha256"))
     result_path = run_dir / "result.json"; temporary = result_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(output, indent=2, default=str) + "\n"); temporary.replace(result_path)
@@ -216,7 +221,8 @@ def doctor_command(args) -> int:
         with contextlib.redirect_stdout(sys.stderr):
             adapter = load_adapter(args.adapter, task=str(task), run_dir=smoke_dir)
         checks["adapter_init"] = "available"
-        required = ("dispatch", "project_rpc_output", "initial_observation", "sensor_report", "verification_receipt",
+        required = ("dispatch", "project_rpc_output", "initial_observation", "sensor_report",
+                    "agent_evidence", "verification_receipt",
                     "execution_identity", "resume_protocol", "register_capability", "close")
         missing = [name for name in required if not callable(getattr(adapter, name, None))]
         if missing:
