@@ -186,8 +186,8 @@ def test_shared_tool_is_bound_and_reused_by_independent_workspace(tmp_path):
         source_urls=["https://example.com/increment"], trained_on_current_task=False)
     manager_a.test_tool(registration["tool_id"], [{"input": {"value": 2}, "expected": {"value": 3}}])
     workspace_a.write_file("controller.py", "def run(robot):\n"
-        "    target=robot.use('increment:v001', {'value': 0})\n"
-        "    robot.act(target)\n    return robot.verify('goal', {})\n")
+        "    receipt=robot.use('increment:v001', {'value': 0})\n"
+        "    robot.act(receipt['result'])\n    return robot.verify('goal', {})\n")
     evidence = committed_execution(workspace_a, adapter_a, manager_a)
     manager_a.promote_asset(registration["tool_id"], [evidence["artifact_uri"]])
 
@@ -205,7 +205,7 @@ def test_shared_tool_is_bound_and_reused_by_independent_workspace(tmp_path):
     assert manager_b.activate_tool(registration["tool_id"])["bound"] is True
     result = ControllerRuntime(timeout_seconds=10).execute(workspace_b.controller, adapter_b)
     assert result["completed"] is True
-    assert result["result"] == {"value": 5}
+    assert result["result"] == {"tool_id": "increment:v001", "result": {"value": 5}}
 
 
 def test_cross_task_reuse_needs_fewer_robot_executions_than_no_asset_baseline(tmp_path):
@@ -227,7 +227,7 @@ def test_cross_task_reuse_needs_fewer_robot_executions_than_no_asset_baseline(tm
         output_schema={"type": "object", "properties": {"value": {"type": "integer"}},
                        "required": ["value"], "additionalProperties": False})
     manager_a.test_tool(registered["tool_id"], [{"input": {}, "expected": {"value": 1}}])
-    task_a.write_file("controller.py", "def run(robot):\n    target = robot.use('task_target:v001', {})\n    robot.act(target)\n    return robot.verify('goal', {})\n")
+    task_a.write_file("controller.py", "def run(robot):\n    receipt = robot.use('task_target:v001', {})\n    robot.act(receipt['result'])\n    return robot.verify('goal', {})\n")
     evidence = committed_execution(task_a, adapter_a, manager_a)
     assert evidence["sensor_report"]["sensor_success"] is True
     manager_a.promote_asset(registered["tool_id"], [evidence["artifact_uri"]])
@@ -241,7 +241,7 @@ def test_cross_task_reuse_needs_fewer_robot_executions_than_no_asset_baseline(tm
     manager_b.search("task target")
     manager_b.inspect("task_target:v001")
     assert manager_b.activate_tool("task_target:v001")["tool_id"] == "task_target:v001"
-    task_b.write_file("controller.py", "def run(robot):\n    target = robot.use('task_target:v001', {})\n    robot.act(target)\n    return robot.verify('goal', {})\n")
+    task_b.write_file("controller.py", "def run(robot):\n    receipt = robot.use('task_target:v001', {})\n    robot.act(receipt['result'])\n    return robot.verify('goal', {})\n")
     reused = ControllerRuntime(timeout_seconds=10).execute(task_b.controller, adapter_b)
     assert adapter_b.sensor_report(reused)["sensor_success"] is True
     task_b_executions = 1

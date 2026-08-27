@@ -29,7 +29,11 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                     "example":"obs = robot.observe(channel='proprioception', request={}); pose = obs['proprioception']['eef_pose']"}}},
         "use":{
             "signature":"robot.use(tool_id, payload)",
-            "returns":"direct Tool result; no receipt/result wrapper",
+            "returns":"receipt object containing tool_id, step, and the Tool-native result",
+            "shape":{"tool_id":"<tool id>", "step":"<current step>",
+                     "result":"<Tool-native result>"},
+            "rule":"Tool-native fields are nested under receipt['result']; execution or contract failures are returned as result.tool_error with ok:false",
+            "example":"receipt = robot.use('<tool id>', {}); tool_result = receipt['result']",
             "output_fields":["tool_id","step","result"]},
         "act":{
             "signature":"robot.act(action)",

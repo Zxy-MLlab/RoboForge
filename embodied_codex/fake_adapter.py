@@ -355,7 +355,7 @@ class FakeModel:
             if "list_cases" in schema_names and self.cases is None:
                 return _call(self.turn, "list_cases", {})
             if not self.fixed_controller_written:
-                source = ("def run(robot):\n    target=robot.use(%r,{})\n    robot.act({'type':'set_value','value':target['value']})\n"
+                source = ("def run(robot):\n    receipt=robot.use(%r,{})\n    target=receipt['result']\n    robot.act({'type':'set_value','value':target['value']})\n"
                           "    return robot.verify('target', {})\n") % self.tool_id
                 return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
             required_cases = set(self.cases or ["default"])
@@ -391,7 +391,7 @@ class FakeModel:
             return _call(self.turn, "test_tool", {"tool_id": self.tool_id,
                 "cases": [{"input": {}, "expected": {"value": 1}}]})
         if not self.fixed_controller_written:
-            source = ("def run(robot):\n    target=robot.use(%r,{})\n    robot.act({'type':'set_value','value':target['value']})\n"
+            source = ("def run(robot):\n    receipt=robot.use(%r,{})\n    target=receipt['result']\n    robot.act({'type':'set_value','value':target['value']})\n"
                       "    return robot.verify('target', {})\n") % self.tool_id
             return _call(self.turn, "write_file", {"path": "controller.py", "content": source})
         if "list_cases" in schema_names and self.cases is None:

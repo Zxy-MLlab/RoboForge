@@ -73,7 +73,8 @@ class LiveAcquisitionModel:
                 "cases": [{"input": {"query": "set target"}, "expected": {"value": 1}}]}),
             10: ("write_file", {"path": "controller.py", "content":
                 "def run(robot):\n"
-                "    result=robot.use('live_acquired_ranker:v001',{'query':'set target'})\n"
+                "    receipt=robot.use('live_acquired_ranker:v001',{'query':'set target'})\n"
+                "    result=receipt['result']\n"
                 "    robot.act({'type':'set_value','value':result['value']})\n"
                 "    return robot.verify('target',{})\n"}),
             11: ("run_controller", {}),

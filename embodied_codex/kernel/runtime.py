@@ -40,7 +40,7 @@ class Robot:
     def use(self,tool_id,payload):
         receipt=self._rpc("use",{"tool_id":tool_id,"payload":payload})
         if not isinstance(receipt,dict) or "result" not in receipt: raise RuntimeError("Adapter use() violated ToolResult contract")
-        return receipt["result"]
+        return receipt
     def verify(self,verifier,payload): return self._rpc("verify",{"verifier":verifier,"payload":payload})
     def record(self,event): return self._rpc("record",{"event":event})
 try:

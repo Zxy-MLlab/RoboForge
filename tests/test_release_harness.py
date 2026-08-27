@@ -172,7 +172,8 @@ def test_checkpoint_package_build_test_bind_and_controller_execution(tmp_path):
         [{"input": {}, "expected": {"value": 1}}])
     assert tested["bound"] is True and registered["tool_id"] in adapter.capabilities
     loop.workspace.write_file("controller.py", "def run(robot):\n"
-        f"    target=robot.use('{registered['tool_id']}', {{}})\n"
+        f"    receipt=robot.use('{registered['tool_id']}', {{}})\n"
+        "    target=receipt['result']\n"
         "    robot.act({'type':'set_value','value':target['value']})\n"
         "    return robot.verify('target', {})\n")
     evidence = loop._run_controller()
