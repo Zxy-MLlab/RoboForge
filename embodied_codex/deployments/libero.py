@@ -289,6 +289,34 @@ class LiberoDeployment:
                     "Controller Tool payloads cannot contain host filesystem paths")
         return value
 
+    def _resolve_verifier_payload(self, value):
+        """Resolve Controller-visible sensor handles for trusted native verifiers.
+
+        Native verifiers run inside the Adapter process and therefore need the
+        exact files behind opaque sensor handles.  Keep this separate from
+        Shared ToolRuntime staging: verifier resolution never grants a Tool
+        access to a directory or to an unregistered path.
+        """
+        if isinstance(value, Mapping):
+            return {str(key): self._resolve_verifier_payload(item)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_verifier_payload(item) for item in value]
+        if isinstance(value, str):
+            if value.startswith("artifact://"):
+                # Point references are opaque non-file identities and may be
+                # carried alongside the frame.  Only sensor handles are
+                # resolved to private files; unknown artifact URIs fail closed.
+                if value in self.references:
+                    return value
+                if not value.startswith("artifact://sensor/"):
+                    raise LiberoDeploymentError("verifier payload contains unsupported artifact handle")
+                return str(self.resolve_controller_artifact(value))
+            if Path(value).is_absolute():
+                raise LiberoDeploymentError(
+                    "verifier payloads cannot contain host filesystem paths")
+        return value
+
     def _tool_output(self, value):
         if isinstance(value, Mapping):
             return {str(key): self._tool_output(item) for key, item in value.items()}
@@ -556,7 +584,15 @@ class LiberoDeployment:
             expanded["source_transport_verified"]=(
                 transport_ref in self.verified_attachments)
         if name not in self.verifiers:raise LiberoDeploymentError(f"unknown verifier: {name}")
-        try:result=dict(self.verifiers[name](expanded))
+        try:
+            expanded=self._resolve_verifier_payload(expanded)
+            result=dict(self.verifiers[name](expanded))
+        except LiberoDeploymentError as exc:
+            result={"verified":False,"sensor_only":True,
+                    "verifier_error":{"type":type(exc).__name__,
+                                      "message":str(exc)[:1000]}}
+            self.trace.append({"event":"verify","name":name,"result":result})
+            return result
         except Exception as exc:
             result={"verified":False,"sensor_only":True,
                     "verifier_error":{"type":type(exc).__name__,
@@ -564,6 +600,7 @@ class LiberoDeployment:
             self.trace.append({"event":"verify","name":name,"result":result})
             return result
         if not isinstance(result.get("verified"),bool):raise LiberoDeploymentError("verifier contract")
+        result=self._tool_output(result)
         if name=="visual_attachment" and result["verified"] and source_ref:
             self.verified_attachments.add(source_ref)
         self.last_verify=result["verified"];self.trace.append({"event":"verify","name":name,"result":result});return result

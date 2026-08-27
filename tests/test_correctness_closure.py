@@ -408,6 +408,109 @@ def test_libero_sensor_artifacts_are_isolated_by_environment_generation(
                for token in (generation_a, generation_b, "task", "seed", str(tmp_path)))
 
 
+def test_libero_native_verifier_resolves_nested_sensor_handles_without_leaking_paths(tmp_path):
+    from embodied_codex.deployments.libero import LiberoDeployment
+
+    deployment = _minimal_libero(tmp_path)
+    deployment.closed = False
+    deployment._controller_execution_sealed = False
+    deployment.references = {"point-source": {"world_xyz": [0.0, 0.0, 0.0]}}
+    deployment.verified_attachments = set()
+    deployment.trace = []
+    deployment.step = 4
+    deployment.last_verify = False
+
+    sensor_dir = deployment.artifact_dir / "sensors" / "generation" / "frame-000001"
+    sensor_dir.mkdir(parents=True)
+    rgb = sensor_dir / "agentview_rgb.png"
+    depth = sensor_dir / "agentview_depth_m.npy"
+    rgb.write_bytes(b"rgb")
+    depth.write_bytes(b"depth")
+    rgb_handle = deployment.register_controller_artifact(rgb)
+    depth_handle = deployment.register_controller_artifact(depth)
+
+    def verifier(payload):
+        camera = payload["frame"]["cameras"]["agentview"]
+        assert Path(camera["rgb_path"]).read_bytes() == b"rgb"
+        assert Path(camera["depth_path"]).read_bytes() == b"depth"
+        assert Path(payload["nested"][0]["depth_path"]).read_bytes() == b"depth"
+        return {"verified": True, "object": {"mask_path": str(rgb)}}
+
+    deployment.verifiers = {"visual_attachment": verifier}
+    raw = deployment.dispatch("verify", {
+        "verifier": "visual_attachment",
+        "payload": {
+            "frame": {"frame_id": "frame-1", "cameras": {"agentview": {
+                "rgb_path": rgb_handle, "depth_path": depth_handle}}},
+            "nested": [{"depth_path": depth_handle}],
+            "object_query": "bowl", "source_ref": "point-source",
+        },
+    })
+    projected = deployment.project_rpc_output("verify", {}, raw)
+    assert projected["verified"] is True
+    assert projected["object"]["mask_path"].startswith("artifact://sensor/")
+    assert str(deployment.artifact_dir) not in json.dumps(projected)
+
+
+def test_libero_verifier_unknown_sensor_handle_fails_closed(tmp_path):
+    from embodied_codex.deployments.libero import LiberoDeployment
+
+    deployment = _minimal_libero(tmp_path)
+    deployment.closed = False
+    deployment._controller_execution_sealed = False
+    deployment.references = {"point-source": {"world_xyz": [0.0, 0.0, 0.0]}}
+    deployment.verified_attachments = set()
+    deployment.trace = []
+    deployment.step = 1
+    deployment.last_verify = False
+    called = []
+    deployment.verifiers = {"visual_attachment": lambda payload: called.append(payload) or {
+        "verified": True}}
+
+    raw = deployment.dispatch("verify", {
+        "verifier": "visual_attachment",
+        "payload": {
+            "frame": {"frame_id": "frame-1", "cameras": {"agentview": {
+                "rgb_path": "artifact://sensor/unknown",
+                "depth_path": "artifact://sensor/unknown"}}},
+            "object_query": "bowl", "source_ref": "point-source",
+        },
+    })
+    projected = deployment.project_rpc_output("verify", {}, raw)
+    assert projected["verified"] is False
+    assert projected["sensor_only"] is True
+    assert projected["verifier_error"]["type"] == "LiberoDeploymentError"
+    assert called == []
+    assert str(tmp_path) not in json.dumps(projected)
+
+
+def test_libero_verifier_rejects_controller_absolute_paths(tmp_path):
+    from embodied_codex.deployments.libero import LiberoDeployment
+
+    deployment = _minimal_libero(tmp_path)
+    deployment.closed = False
+    deployment._controller_execution_sealed = False
+    deployment.references = {"point-source": {"world_xyz": [0.0, 0.0, 0.0]}}
+    deployment.verified_attachments = set()
+    deployment.trace = []
+    deployment.step = 1
+    deployment.last_verify = False
+    deployment.verifiers = {"visual_attachment": lambda payload: {"verified": True}}
+
+    raw = deployment.dispatch("verify", {
+        "verifier": "visual_attachment",
+        "payload": {
+            "frame": {"frame_id": "frame-1", "cameras": {"agentview": {
+                "rgb_path": str(tmp_path / "host.png")}}},
+            "object_query": "bowl", "source_ref": "point-source",
+        },
+    })
+    projected = deployment.project_rpc_output("verify", {}, raw)
+    assert projected["verified"] is False
+    assert projected["sensor_only"] is True
+    assert "host filesystem paths" in projected["verifier_error"]["message"]
+
+
 def _recovery_loop(tmp_path, adapter):
     workspace = PersistentWorkspace(tmp_path / "workspace")
     workspace.write_file("controller.py",
