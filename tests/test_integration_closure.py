@@ -352,6 +352,8 @@ def test_reset_observation_is_registered_as_opaque_agent_artifact(tmp_path):
         generation = "before"
         def execution_identity(self):
             return {"episode_id": "opaque", "environment_generation": self.generation}
+        def canonical_observation(self, observation):
+            return dict(observation)
         def reset_case(self):
             self.generation = "after"
             return {"rgb_path": str(image)}

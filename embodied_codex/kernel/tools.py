@@ -6,6 +6,12 @@ from typing import Any, Callable, Mapping
 from jsonschema import Draft202012Validator
 
 
+CONSEQUENCE_LEVELS = {
+    "READ_ONLY", "WORKSPACE_MUTATION", "VALIDATION", "ASSET_MUTATION",
+    "ENVIRONMENT_MUTATION", "PHYSICAL_INTERVENTION",
+}
+
+
 @dataclass
 class KernelTool:
     name: str
@@ -43,8 +49,10 @@ class ToolRegistry:
         if group not in self._group_descriptions:
             raise ValueError(f"undeclared tool group: {group}")
         consequence = str(consequence).upper()
-        if consequence not in {"READ_ONLY", "CONSEQUENTIAL"}:
-            raise ValueError("tool consequence must be READ_ONLY or CONSEQUENTIAL")
+        if consequence == "CONSEQUENTIAL":
+            consequence = "PHYSICAL_INTERVENTION"
+        if consequence not in CONSEQUENCE_LEVELS:
+            raise ValueError(f"unsupported tool consequence: {consequence}")
         self._items[name] = KernelTool(name, description, parameters, handler, group,
                                        consequence)
 
@@ -99,4 +107,4 @@ class ToolRegistry:
                      if item.group in self._active_groups)
 
 
-__all__ = ["KernelTool", "ToolRegistry"]
+__all__ = ["KernelTool", "ToolRegistry", "CONSEQUENCE_LEVELS"]

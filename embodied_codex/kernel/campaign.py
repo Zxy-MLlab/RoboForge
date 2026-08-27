@@ -1,7 +1,7 @@
 """Environment-neutral case routing controlled explicitly by the model."""
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .agent_loop import AgentLoop
 
@@ -66,11 +66,21 @@ class CampaignAdapter:
 
     def canonical_embodied_state(self):
         provider = getattr(self.active, "canonical_embodied_state", None)
-        return provider() if callable(provider) else {}
+        if not callable(provider):
+            raise RuntimeError("active Adapter must provide canonical_embodied_state")
+        value = provider()
+        if not isinstance(value, Mapping):
+            raise RuntimeError("Adapter canonical_embodied_state must return a mapping")
+        return value
 
     def canonical_observation(self, observation):
         provider = getattr(self.active, "canonical_observation", None)
-        return provider(observation) if callable(provider) else observation
+        if not callable(provider):
+            raise RuntimeError("active Adapter must provide canonical_observation")
+        value = provider(observation)
+        if not isinstance(value, Mapping):
+            raise RuntimeError("Adapter canonical_observation must return a mapping")
+        return value
 
     def project_public_entities(self, tool_id, result):
         provider = getattr(self.active, "project_public_entities", None)
