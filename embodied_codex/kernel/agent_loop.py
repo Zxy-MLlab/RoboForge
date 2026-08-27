@@ -14,7 +14,7 @@ from typing import Any, Mapping
 from .capability_manager import CapabilityManager
 from .context import ContextBuilder
 from .context_window import ContextWindowManager
-from .evidence import AgentEvidence, HarnessMetadata
+from .evidence import AgentEvidence, HarnessMetadata, build_execution_digest
 from .events import EventStore
 from .recovery import load_checkpoint, save_checkpoint
 from .tools import ToolRegistry
@@ -411,6 +411,11 @@ class AgentLoop:
                      self._schema({"evidence_ref": string}), self._inspect_execution)
         registry.add("list_executions", "List opaque references to prior Controller experiments.",
                      self._schema(), self._list_executions)
+        registry.add("compare_executions",
+                     "Compare public facts from two committed Controller executions.",
+                     self._schema({"evidence_ref_a": string, "evidence_ref_b": string},
+                                  ["evidence_ref_a", "evidence_ref_b"]),
+                     self._compare_executions)
         registry.add("list_artifacts", "List AgentArtifact handles registered for an execution.",
                      self._schema({"evidence_ref": string}, ["evidence_ref"]), self._list_artifacts)
         registry.add("view_sensor_artifact", "Read a bounded sensor/evidence artifact path.", self._schema(
@@ -460,6 +465,102 @@ class AgentLoop:
                         return self._agent_evidence(evidence)
             raise ProtocolError("unknown evidence reference")
         return self._agent_evidence(self.latest_evidence) if isinstance(self.latest_evidence, Mapping) else {}
+
+    def _execution_by_ref(self, evidence_ref: str) -> Mapping[str, Any]:
+        for row in self.event_store.events():
+            if row.get("kind") != "execution":
+                continue
+            payload = row.get("payload") or {}
+            if not payload.get("artifact_uri"):
+                continue
+            evidence = self._load_evidence_reference(payload)
+            agent_ref = ((evidence.get("agent_evidence") or {}).get("evidence_ref"))
+            if payload.get("artifact_uri") == evidence_ref or agent_ref == evidence_ref:
+                return evidence
+        raise ProtocolError("unknown evidence reference")
+
+    @staticmethod
+    def _comparison_value(value: Any):
+        if isinstance(value, Mapping):
+            return {str(key): AgentLoop._comparison_value(item)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [AgentLoop._comparison_value(item) for item in value]
+        if isinstance(value, float):
+            return round(value, 6)
+        return value
+
+    def _compare_executions(self, evidence_ref_a: str, evidence_ref_b: str):
+        a = self._execution_by_ref(evidence_ref_a)
+        b = self._execution_by_ref(evidence_ref_b)
+        da = (a.get("agent_evidence") or {}).get("digest") or build_execution_digest(
+            a.get("execution") or {}, controller_sha256=a.get("controller_sha256"),
+            diagnostics=a.get("sensor_report"))
+        db = (b.get("agent_evidence") or {}).get("digest") or build_execution_digest(
+            b.get("execution") or {}, controller_sha256=b.get("controller_sha256"),
+            diagnostics=b.get("sensor_report"))
+        actions_a, actions_b = da.get("actions") or [], db.get("actions") or []
+        tools_a, tools_b = da.get("tool_calls") or [], db.get("tool_calls") or []
+        verify_a, verify_b = da.get("verifications") or [], db.get("verifications") or []
+        target_fields = ("target_xyz", "target_ref", "pose_ref", "offset",
+                         "quaternion_xyzw", "rotation_matrix")
+        def stable_target(item):
+            requested = item.get("requested") if isinstance(item, Mapping) else {}
+            result = item.get("result") if isinstance(item, Mapping) else {}
+            if isinstance(result, Mapping) and any(key in result for key in
+                                                   ("target_xyz", "target_quaternion_xyzw")):
+                return {key: result.get(key) for key in
+                        ("target_xyz", "target_quaternion_xyzw") if key in result}
+            if not isinstance(requested, Mapping):
+                return {}
+            return {key: requested.get(key) for key in target_fields if key in requested}
+        target_a = [stable_target(item) for item in actions_a]
+        target_b = [stable_target(item) for item in actions_b]
+        types_a = [item.get("type") for item in actions_a]
+        types_b = [item.get("type") for item in actions_b]
+        def gripper_command(item):
+            requested = item.get("requested") if isinstance(item, Mapping) else {}
+            if not isinstance(requested, Mapping):
+                return None
+            return {key: requested.get(key) for key in ("gripper", "command")
+                    if key in requested}
+        gripper_a = [gripper_command(item) for item in actions_a]
+        gripper_b = [gripper_command(item) for item in actions_b]
+        endpoint_a = [{key: item.get("result", {}).get(key)
+                       for key in ("eef_before", "eef_after")}
+                      for item in actions_a]
+        endpoint_b = [{key: item.get("result", {}).get(key)
+                       for key in ("eef_before", "eef_after")}
+                      for item in actions_b]
+        position_errors_a = [item.get("result", {}).get("final_position_error_m")
+                             for item in actions_a]
+        position_errors_b = [item.get("result", {}).get("final_position_error_m")
+                             for item in actions_b]
+        orientation_errors_a = [item.get("result", {}).get("final_orientation_error_rad")
+                                for item in actions_a]
+        orientation_errors_b = [item.get("result", {}).get("final_orientation_error_rad")
+                                for item in actions_b]
+        return {
+            "controller_changed": a.get("controller_sha256") != b.get("controller_sha256"),
+            "tool_calls": {"changed": self._comparison_value(tools_a) != self._comparison_value(tools_b),
+                           "count_changed": len(tools_a) != len(tools_b),
+                           "tool_ids_changed": [x.get("tool_id") for x in tools_a] !=
+                                                [x.get("tool_id") for x in tools_b]},
+            "actions": {"count_changed": len(actions_a) != len(actions_b),
+                        "requested_targets_changed": self._comparison_value(target_a) !=
+                                                     self._comparison_value(target_b),
+                        "gripper_commands_changed": self._comparison_value(gripper_a) !=
+                                                     self._comparison_value(gripper_b),
+                        "action_types_changed": types_a != types_b},
+            "behavior": {"eef_endpoints_changed": self._comparison_value(endpoint_a) !=
+                                             self._comparison_value(endpoint_b),
+                         "position_errors_changed": self._comparison_value(position_errors_a) !=
+                                                    self._comparison_value(position_errors_b),
+                         "orientation_errors_changed": self._comparison_value(orientation_errors_a) !=
+                                                        self._comparison_value(orientation_errors_b)},
+            "verification": {"changed": self._comparison_value(verify_a) !=
+                                      self._comparison_value(verify_b)},
+        }
 
     def _list_artifacts(self, evidence_ref: str):
         payload = None
@@ -870,8 +971,12 @@ class AgentLoop:
             if not any(key in public_report for key in ("rgb_path", "image_uri")):
                 public_report["rgb_path"] = sorted(set(visible_artifacts))[0]
         evidence_ref = f"evidence://execution-{self.cumulative_executions:06d}"
+        digest = build_execution_digest(transformed_execution,
+                                        controller_sha256=controller_sha,
+                                        diagnostics=public_report)
         agent_evidence = AgentEvidence.from_execution(
-            result, public_report, evidence_ref=evidence_ref).as_dict()
+            transformed_execution, public_report, digest=digest,
+            evidence_ref=evidence_ref).as_dict()
         verifier = getattr(self.adapter, "verification_receipt", None)
         if not callable(verifier):
             raise ProtocolError("Adapter must implement verification_receipt(execution)")

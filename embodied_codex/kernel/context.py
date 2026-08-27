@@ -7,6 +7,10 @@ from typing import Any, Mapping
 from .evidence import AgentEvidence
 
 
+_PRIVATE_DIGEST_KEYS = {"reward", "done", "env.check_success", "env_check_success",
+                       "check_success", "hidden_evaluator", "hidden evaluator", "evaluator"}
+
+
 class MinimalSystemPrompt:
     text = (
         "You are an autonomous embodied coding agent. Work directly in the persistent workspace. "
@@ -79,14 +83,36 @@ class ContextBuilder:
         execution = value.get("execution") if isinstance(value.get("execution"), Mapping) else {}
         diagnostics = (value.get("diagnostics")
                        if isinstance(value.get("diagnostics"), Mapping) else {})
+        digest = (value.get("digest")
+                  if isinstance(value.get("digest"), Mapping) else {})
         # This is a positive projection of the AgentEvidence API. Harness and
         # evaluator metadata are not filtered by naming convention because
         # they are never accepted into this view in the first place.
         result = {"execution": {key: execution.get(key) for key in ("completed", "error")},
-                  "diagnostics": ContextBuilder._bounded_diagnostic(diagnostics)}
+                  "diagnostics": ContextBuilder._bounded_diagnostic(diagnostics),
+                  "digest": ContextBuilder._bounded_digest(digest)}
         if isinstance(value.get("evidence_ref"), str):
             result["evidence_ref"] = value["evidence_ref"]
         return result
+
+    @staticmethod
+    def _bounded_digest(value: Any, *, depth: int = 0):
+        """Preserve compact digest records while bounding nested public data."""
+        if isinstance(value, str):
+            return value if len(value) <= 512 else value[:512] + "..."
+        if not isinstance(value, (Mapping, list, tuple)):
+            return value
+        if depth >= 6:
+            return "<nested digest omitted>"
+        if isinstance(value, Mapping):
+            items = ((key, item) for key, item in value.items()
+                     if str(key).lower() not in _PRIVATE_DIGEST_KEYS)
+            return {str(key): ContextBuilder._bounded_digest(item, depth=depth + 1)
+                    for key, item in list(items)[:24]}
+        if isinstance(value, (list, tuple)):
+            return [ContextBuilder._bounded_digest(item, depth=depth + 1)
+                    for item in list(value)[:16]]
+        return value
 
     def _controller_summary(self):
         if not self.workspace or not self.workspace.controller.is_file(): return None

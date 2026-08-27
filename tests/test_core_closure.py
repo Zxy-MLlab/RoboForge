@@ -13,6 +13,7 @@ from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.context_window import ContextWindowManager, ResourceBudgets
 from embodied_codex.kernel.events import EventStore, EventStoreError
+from embodied_codex.kernel.evidence import AgentEvidence, build_execution_digest
 from embodied_codex.kernel.runtime import ControllerRuntime
 from embodied_codex.kernel.workspace import PersistentWorkspace
 from embodied_codex.kernel.sandbox import UnsafeSandboxBackend
@@ -137,6 +138,102 @@ def test_context_bounds_fixed_fields_tool_calls_and_multimodal_inputs(tmp_path, 
         AssertionError("large image was read before stat")) if path == image else original(path))
     with pytest.raises(ProtocolError, match="size limit"):
         loop._view_artifact("large.png")
+
+
+def test_execution_digest_is_compact_public_rpc_facts_only():
+    execution = {
+        "completed": True, "error": None, "program_sha256": "sha-a",
+        "result": {"public": "return"},
+        "rpc_events": [
+            {"method": "use", "arguments": {"tool_id": "tool:v001",
+             "payload": {"frame": {"rgb_path": "artifact://agent/rgb.png"}}},
+             "result": {"tool_id": "tool:v001", "result": {"ok": True}}},
+            {"method": "act", "arguments": {"action": {"type": "move_to_pose",
+             "target_xyz": [1, 2, 3]}}, "result": {"type": "move_to_pose",
+             "reached": False, "target_xyz": [1, 2, 3], "eef_after": [0, 0, 0],
+             "final_position_error_m": 0.2, "final_orientation_error_rad": 0.4,
+             "gripper_qpos": [0.1, 0.1]}},
+            {"method": "verify", "arguments": {"verifier": "target"},
+             "result": {"verified": False, "reason": "not attached"}},
+        ],
+    }
+    digest = build_execution_digest(execution, controller_sha256="sha-a",
+                                    diagnostics={"rollout_path": "artifact://agent/rollout.mp4"})
+    assert digest["execution"] == {"completed": True, "error": None,
+                                    "controller_sha256": "sha-a"}
+    assert digest["tool_calls"][0]["tool_id"] == "tool:v001"
+    assert digest["tool_calls"][0]["status"] == "success"
+    assert digest["actions"][0]["result"]["reached"] is False
+    assert digest["actions"][0]["requested"]["target_xyz"] == [1, 2, 3]
+    assert digest["verifications"] == [{"verifier": "target", "verified": False,
+                                         "reason": "not attached"}]
+    assert digest["artifacts"]["rgb"] == ["artifact://agent/rgb.png"]
+    assert digest["artifacts"]["rollout"] == "artifact://agent/rollout.mp4"
+    assert not any(key in json.dumps(digest) for key in
+                   ("reward", "done", "check_success", "hidden_evaluator"))
+
+
+def test_agent_evidence_legacy_positional_reference_is_preserved():
+    evidence = AgentEvidence.from_execution(
+        {"completed": True, "error": None, "rpc_events": []}, {}, "evidence://legacy")
+    assert evidence.evidence_ref == "evidence://legacy"
+    assert evidence.digest["execution"]["completed"] is True
+
+
+def test_run_controller_agent_evidence_contains_execution_digest(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "def run(robot):\n"
+                             "    robot.act({'type': 'set_value', 'value': 0})\n"
+                             "    return robot.verify('target', {})\n")
+    evidence = loop._run_controller()
+    digest = evidence["agent_evidence"]["digest"]
+    assert digest["actions"][0]["type"] == "set_value"
+    assert digest["actions"][0]["requested"]["value"] == 0
+    assert digest["verifications"][0]["verified"] is False
+    assert "rpc_events" not in json.dumps(evidence["agent_evidence"])
+
+
+def test_context_includes_bounded_execution_digest_without_rpc_event_log():
+    digest = build_execution_digest({"completed": True, "error": None,
+        "program_sha256": "sha", "rpc_events": [
+            {"method": "act", "arguments": {"action": {"type": "gripper",
+             "command": "close"}}, "result": {"type": "gripper", "reached": True,
+             "gripper_qpos": [0.0, 0.0]}}
+        ]})
+    evidence = AgentEvidence(execution={"completed": True, "error": None},
+                             diagnostics={}, digest=digest, evidence_ref="evidence://1")
+    context = ContextBuilder(adapter_index={}, asset_registry=None,
+                             workspace=None).build(task="task", latest_evidence=evidence)
+    latest = context["latest_evidence"]
+    assert latest["digest"]["actions"][0]["result"]["reached"] is True
+    assert "rpc_events" not in json.dumps(latest)
+
+
+def test_compare_executions_reports_facts_without_strategy_recommendations(tmp_path):
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.event_store = None
+    unchanged = {"controller_sha256": "sha-b", "agent_evidence": {"digest": {
+        "tool_calls": [{"tool_id": "tool:v001"}],
+        "actions": [{"type": "move_to_pose", "requested": {"target_xyz": [1, 2, 3], "gripper": -1},
+                      "result": {"reached": True, "eef_after": [1, 2, 3],
+                                 "final_position_error_m": 0.01,
+                                 "final_orientation_error_rad": 0.02}}],
+        "verifications": [{"verifier": "target", "verified": False}]}}}
+    loop._execution_by_ref = lambda ref: unchanged
+    comparison = loop._compare_executions("evidence://a", "evidence://b")
+    assert comparison["controller_changed"] is False
+    assert comparison["actions"]["requested_targets_changed"] is False
+    assert comparison["actions"]["count_changed"] is False
+    assert "recommend" not in json.dumps(comparison).lower()
+
+    changed = {**unchanged, "controller_sha256": "sha-c"}
+    changed["agent_evidence"] = {"digest": {**unchanged["agent_evidence"]["digest"],
+        "actions": [{**unchanged["agent_evidence"]["digest"]["actions"][0],
+                      "requested": {"target_xyz": [2, 2, 3], "gripper": -1}}]}}
+    loop._execution_by_ref = lambda ref: unchanged if ref.endswith("a") else changed
+    comparison = loop._compare_executions("evidence://a", "evidence://b")
+    assert comparison["controller_changed"] is True
+    assert comparison["actions"]["requested_targets_changed"] is True
 
 
 def test_verification_receipt_is_only_success_truth_and_one_case_skill_is_allowed(tmp_path):
