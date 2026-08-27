@@ -1073,6 +1073,11 @@ class AgentLoop:
             self.cumulative_steps += 1
             messages = self._messages(task)
             response = self.model.decide(messages=messages, tools=self.tools.schemas)
+            audit = response.get("audit") if isinstance(response, Mapping) else None
+            if isinstance(audit, Mapping):
+                # Transport metadata is persisted for provenance, but never
+                # added to the model-visible transcript.
+                self.event_store.commit("model_call", dict(audit))
             calls = response.get("tool_calls") if isinstance(response, Mapping) else None
             if not isinstance(calls, list):
                 self.event_store.commit("protocol_error", {"error": "model response must contain tool_calls", "response": response})

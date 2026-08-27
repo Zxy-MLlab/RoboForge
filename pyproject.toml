@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "jsonschema>=4.20",
-  "openai>=1.40",
+  "openai>=1.66",
   "opencv-python-headless>=4.8",
 ]
 
