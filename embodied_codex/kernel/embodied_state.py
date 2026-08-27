@@ -256,13 +256,16 @@ def relative_pose(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, A
 
 
 def relative_pose_in_frames(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, Any],
-                            frames: Mapping[str, Frame], *, result_frame: str | None = None) -> Pose:
-    """Compute a relative pose after transforming both poses to one frame."""
+                            frames: Mapping[str, Frame], *, common_frame: str | None = None,
+                            result_frame: str | None = None) -> Pose:
+    """Compute a relative pose in an explicit common and parent-local frame."""
     first = parent if isinstance(parent, Pose) else Pose.from_mapping(parent)
     second = child if isinstance(child, Pose) else Pose.from_mapping(child)
-    common = result_frame or first.frame
+    common = common_frame or (first.frame if first.frame == second.frame else None)
+    if common is None:
+        raise ValueError("common_frame is required for poses in different frames")
     first_common = transform_pose(first, frame_transform(frames, first.frame, common),
-                                  target_frame=common)
+                                   target_frame=common)
     second_common = transform_pose(second, frame_transform(frames, second.frame, common),
                                    target_frame=common)
     return relative_pose(first_common, second_common, result_frame=result_frame)

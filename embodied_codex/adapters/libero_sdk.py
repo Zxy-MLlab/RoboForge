@@ -24,12 +24,13 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                     "shape":"{frame_id, step, cameras, proprioception}",
                     "rule":"camera RGB/calibration are under cameras; robot state is under proprioception"},
                 "proprioception":{
-                    "shape":"{step, proprioception}",
+                    "shape":"{frame_id, step, proprioception}",
                     "fields":"read eef_pose, gripper, joint_state, and proprioception from result['proprioception']",
                     "example":"obs = robot.observe(channel='proprioception', request={}); pose = obs['proprioception']['eef_pose']"}}},
         "use":{
             "signature":"robot.use(tool_id, payload)",
-            "returns":"direct Tool result; no receipt/result wrapper"},
+            "returns":"direct Tool result; no receipt/result wrapper",
+            "output_fields":["tool_id","step","result"]},
         "act":{
             "signature":"robot.act(action)",
         "returns":"action receipt with type, reached, step, eef_before, eef_after, and gripper_width_m",
@@ -40,8 +41,21 @@ LIBERO_ROBOT_SDK_CONTRACT = {
         "verify":{
             "signature":"robot.verify(verifier, payload)",
             "returns":"direct sensor-only verifier result containing boolean verified",
-            "output_fields":["verified","sensor_only","verifier_error","reason"]},
-        "record":{"signature":"robot.record(event)","returns":"{recorded: true}"},
+            "output_fields":["verified","sensor_only","verifier_error","reason",
+                              "criterion","target_xy_error_m","vertical_offset_m",
+                              "source_vacated","nearest_source_detection_m","object_to_eef_distance_m",
+                              "gripper_width_m","retained_width","object_count","object","target",
+                              "eef_world_xyz","source_anchor_world_xyz","support_overlap_fraction",
+                              "object_coverage_fraction","target_coverage_fraction",
+                              "support_overlap_normalization","target_geometry_source",
+                              "minimum_support_overlap","support_gap_m","support_gap_range_m",
+                              "center_inside_target_bounds","target_count","target_anchor_world_xyz",
+                              "target_association_rank","maximum_target_association_rank","support_height_source",
+                              "support_plane_height_m","target_surface_height_error_m",
+                              "maximum_target_surface_height_error_m","selected_object_source_displacement_m",
+                              "geometric_source_vacated","source_transport_verified","source_vacancy_method"]},
+        "record":{"signature":"robot.record(event)","returns":"{recorded: true}",
+                  "output_fields":["recorded"]},
     },
     "actions":{
         "move_to_point":{
