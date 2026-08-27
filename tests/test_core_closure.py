@@ -205,6 +205,30 @@ def test_run_controller_agent_evidence_contains_execution_digest(tmp_path):
     assert "rpc_events" not in json.dumps(evidence["agent_evidence"])
 
 
+def test_execution_artifact_handles_resolve_to_immutable_scoped_snapshots(tmp_path):
+    adapter = FakeAdapter("set marker", tmp_path / "adapter")
+    loop = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    source = adapter.artifact_dir / "reused.bin"
+    source.write_bytes(b"execution-one")
+
+    loop._artifact_scope = "execution-one"
+    first = loop._register_artifacts({"artifact": "artifact://adapter/reused.bin"})["artifact"]
+    first_path = loop._artifact_handles[first]
+    assert first.startswith("artifact://agent/")
+    assert first_path.read_bytes() == b"execution-one"
+
+    source.write_bytes(b"execution-two")
+    loop._artifact_scope = "execution-two"
+    second = loop._register_artifacts({"artifact": "artifact://adapter/reused.bin"})["artifact"]
+    second_path = loop._artifact_handles[second]
+    assert second != first
+    assert second_path.read_bytes() == b"execution-two"
+    assert first_path.read_bytes() == b"execution-one"
+    assert str(first_path) not in json.dumps({"artifact": first})
+    assert str(second_path) not in json.dumps({"artifact": second})
+    assert first_path.parent != second_path.parent
+
+
 def test_context_includes_bounded_execution_digest_without_rpc_event_log():
     digest = build_execution_digest({"completed": True, "error": None,
         "program_sha256": "sha", "rpc_events": [

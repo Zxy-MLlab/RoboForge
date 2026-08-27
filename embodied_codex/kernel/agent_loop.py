@@ -6,8 +6,10 @@ import base64
 import hashlib
 import json
 import mimetypes
+import os
 import re
 from pathlib import Path
+import shutil
 import time
 from typing import Any, Mapping
 
@@ -76,6 +78,9 @@ class AgentLoop:
                                       "completion_valid": False, "successful_cases": 0}
         self._active_tool_call_id: str | None = None
         self._artifact_handles: dict[str, Path] = {}
+        # Adapter artifact paths may be reused by later executions.  Handles
+        # therefore point at immutable snapshots owned by this run.
+        self._artifact_scope: str | None = None
         self._recovery_mode = False
         restored_tool_groups: list[str] = []
         restored_tool_bindings: list[str] = []
@@ -148,6 +153,39 @@ class AgentLoop:
         return {"type": "object", "properties": dict(properties or {}),
                 "required": list(required), "additionalProperties": False}
 
+    def _immutable_artifact(self, source: Path) -> tuple[str, Path]:
+        """Snapshot an authorized source file before exposing an opaque handle."""
+        source = source.resolve()
+        digest = _file_sha256(source)
+        scope = getattr(self, "_artifact_scope", None) or "unscoped"
+        scope_token = hashlib.sha256(scope.encode()).hexdigest()[:24]
+        identity = hashlib.sha256(
+            (scope + "\0" + str(source) + "\0" + digest).encode()).hexdigest()
+        directory = self.root / "artifacts" / "immutable" / scope_token
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{digest[:24]}-{source.name}"
+        if target.exists():
+            if not target.is_file() or _file_sha256(target) != digest:
+                raise ProtocolError("immutable artifact snapshot checksum mismatch")
+        else:
+            temporary = target.with_name(f".{target.name}.tmp-{time.time_ns()}")
+            try:
+                shutil.copyfile(source, temporary)
+                if _file_sha256(temporary) != digest or _file_sha256(source) != digest:
+                    raise ProtocolError("artifact changed while creating immutable snapshot")
+                temporary.chmod(0o444)
+                with temporary.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+                directory_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return f"artifact://agent/{identity[:24]}/{source.name}", target
+
     def _register_artifacts(self, value: Any) -> Any:
         if isinstance(value, Mapping):
             return {str(key): self._register_artifacts(item) for key, item in value.items()}
@@ -181,8 +219,8 @@ class AgentLoop:
             if not any(candidate == root or root in candidate.parents for root in allowed_roots):
                 token = hashlib.sha256(str(candidate).encode()).hexdigest()[:24]
                 return f"artifact://agent/denied/{token}"
-            handle = "artifact://agent/" + hashlib.sha256(str(candidate).encode()).hexdigest()[:24] + "/" + candidate.name
-            self._artifact_handles[handle] = candidate
+            handle, snapshot = self._immutable_artifact(candidate)
+            self._artifact_handles[handle] = snapshot
             return handle
         except OSError:
             token = hashlib.sha256(str(value).encode()).hexdigest()[:24]
@@ -943,6 +981,7 @@ class AgentLoop:
                                              "controller_sha256": controller_sha,
                                              "call_id": self._active_tool_call_id}
         self._checkpoint()
+        self._artifact_scope = execution_key
         self.budget.executions += 1
         self.cumulative_executions += 1
         begin = getattr(self.adapter, "begin_controller_execution", None)
@@ -1029,6 +1068,7 @@ class AgentLoop:
         self._agent_latest_evidence = agent_evidence
         self.state["restored_evidence_unverified"] = False
         self.event_store.commit("execution", self._evidence_reference(evidence))
+        self._artifact_scope = None
         self.state["pending_execution"] = None
         self.state["completed_execution"] = {"execution_key": execution_key,
                                               "call_id": call_id}
