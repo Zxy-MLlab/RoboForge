@@ -315,9 +315,17 @@ class AgentLoop:
         if existing is not None:
             self._pending_decision_id = identifier
             return {"recorded": False, "duplicate": True, "decision_id": identifier}
-        record = {"decision_id": identifier, "goal": goal, "evidence_refs": refs[:16],
-                  "hypothesis": hypothesis, "decision": decision,
-                  "expected_effect": expected_effect, "uncertainty": uncertainty,
+        def public_text(value):
+            if value is None:
+                return None
+            text = str(value)
+            if text.startswith(("/", "\\")) or (len(text) > 2 and text[1] == ":"
+                                                 and text[2:3] in ("/", "\\")):
+                return "<host path omitted>"
+            return text[:2000]
+        record = {"decision_id": identifier, "goal": public_text(goal), "evidence_refs": refs[:16],
+                  "hypothesis": public_text(hypothesis), "decision": public_text(decision),
+                  "expected_effect": public_text(expected_effect), "uncertainty": public_text(uncertainty),
                   "model_response_id": getattr(self, "_current_model_response_id", None),
                   "model_call_id": call_id}
         self.event_store.commit("decision_record", record)

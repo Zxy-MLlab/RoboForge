@@ -425,6 +425,24 @@ def test_decision_record_rejects_non_routing_evidence_reference(tmp_path):
                               uncertainty=None)
 
 
+def test_decision_record_bounds_and_filters_public_text(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop._active_tool_call_id = "safe-text-call"
+    record = loop._record_decision(
+        goal=str(tmp_path / "controller.py"), evidence_refs=[],
+        hypothesis="x" * 3000,
+        decision="C:\\private\\controller.py",
+        expected_effect="public result",
+        uncertainty=None,
+    )
+    stored = loop._list_decisions()["decisions"][0]
+    assert record["recorded"] is True
+    assert stored["goal"] == "<host path omitted>"
+    assert stored["decision"] == "<host path omitted>"
+    assert len(stored["hypothesis"]) == 2000
+    assert str(tmp_path) not in json.dumps(stored)
+
+
 def test_verification_receipt_is_only_success_truth_and_one_case_skill_is_allowed(tmp_path):
     class ReceiptAdapter(FakeAdapter):
         def sensor_report(self, execution):
