@@ -35,10 +35,28 @@ def test_relative_pose_respects_parent_orientation():
     quarter_turn = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
     parent = Pose("world", (1, 1, 0), quarter_turn)
     child = Pose("world", (1, 2, 0), quarter_turn)
-    relative = relative_pose(parent, child)
-    assert relative.frame == "relative_to:world"
+    relative = relative_pose(parent, child, result_frame="parent_local")
+    assert relative.frame == "parent_local"
     assert relative.position == pytest.approx((1.0, 0.0, 0.0))
     assert relative.orientation == pytest.approx((0.0, 0.0, 0.0, 1.0))
+
+
+def test_quaternion_rotation_preserves_non_unit_vector_norm():
+    quarter_turn = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
+    parent = Pose("world", (0, 0, 0), quarter_turn)
+    child = Pose("world", (0, 0.2, 0), quarter_turn)
+    relative = relative_pose(parent, child, result_frame="parent_local")
+    assert relative.position == pytest.approx((0.2, 0.0, 0.0))
+    assert math.sqrt(sum(value * value for value in relative.position)) == pytest.approx(0.2)
+
+
+def test_pose_canonical_serialization_round_trip():
+    original = Pose("tool", (0.1, -0.2, 0.3), (0.0, 0.0, 0.2, 0.98))
+    encoded = original.as_dict()
+    assert set(encoded) == {"frame", "position_m", "orientation_xyzw"}
+    assert Pose.from_mapping(encoded).as_dict() == encoded
+    with pytest.raises(ValueError):
+        Pose.from_mapping({"frame": "tool", "position": [0, 0, 0]})
 
 
 def test_frame_graph_composes_chained_rotations_and_translations():

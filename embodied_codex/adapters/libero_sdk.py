@@ -15,6 +15,7 @@ LIBERO_ROBOT_SDK_CONTRACT = {
             "signature":"robot.observe(channel='rgbd', request={})",
             "channels":["rgb","rgbd","proprioception"],
             "returns":"direct observation object; no receipt/result wrapper",
+            "output_fields":["frame_id","step","cameras","proprioception"],
             "returns_by_channel":{
                 "rgbd":{
                     "shape":"{frame_id, step, cameras, proprioception}",
@@ -31,10 +32,15 @@ LIBERO_ROBOT_SDK_CONTRACT = {
             "returns":"direct Tool result; no receipt/result wrapper"},
         "act":{
             "signature":"robot.act(action)",
-        "returns":"action receipt with type, reached, step, eef_before, eef_after, and gripper state"},
+        "returns":"action receipt with type, reached, step, eef_before, eef_after, and gripper_width_m",
+        "output_fields":["type","step","reached","eef_before","eef_after","gripper_width_m",
+                          "target_xyz","target_quaternion_xyzw","final_position_error_m",
+                          "final_orientation_error_rad","target_frame","action_frame_axis",
+                          "action_frame_axis_frame"]},
         "verify":{
             "signature":"robot.verify(verifier, payload)",
-            "returns":"direct sensor-only verifier result containing boolean verified"},
+            "returns":"direct sensor-only verifier result containing boolean verified",
+            "output_fields":["verified","sensor_only","verifier_error","reason"]},
         "record":{"signature":"robot.record(event)","returns":"{recorded: true}"},
     },
     "actions":{

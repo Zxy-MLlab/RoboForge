@@ -83,7 +83,13 @@ def _quaternion(value: Sequence[Number]) -> tuple[float, float, float, float]:
 
 
 def _quat_mul(a: Sequence[Number], b: Sequence[Number]) -> tuple[float, float, float, float]:
-    ax, ay, az, aw = _quaternion(a); bx, by, bz, bw = _quaternion(b)
+    result = _quat_mul_raw(_quaternion(a), _quaternion(b))
+    return _quaternion(result)
+
+
+def _quat_mul_raw(a: Sequence[Number], b: Sequence[Number]) -> tuple[float, float, float, float]:
+    """Multiply quaternion components without normalizing a pure vector."""
+    ax, ay, az, aw = _vector(a, 4); bx, by, bz, bw = _vector(b, 4)
     return (aw * bx + ax * bw + ay * bz - az * by,
             aw * by - ax * bz + ay * bw + az * bx,
             aw * bz + ax * by - ay * bx + az * bw,
@@ -97,8 +103,10 @@ def _quat_conjugate(value: Sequence[Number]) -> tuple[float, float, float, float
 
 def _quat_rotate(quaternion: Sequence[Number], vector: Sequence[Number]) -> list[float]:
     q = _quaternion(quaternion)
-    v = _quaternion((_vector(vector) + (0.0,)))
-    rotated = _quat_mul(_quat_mul(q, v), _quat_conjugate(q))
+    # The vector quaternion is intentionally not normalized: rotation must
+    # preserve the metric magnitude of arbitrary (non-unit) vectors.
+    v = _vector(vector) + (0.0,)
+    rotated = _quat_mul_raw(_quat_mul_raw(q, v), _quat_conjugate(q))
     return list(rotated[:3])
 
 
@@ -160,14 +168,14 @@ class Pose:
             object.__setattr__(self, "orientation", _quaternion(self.orientation))
 
     def as_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"frame": self.frame, "position": list(self.position)}
+        result: dict[str, Any] = {"frame": self.frame, "position_m": list(self.position)}
         if self.orientation is not None:
             result["orientation_xyzw"] = list(self.orientation)
         return result
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any], *, default_frame: str = "unknown") -> "Pose":
-        position = value.get("position")
+        position = value.get("position_m")
         if position is None:
             raise ValueError("pose position is required")
         orientation = value.get("orientation_xyzw")
@@ -179,6 +187,8 @@ def transform_pose(pose: Pose | Mapping[str, Any], transform: Sequence[Sequence[
     """Transform a pose and retain an explicit target frame identity."""
     source = pose if isinstance(pose, Pose) else Pose.from_mapping(pose)
     matrix = _matrix4(transform)
+    if target_frame is None and matrix != _identity():
+        raise ValueError("target_frame is required when transforming coordinates")
     orientation = source.orientation
     if orientation is not None:
         orientation = _quat_mul(_matrix_quaternion(matrix), orientation)
@@ -224,9 +234,8 @@ def relative_pose(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, A
     """Return child pose expressed in the parent's local coordinate frame.
 
     The two input poses describe frames in a common source frame.  Since the
-    returned numbers are parent-local, callers may provide the declared name
-    of that local frame; otherwise a deterministic derived frame label is used
-    instead of incorrectly reusing the source-frame label.
+    returned numbers are parent-local when the parent is oriented, callers
+    must provide the declared identity of that local frame.
     """
     first = parent if isinstance(parent, Pose) else Pose.from_mapping(parent)
     second = child if isinstance(child, Pose) else Pose.from_mapping(child)
@@ -235,10 +244,12 @@ def relative_pose(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, A
     translation = [second.position[i] - first.position[i] for i in range(3)]
     orientation = None
     if first.orientation is not None:
+        if result_frame is None:
+            raise ValueError("result_frame is required for parent-local relative pose")
         translation = _quat_rotate(_quat_conjugate(first.orientation), translation)
         if second.orientation is not None:
             orientation = _quat_mul(_quat_conjugate(first.orientation), second.orientation)
-        return Pose(result_frame or f"relative_to:{first.frame}", translation, orientation)
+        return Pose(result_frame, translation, orientation)
     # Without a parent orientation no parent-local transform was performed;
     # retain the common source-frame label instead of claiming local numbers.
     return Pose(result_frame or first.frame, translation, orientation)
@@ -274,21 +285,23 @@ def pose_delta(requested: Pose | Mapping[str, Any], achieved: Pose | Mapping[str
 
 
 def action_frame_error(requested: Sequence[Number], achieved: Sequence[Number],
-                       approach_axis: Sequence[Number], *, axis_frame: str = "unknown") -> dict[str, Any]:
+                       action_axis: Sequence[Number], *, axis_frame: str = "unknown") -> dict[str, Any]:
     """Decompose a position error in an explicitly supplied action frame."""
     error = [float(a) - float(r) for r, a in zip(_vector(requested), _vector(achieved))]
-    axis = _vector(approach_axis)
+    axis = _vector(action_axis)
     norm = math.sqrt(sum(item * item for item in axis))
     if norm == 0:
-        raise ValueError("approach axis must be non-zero")
+        raise ValueError("action axis must be non-zero")
     unit = [item / norm for item in axis]
     along = sum(error[i] * unit[i] for i in range(3))
     lateral_vector = [error[i] - along * unit[i] for i in range(3)]
     return {"along_action_axis_error_m": along,
+            # Deprecated read-only alias retained for old evidence readers;
+            # canonical callers use the action-axis name above.
             "along_approach_axis_error_m": along,
             "lateral_error_m": math.sqrt(sum(item * item for item in lateral_vector)),
             "lateral_error_vector_m": lateral_vector,
-            "approach_axis": list(unit), "approach_axis_frame": str(axis_frame)}
+            "action_axis": list(unit), "action_axis_frame": str(axis_frame)}
 
 
 @dataclass(frozen=True)
@@ -485,17 +498,19 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
                     Pose(frame, actual, achieved_action.get("eef_quaternion_xyzw")))
             except (TypeError, ValueError):
                 pass
-            axis = (achieved_action.get("action_frame_axis")
-                    or achieved_action.get("approach_axis")
-                    or requested_action.get("action_frame_axis")
-                    or requested_action.get("approach_axis"))
+            axis = (achieved_action.get("action_axis")
+                    or achieved_action.get("action_frame_axis")
+                    or requested_action.get("action_axis")
+                    or requested_action.get("action_frame_axis"))
             if isinstance(axis, Mapping):
                 axis = axis.get("axis")
             if axis is not None:
                 try:
                     delta["action_frame"] = action_frame_error(
                         target, actual, axis,
-                        axis_frame=str(achieved_action.get("action_frame_axis_frame")
+                        axis_frame=str(achieved_action.get("action_axis_frame")
+                                       or achieved_action.get("action_frame_axis_frame")
+                                       or requested_action.get("action_axis_frame")
                                        or requested_action.get("action_frame_axis_frame")
                                        or achieved_action.get("target_frame")
                                        or requested_action.get("frame") or "unknown"))
@@ -517,8 +532,12 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
         after_entities = {item.entity_id: item for item in after_state.entities}
         displacements = {}
         for entity_id in sorted(before_entities.keys() & after_entities.keys()):
-            first = before_entities[entity_id].geometry.get("center")
-            second = after_entities[entity_id].geometry.get("center")
+            before_geometry = before_entities[entity_id].geometry
+            after_geometry = after_entities[entity_id].geometry
+            if before_geometry.get("frame") != after_geometry.get("frame"):
+                continue
+            first = before_geometry.get("center")
+            second = after_geometry.get("center")
             if isinstance(first, Sequence) and isinstance(second, Sequence):
                 try:
                     displacements[entity_id] = [float(second[i]) - float(first[i]) for i in range(3)]

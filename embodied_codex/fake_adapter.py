@@ -72,7 +72,8 @@ class FakeAdapter:
     def canonical_observation(self, observation):
         if not isinstance(observation, dict):
             return observation
-        result = dict(observation)
+        result = {key: observation[key] for key in ("frame_id", "step", "cameras")
+                  if key in observation}
         result["proprioception"] = self.canonical_embodied_state()["robot"]
         return result
 

@@ -10,7 +10,7 @@ from .embodied_state import build_transition, normalize_entity
 _PUBLIC_RESULT_FIELDS = (
     "reached", "target_xyz", "target_quaternion_xyzw", "eef_before", "eef_after",
     "final_position_error_m", "final_orientation_error_rad",
-    "gripper", "approach_axis", "action_frame_axis", "verified", "sensor_only",
+    "gripper", "gripper_width_m", "action_axis", "action_axis_frame", "action_frame_axis", "verified", "sensor_only",
     "verifier_error", "reason", "criterion",
 )
 _PRIVATE_KEYS = {"reward", "done", "env.check_success", "env_check_success",
@@ -47,11 +47,18 @@ def _bounded_public(value: Any, *, depth: int = 0, max_items: int = 24):
     if isinstance(value, (list, tuple)):
         if depth >= 6:
             return "<nested value omitted>"
-        result = [_bounded_public(item, depth=depth + 1, max_items=max_items)
-                  for item in list(value)[:max_items]]
-        if len(value) > max_items:
-            result.append(f"<... {len(value) - max_items} values omitted>")
-        return result
+        values = list(value)
+        if len(values) <= max_items:
+            return [_bounded_public(item, depth=depth + 1, max_items=max_items)
+                    for item in values]
+        head_count = max(1, max_items // 4)
+        tail_count = max(1, max_items - head_count)
+        return {"total_count": len(values),
+                "head": [_bounded_public(item, depth=depth + 1, max_items=max_items)
+                          for item in values[:head_count]],
+                "tail": [_bounded_public(item, depth=depth + 1, max_items=max_items)
+                          for item in values[-tail_count:]],
+                "omitted_count": len(values) - head_count - tail_count}
     return value
 
 

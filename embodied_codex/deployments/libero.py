@@ -72,7 +72,7 @@ class LiberoEpisode:
 class LiberoDeployment:
     _OUTPUT_FIELDS={
         "observe":{"frame_id","step","cameras","proprioception"},
-        "act":{"type","step","reached","eef_before","eef_after","gripper_qpos",
+        "act":{"type","step","reached","eef_before","eef_after","gripper_width_m",
                "target_xyz","target_quaternion_xyzw","final_position_error_m",
                "final_orientation_error_rad","target_frame","action_frame_axis",
                "action_frame_axis_frame"},
@@ -343,8 +343,9 @@ class LiberoDeployment:
                 "robot": {
                     "eef_pose": {"frame": "world", "position_m": raw["robot0_eef_pos"],
                                   "orientation_xyzw": raw["robot0_eef_quat"]},
-                    "gripper": {"width_m": float(abs(qpos[0]) + abs(qpos[1])),
-                                 "state": "closed" if float(abs(qpos[0]) + abs(qpos[1])) < 0.02 else "open"},
+                    # Width is factual proprioception.  Semantic open/closed
+                    # interpretation requires an explicitly calibrated adapter.
+                    "gripper": {"width_m": float(abs(qpos[0]) + abs(qpos[1]))},
                     "joint_state": {"position": raw["robot0_joint_pos"],
                                     "velocity": raw["robot0_joint_vel"],
                                     "gripper_velocity": raw["robot0_gripper_qvel"]},
@@ -358,8 +359,8 @@ class LiberoDeployment:
             return observation
         result = dict(observation)
         canonical = self.canonical_embodied_state()
+        result = {key: result[key] for key in ("frame_id", "step", "cameras") if key in result}
         result["proprioception"] = canonical["robot"]
-        result["eef_frame"] = "world"
         return result
 
     def dispatch(self,method,arguments):
@@ -392,7 +393,9 @@ class LiberoDeployment:
         return projected
 
     def _observe(self,channel,request):
-        if channel=="proprioception":return {"step":self.step,"proprioception":self._proprio()}
+        if channel=="proprioception":
+            return {"frame_id": f"proprio-{self.step:06d}", "step": self.step,
+                    "proprioception": self.canonical_embodied_state()["robot"]}
         if channel not in ("rgb","rgbd"):raise LiberoDeploymentError("unsupported sensor channel")
         from robosuite.utils.camera_utils import get_camera_extrinsic_matrix,get_camera_intrinsic_matrix,get_real_depth_map
         requested=request.get("cameras") or list(CAMERAS)
@@ -416,7 +419,8 @@ class LiberoDeployment:
                              "depth_sha256":hashlib.sha256(depth_path.read_bytes()).hexdigest(),
                              "depth_range_m":[float(np.nanmin(depth)),float(np.nanmax(depth))]})
             cameras[name]=item
-        report={"frame_id":frame_id,"step":self.step,"cameras":cameras,"proprioception":self._proprio()}
+        report={"frame_id":frame_id,"step":self.step,"cameras":cameras,
+                "proprioception": self.canonical_embodied_state()["robot"]}
         (folder/"observation.json").write_text(json.dumps(report,indent=2)+"\n")
         self.trace.append({"event":"observe","frame_id":frame_id,"step":self.step});return report
 
@@ -523,7 +527,7 @@ class LiberoDeployment:
         else:raise LiberoDeploymentError(f"unsupported action: {kind}")
         result={"type":kind,"step":self.step,"reached":bool(reached),"eef_before":before.tolist(),
                 "eef_after":np.asarray(self.obs["robot0_eef_pos"]).tolist(),
-                "gripper_qpos":np.asarray(self.obs["robot0_gripper_qpos"]).tolist()}
+                "gripper_width_m":float(np.abs(np.asarray(self.obs["robot0_gripper_qpos"], dtype=float)).sum())}
         if kind in ("move_to_point", "move_to_pose"):
             reference = self.references.get(str(action.get("pose_ref") or action.get("target_ref")), {})
             axis = reference.get("action_frame_axis") or reference.get("approach_world")
