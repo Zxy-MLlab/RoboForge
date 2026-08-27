@@ -120,16 +120,27 @@ def test_context_bounds_fixed_fields_tool_calls_and_multimodal_inputs(tmp_path, 
         assert bounded[key]["artifact_uri"].startswith("run://artifacts/context/")
 
     class ManyCalls:
+        def __init__(self):
+            self.outputs = []
         def decide(self, **_kwargs):
             return {"content": "", "tool_calls": [
                 {"id": str(index), "name": "list_files", "arguments": "{}"}
                 for index in range(5)]}
-    loop = _loop(tmp_path / "calls", ManyCalls(),
+        def record_tool_output(self, call_id, output, **metadata):
+            self.outputs.append((call_id, json.loads(output), metadata))
+    many_calls = ManyCalls()
+    loop = _loop(tmp_path / "calls", many_calls,
                  budget=LoopBudget(max_steps=1, max_executions=1),
                  context_window=window)
     result = loop.run("bounded")
     tool_results = [row for row in loop.event_store.events() if row["kind"] == "tool_result"]
-    assert len(tool_results) == 2
+    assert len(tool_results) == 5
+    assert [row["payload"]["skipped"] for row in tool_results] == [
+        False, False, True, True, True]
+    assert [call_id for call_id, _output, _metadata in many_calls.outputs] == [
+        "0", "1", "2", "3", "4"]
+    assert all(output["ok"] is False and metadata["failed"] is True
+               for _call_id, output, metadata in many_calls.outputs[2:])
     assert result["resumable"] is True
 
     image = loop.workspace.root / "large.png"

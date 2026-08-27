@@ -1088,9 +1088,10 @@ class AgentLoop:
                 self._checkpoint(); continue
             call_pairs = []
             maximum_calls = self.context_window.budgets.max_tool_calls_per_turn
-            for index, call in enumerate(calls[:maximum_calls]):
+            for index, call in enumerate(calls):
                 if not isinstance(call, Mapping):
-                    continue
+                    raise ProtocolError(
+                        f"model function call {index} is not a mapping")
                 function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
                 call_name = str(call.get("name") or function.get("name") or "")
                 raw_arguments = call.get("arguments") if "arguments" in call else function.get("arguments", "{}")
@@ -1104,17 +1105,23 @@ class AgentLoop:
                          "tool_calls": normalized_calls}
             self.messages.append(assistant)
             delivered_images = 0
-            for call, normalized in call_pairs:
+            for call_index, (call, normalized) in enumerate(call_pairs):
                 name = ""
                 arguments: dict[str, Any] = {}
+                skipped = call_index >= maximum_calls
                 try:
                     name = str(call.get("name") or call.get("function", {}).get("name") or "")
                     raw = call.get("arguments") or call.get("function", {}).get("arguments") or "{}"
                     arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
-                    self._active_tool_call_id = normalized["id"]
-                    result = self.tools.invoke(name, arguments)
-                    if name == "search_assets": self.retrieved_assets = result
-                    payload = {"ok": True, "result": result}
+                    if skipped:
+                        payload = {"ok": False, "status": "failed",
+                            "error": ("Tool call was not executed because the response "
+                                      f"exceeded the per-turn limit of {maximum_calls}")}
+                    else:
+                        self._active_tool_call_id = normalized["id"]
+                        result = self.tools.invoke(name, arguments)
+                        if name == "search_assets": self.retrieved_assets = result
+                        payload = {"ok": True, "result": result}
                 except Exception as exc:
                     payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 finally:
@@ -1143,9 +1150,15 @@ class AgentLoop:
                     parts.extend({"type": "image_url", "image_url": {"url": url}}
                                  for url in multimodal)
                     self.messages.append({"role": "user", "content": parts})
+                record_tool_output = getattr(self.model, "record_tool_output", None)
+                if callable(record_tool_output):
+                    record_tool_output(normalized["id"], content,
+                                       multimodal_inputs=multimodal,
+                                       failed=not bool(payload.get("ok")))
                 self.event_store.commit("tool_result", {"name": name,
-                                                        "payload": event_payload})
-                self._record_attempt(name, arguments, bool(payload.get("ok")))
+                    "payload": event_payload, "skipped": skipped})
+                if not skipped:
+                    self._record_attempt(name, arguments, bool(payload.get("ok")))
             self._checkpoint()
         exhausted = self.budget.exhausted()
         finished = bool(self.state.get("finished", False))
