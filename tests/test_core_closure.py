@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Mapping
 
 import pytest
 
@@ -207,6 +208,55 @@ def test_context_includes_bounded_execution_digest_without_rpc_event_log():
     latest = context["latest_evidence"]
     assert latest["digest"]["actions"][0]["result"]["reached"] is True
     assert "rpc_events" not in json.dumps(latest)
+
+
+def test_digest_long_lists_preserve_head_and_tail_in_model_context(tmp_path):
+    actions = [{"index": index, "type": f"action-{index}"} for index in range(40)]
+    digest = {"execution": {"completed": True, "error": None,
+                             "controller_sha256": "sha"},
+              "tool_calls": [], "actions": actions, "verifications": [],
+              "artifacts": {"rgb": ["artifact://agent/rgb"], "depth": [],
+                            "trace": None, "rollout": None}}
+    evidence = AgentEvidence(execution={"completed": True, "error": None},
+                             diagnostics={}, digest=digest, evidence_ref="evidence://40")
+    context = ContextBuilder(adapter_index={}, asset_registry=None,
+                             workspace=None).build(task="task", latest_evidence=evidence)
+    bounded = ContextWindowManager().bound_context(context, artifact_root=tmp_path / "artifacts")
+    actions_view = bounded["latest_evidence"]["digest"]["actions"]
+    assert actions_view["total_count"] == 40
+    assert actions_view["omitted_count"] == 24
+    assert actions_view["head"][0]["type"] == "action-0"
+    assert actions_view["tail"][-1]["type"] == "action-39"
+    assert "rpc_events" not in json.dumps(bounded)
+
+
+def test_oversized_digest_remains_structured_under_evidence_budget(tmp_path):
+    digest = {"execution": {"completed": True, "error": None,
+                             "controller_sha256": "sha"},
+              "controller_result": {"output": "x" * 100_000},
+              "tool_calls": [{"tool_id": "tool:v1", "output_summary": "y" * 100_000}],
+              "actions": [{"index": 1, "type": "move", "result": {"reached": False}}],
+              "verifications": [{"verifier": "v", "verified": False}],
+              "artifacts": {"rgb": ["artifact://agent/rgb"], "depth": [],
+                            "trace": "artifact://agent/trace", "rollout": None}}
+    evidence = {"execution": {"completed": True, "error": None},
+                "diagnostics": {}, "digest": digest,
+                "evidence_ref": "evidence://large"}
+    context = {"system": "system", "task": "task", "adapter": {}, "workspace": [],
+               "assets": {}, "initial_observation": {},
+               "latest_evidence": evidence, "state": {}}
+    manager = ContextWindowManager(budgets=ResourceBudgets(max_evidence_chars=2_000))
+    bounded = manager.bound_context(context, artifact_root=tmp_path / "artifacts")
+    latest = bounded["latest_evidence"]
+    assert isinstance(latest, Mapping)
+    assert latest.get("truncated") is not True
+    assert isinstance(latest["digest"], Mapping)
+    for section in ("execution", "tool_calls", "actions", "verifications", "artifacts"):
+        assert section in latest["digest"]
+    encoded = json.dumps(latest)
+    assert "x" * 1000 not in encoded
+    assert "artifact://agent/trace" in encoded
+    assert "rpc_events" not in encoded
 
 
 def test_compare_executions_reports_facts_without_strategy_recommendations(tmp_path):

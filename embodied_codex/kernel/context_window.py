@@ -102,6 +102,97 @@ class ContextWindowManager:
                 "preview": encoded[:max(0, limit // 2)],
                 "artifact_uri": self._write_context_artifact(artifact_root, encoded)}
 
+    @classmethod
+    def _compact_public(cls, value: Any, *, depth: int = 0,
+                        max_items: int = 12, max_string: int = 192):
+        """Bound public values while preserving both ends of long sequences."""
+        if isinstance(value, str):
+            return value if len(value) <= max_string else value[:max_string] + "..."
+        if depth >= 6:
+            return "<nested value omitted>"
+        if isinstance(value, Mapping):
+            items = list(value.items())
+            result = {str(key): cls._compact_public(item, depth=depth + 1,
+                                                     max_items=max_items,
+                                                     max_string=max_string)
+                      for key, item in items[:max_items]}
+            if len(items) > max_items:
+                result["omitted_count"] = len(items) - max_items
+            return result
+        if isinstance(value, (list, tuple)):
+            entries = list(value)
+            if len(entries) <= max_items:
+                return [cls._compact_public(item, depth=depth + 1,
+                                            max_items=max_items,
+                                            max_string=max_string)
+                        for item in entries]
+            head_count = max(1, max_items // 4)
+            tail_count = max(1, max_items - head_count)
+            return {
+                "total_count": len(entries),
+                "head": [cls._compact_public(item, depth=depth + 1,
+                                              max_items=max_items,
+                                              max_string=max_string)
+                         for item in entries[:head_count]],
+                "tail": [cls._compact_public(item, depth=depth + 1,
+                                              max_items=max_items,
+                                              max_string=max_string)
+                         for item in entries[-tail_count:]],
+                "omitted_count": len(entries) - head_count - tail_count,
+            }
+        return value
+
+    @classmethod
+    def _compact_digest(cls, digest: Mapping[str, Any], *, max_items: int,
+                        max_string: int) -> dict[str, Any]:
+        """Bound digest sections independently so its schema remains usable."""
+        result: dict[str, Any] = {}
+        for key in ("execution", "controller_result", "tool_calls", "actions",
+                    "verifications", "artifacts"):
+            if key not in digest:
+                continue
+            section_limit = 64 if key == "execution" else max_items
+            result[key] = cls._compact_public(digest[key], max_items=section_limit,
+                                              max_string=max_string)
+        for key, value in digest.items():
+            if key not in result and key not in {"execution", "controller_result",
+                                                  "tool_calls", "actions",
+                                                  "verifications", "artifacts"}:
+                result[str(key)] = cls._compact_public(value, max_items=max_items,
+                                                        max_string=max_string)
+        return result
+
+    @classmethod
+    def _bound_latest_evidence(cls, value: Mapping[str, Any], limit: int) -> Mapping[str, Any]:
+        """Keep digest sections structured even when evidence exceeds its budget."""
+        digest = value.get("digest")
+        if not isinstance(digest, Mapping):
+            return value
+        # Reduce section widths and scalar previews until the bounded view fits.
+        for max_items, max_string in ((16, 192), (12, 128), (8, 96), (6, 64), (4, 40)):
+            candidate = {
+                "execution": cls._compact_public(value.get("execution") or {},
+                                                  max_items=8, max_string=max_string),
+                "digest": cls._compact_digest(digest, max_items=max_items,
+                                               max_string=max_string),
+            }
+            if isinstance(value.get("diagnostics"), Mapping):
+                candidate["diagnostics"] = cls._compact_public(
+                    value["diagnostics"], max_items=4, max_string=max_string)
+            if isinstance(value.get("evidence_ref"), str):
+                candidate["evidence_ref"] = value["evidence_ref"]
+            if len(json.dumps(candidate, default=str, sort_keys=True)) <= limit:
+                return candidate
+        # A final compact view retains the public sections and artifact refs;
+        # full detail remains available through inspect_execution/list_artifacts.
+        return {
+            "execution": cls._compact_public(value.get("execution") or {},
+                                              max_items=4, max_string=32),
+            "digest": cls._compact_digest(digest, max_items=2, max_string=24),
+            "diagnostics": {},
+            "evidence_ref": value.get("evidence_ref"),
+        }
+
     def bound_context(self, context: Mapping[str, Any], *,
                       artifact_root: str | Path) -> dict[str, Any]:
         root = Path(artifact_root).resolve()
@@ -114,7 +205,11 @@ class ContextWindowManager:
                   "state": self.budgets.max_state_chars}
         for key, limit in limits.items():
             if key in result:
-                result[key] = self._bound_field(result[key], int(limit), root)
+                if key == "latest_evidence" and isinstance(result[key], Mapping) \
+                        and isinstance(result[key].get("digest"), Mapping):
+                    result[key] = self._bound_latest_evidence(result[key], int(limit))
+                else:
+                    result[key] = self._bound_field(result[key], int(limit), root)
         encoded = json.dumps(result, default=str)
         if len(encoded) > self.budgets.max_context_chars:
             # Preserve routing fields and replace the complete fixed state with

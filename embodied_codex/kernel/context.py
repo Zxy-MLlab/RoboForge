@@ -110,8 +110,20 @@ class ContextBuilder:
             return {str(key): ContextBuilder._bounded_digest(item, depth=depth + 1)
                     for key, item in list(items)[:24]}
         if isinstance(value, (list, tuple)):
-            return [ContextBuilder._bounded_digest(item, depth=depth + 1)
-                    for item in list(value)[:16]]
+            entries = list(value)
+            if len(entries) <= 16:
+                return [ContextBuilder._bounded_digest(item, depth=depth + 1)
+                        for item in entries]
+            head_count = 4
+            tail_count = 12
+            return {
+                "total_count": len(entries),
+                "head": [ContextBuilder._bounded_digest(item, depth=depth + 1)
+                         for item in entries[:head_count]],
+                "tail": [ContextBuilder._bounded_digest(item, depth=depth + 1)
+                         for item in entries[-tail_count:]],
+                "omitted_count": len(entries) - head_count - tail_count,
+            }
         return value
 
     def _controller_summary(self):
