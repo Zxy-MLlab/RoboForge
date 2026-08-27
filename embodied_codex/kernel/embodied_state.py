@@ -237,7 +237,8 @@ def normalize_entity(value: Mapping[str, Any], *, entity_id: str | None = None,
     geometry = {key: value[key] for key in ("frame", "center", "orientation", "size", "bounds")
                 if key in value}
     if "frame" not in geometry:
-        geometry["frame"] = str(value.get("coordinate_frame") or "unknown")
+        geometry["frame"] = str(value.get("coordinate_frame")
+                                  or ("world" if "world_xyz" in value else "unknown"))
     if "center" not in geometry:
         center = value.get("world_xyz") or value.get("xyz")
         if center is not None:
@@ -249,6 +250,47 @@ def normalize_entity(value: Mapping[str, Any], *, entity_id: str | None = None,
                   geometry, perception,
                   dict(value.get("uncertainty") or {}),
                   dict(provenance or value.get("provenance") or {}))
+
+
+def normalize_robot_state(value: Mapping[str, Any], *, eef_frame: str = "world") -> RobotState:
+    """Normalize public proprioception without assuming a robot or task model."""
+    proprioception = dict(value.get("proprioception") or value)
+    position = (proprioception.get("eef_position") or proprioception.get("robot0_eef_pos")
+                or proprioception.get("eef_pos"))
+    orientation = (proprioception.get("eef_orientation_xyzw")
+                   or proprioception.get("robot0_eef_quat") or proprioception.get("eef_quat"))
+    pose = None
+    if position is not None:
+        try:
+            pose = Pose(eef_frame, position, orientation)
+        except (TypeError, ValueError):
+            pose = None
+    width = proprioception.get("gripper_width_m")
+    if width is None:
+        qpos = proprioception.get("robot0_gripper_qpos") or proprioception.get("gripper_qpos")
+        if isinstance(qpos, Sequence) and len(qpos) >= 2:
+            try:
+                width = abs(float(qpos[0])) + abs(float(qpos[1]))
+            except (TypeError, ValueError):
+                width = None
+    return RobotState(eef_pose=pose,
+                      gripper_state=proprioception.get("gripper_state"),
+                      gripper_width=float(width) if width is not None else None,
+                      proprioception=proprioception,
+                      observations={key: value[key] for key in ("frame_id", "step") if key in value})
+
+
+def normalize_embodied_state(observation: Mapping[str, Any], *,
+                             entities: Sequence[Entity | Mapping[str, Any]] = (),
+                             eef_frame: str = "world") -> EmbodiedState:
+    """Build a generic state from public observation and optional detections."""
+    frames = {eef_frame: Frame(eef_frame)}
+    normalized_entities = tuple(item if isinstance(item, Entity)
+                                else normalize_entity(item) for item in entities)
+    return EmbodiedState(frames=frames, robot=normalize_robot_state(observation, eef_frame=eef_frame),
+                         entities=normalized_entities,
+                         observations={key: observation[key] for key in ("frame_id", "step")
+                                       if key in observation})
 
 
 @dataclass(frozen=True)
@@ -350,10 +392,33 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
                                                for i in range(3)]
             except (TypeError, ValueError, IndexError):
                 pass
+    if isinstance(before, EmbodiedState) and isinstance(after, EmbodiedState):
+        before_pose = before.robot.eef_pose
+        after_pose = after.robot.eef_pose
+        if before_pose is not None and after_pose is not None and before_pose.frame == after_pose.frame:
+            delta.setdefault("eef_displacement", [after_pose.position[i] - before_pose.position[i]
+                                                    for i in range(3)])
+        before_entities = {item.entity_id: item for item in before.entities}
+        after_entities = {item.entity_id: item for item in after.entities}
+        displacements = {}
+        for entity_id in sorted(before_entities.keys() & after_entities.keys()):
+            first = before_entities[entity_id].geometry.get("center")
+            second = after_entities[entity_id].geometry.get("center")
+            if isinstance(first, Sequence) and isinstance(second, Sequence):
+                try:
+                    displacements[entity_id] = [float(second[i]) - float(first[i]) for i in range(3)]
+                except (TypeError, ValueError, IndexError):
+                    pass
+        if displacements:
+            delta["entity_displacement"] = displacements
+        if before.robot.gripper_width is not None or after.robot.gripper_width is not None:
+            delta["gripper_width"] = {"before": before.robot.gripper_width,
+                                       "after": after.robot.gripper_width}
     return EmbodiedTransition(before, dict(requested_action),
                               dict(achieved_action or {}), after, delta, verification)
 
 
 __all__ = ["Frame", "Pose", "Entity", "RobotState", "InteractionState", "EmbodiedState",
            "EmbodiedTransition", "transform_point", "transform_pose", "relative_pose",
-           "pose_delta", "action_frame_error", "normalize_entity", "build_transition"]
+           "pose_delta", "action_frame_error", "normalize_entity", "normalize_robot_state",
+           "normalize_embodied_state", "build_transition"]

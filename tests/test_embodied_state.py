@@ -11,6 +11,8 @@ from embodied_codex.kernel.embodied_state import (
     action_frame_error,
     build_transition,
     normalize_entity,
+    normalize_embodied_state,
+    normalize_robot_state,
     pose_delta,
     relative_pose,
     transform_point,
@@ -54,7 +56,7 @@ def test_entity_provenance_and_opaque_perception_refs():
         "world_xyz": [1, 2, 3], "mask_path": "artifact://sensor/opaque",
         "box_xyxy": [1, 2, 3, 4]}, provenance={"tool_id": "tool:v1"})
     assert entity.entity_id == "point-1"
-    assert entity.geometry["frame"] == "unknown"
+    assert entity.geometry["frame"] == "world"
     assert entity.geometry["center"] == [1, 2, 3]
     assert entity.provenance == {"tool_id": "tool:v1"}
     encoded = json.dumps(entity.as_dict())
@@ -93,6 +95,19 @@ def test_digest_exposes_generic_entities_and_transition_facts():
     assert digest["entities"][0]["provenance"]["tool_id"] == "perception:v1"
     assert digest["actions"][0]["transition"]["delta"]["robot_motion"]["frame"] == "world"
     assert "rpc_events" not in json.dumps(digest)
+
+
+def test_public_observation_normalizes_robot_and_entity_state():
+    robot = normalize_robot_state({"frame_id": "f1", "proprioception": {
+        "robot0_eef_pos": [1, 2, 3], "robot0_eef_quat": [0, 0, 0, 1],
+        "robot0_gripper_qpos": [0.2, -0.1]}})
+    assert robot.eef_pose.frame == "world"
+    assert robot.gripper_width == pytest.approx(0.3)
+    state = normalize_embodied_state(
+        {"frame_id": "f1", "proprioception": {"robot0_eef_pos": [1, 2, 3]}},
+        entities=[{"entity_id": "e", "world_xyz": [0, 0, 0], "label": "object"}])
+    assert state.frames["world"].name == "world"
+    assert state.entities[0].geometry["frame"] == "world"
 
 
 def test_execution_comparison_reports_transition_facts_only():
