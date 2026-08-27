@@ -581,6 +581,14 @@ class AgentLoop:
                                 for item in actions_a]
         orientation_errors_b = [item.get("result", {}).get("final_orientation_error_rad")
                                 for item in actions_b]
+        transitions_a = [item.get("transition") or {} for item in actions_a]
+        transitions_b = [item.get("transition") or {} for item in actions_b]
+        def transition_values(transitions, key):
+            values = []
+            for transition in transitions:
+                delta = transition.get("delta") if isinstance(transition, Mapping) else {}
+                values.append(delta.get(key) if isinstance(delta, Mapping) else None)
+            return values
         return {
             "controller_changed": a.get("controller_sha256") != b.get("controller_sha256"),
             "tool_calls": {"changed": self._comparison_value(tools_a) != self._comparison_value(tools_b),
@@ -598,7 +606,19 @@ class AgentLoop:
                          "position_errors_changed": self._comparison_value(position_errors_a) !=
                                                     self._comparison_value(position_errors_b),
                          "orientation_errors_changed": self._comparison_value(orientation_errors_a) !=
-                                                        self._comparison_value(orientation_errors_b)},
+                                                        self._comparison_value(orientation_errors_b),
+                         "robot_motion_changed": self._comparison_value(
+                             transition_values(transitions_a, "robot_motion")) !=
+                             self._comparison_value(transition_values(transitions_b, "robot_motion")),
+                         "eef_displacement_changed": self._comparison_value(
+                             transition_values(transitions_a, "eef_displacement")) !=
+                             self._comparison_value(transition_values(transitions_b, "eef_displacement")),
+                         "entity_displacement_changed": self._comparison_value(
+                             transition_values(transitions_a, "entity_displacement")) !=
+                             self._comparison_value(transition_values(transitions_b, "entity_displacement")),
+                         "action_frame_error_changed": self._comparison_value(
+                             transition_values(transitions_a, "action_frame")) !=
+                             self._comparison_value(transition_values(transitions_b, "action_frame"))},
             "verification": {"changed": self._comparison_value(verify_a) !=
                                       self._comparison_value(verify_b)},
         }

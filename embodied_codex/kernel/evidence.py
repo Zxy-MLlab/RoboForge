@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .embodied_state import build_transition, normalize_entity
+
 
 _PUBLIC_RESULT_FIELDS = (
     "reached", "target_xyz", "target_quaternion_xyzw", "eef_before", "eef_after",
@@ -72,7 +74,7 @@ def build_execution_digest(execution: Mapping[str, Any], *,
                        "error": _bounded_public(execution.get("error")),
                        "controller_sha256": controller_sha256 or execution.get("program_sha256")},
         "controller_result": _bounded_public(execution.get("result")),
-        "tool_calls": [], "actions": [], "verifications": [],
+        "tool_calls": [], "actions": [], "verifications": [], "entities": [],
         "artifacts": {"rgb": [], "depth": [], "trace": None, "rollout": None},
     }
     handles: set[str] = set()
@@ -93,6 +95,19 @@ def build_execution_digest(execution: Mapping[str, Any], *,
             if event.get("error"):
                 call["error"] = _bounded_public(event.get("error"))
             digest["tool_calls"].append(call)
+            if isinstance(output, Mapping):
+                detections = output.get("detections")
+                if isinstance(detections, Mapping):
+                    candidates = [item for values in detections.values()
+                                  if isinstance(values, list) for item in values]
+                elif isinstance(detections, list):
+                    candidates = detections
+                else:
+                    candidates = []
+                for candidate in candidates:
+                    if isinstance(candidate, Mapping):
+                        entity = normalize_entity(candidate, provenance={"tool_id": tool_id})
+                        digest["entities"].append(_bounded_public(entity.as_dict()))
         elif method == "act":
             public_result = result if isinstance(result, Mapping) else {}
             action = {"index": len(digest["actions"]) + 1,
@@ -100,6 +115,10 @@ def build_execution_digest(execution: Mapping[str, Any], *,
                 "requested": _bounded_public(arguments.get("action") or {}),
                 "result": {key: _bounded_public(public_result.get(key))
                            for key in _PUBLIC_RESULT_FIELDS if key in public_result}}
+            transition = build_transition(
+                before=None, requested_action=arguments.get("action") or {},
+                achieved_action=public_result, after=None)
+            action["transition"] = _bounded_public(transition.as_dict())
             if event.get("error"):
                 action["result"]["error"] = _bounded_public(event.get("error"))
             digest["actions"].append(action)
