@@ -14,6 +14,11 @@ _PRIVATE_KEYS = {"reward", "done", "env.check_success", "env_check_success",
                  "check_success", "hidden_evaluator", "hidden evaluator", "evaluator"}
 
 
+def is_routing_reference(value: Any) -> bool:
+    """Return whether a string is an opaque URI used to route evidence/tools."""
+    return isinstance(value, str) and value.startswith(("artifact://", "evidence://", "run://"))
+
+
 def _bounded_public(value: Any, *, depth: int = 0, max_items: int = 24):
     """Bound an already-public RPC value without interpreting its meaning."""
     if isinstance(value, str):
@@ -22,6 +27,8 @@ def _bounded_public(value: Any, *, depth: int = 0, max_items: int = 24):
         if value.startswith(("/", "\\")) or (len(value) > 2 and value[1] == ":"
                                                and value[2:3] in ("/", "\\")):
             return "<host path omitted>"
+        if is_routing_reference(value):
+            return value
         return value if len(value) <= 512 else value[:512] + "..."
     if isinstance(value, Mapping):
         if depth >= 6:
@@ -189,4 +196,5 @@ class HarnessMetadata:
                 "summary": dict(summary)}
 
 
-__all__ = ["AgentEvidence", "HarnessMetadata", "build_execution_digest"]
+__all__ = ["AgentEvidence", "HarnessMetadata", "build_execution_digest",
+           "is_routing_reference"]

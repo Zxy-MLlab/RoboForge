@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .evidence import AgentEvidence
+from .evidence import AgentEvidence, is_routing_reference
 
 
 _PRIVATE_DIGEST_KEYS = {"reward", "done", "env.check_success", "env_check_success",
@@ -99,6 +99,8 @@ class ContextBuilder:
     def _bounded_digest(value: Any, *, depth: int = 0):
         """Preserve compact digest records while bounding nested public data."""
         if isinstance(value, str):
+            if is_routing_reference(value):
+                return value
             return value if len(value) <= 512 else value[:512] + "..."
         if not isinstance(value, (Mapping, list, tuple)):
             return value

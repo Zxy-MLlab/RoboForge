@@ -259,6 +259,55 @@ def test_oversized_digest_remains_structured_under_evidence_budget(tmp_path):
     assert "rpc_events" not in encoded
 
 
+def test_routing_references_are_atomic_during_feedback_compaction(tmp_path):
+    long_id = "opaque-" + "x" * 700
+    artifact_uri = f"artifact://agent/{long_id}/rollout.mp4"
+    evidence_ref = f"evidence://execution/{long_id}"
+    run_ref = f"run://artifacts/context/{long_id}.json"
+    digest = {"execution": {"completed": True, "error": None,
+                             "controller_sha256": "sha"},
+              "controller_result": {"routing_ref": run_ref},
+              "tool_calls": [], "actions": [], "verifications": [],
+              "artifacts": {"rgb": [artifact_uri] * 40,
+                            "depth": [artifact_uri.replace("rollout", "depth")] * 40,
+                            "trace": artifact_uri.replace("rollout.mp4", "trace.json"),
+                            "rollout": artifact_uri}}
+    evidence = {"execution": {"completed": True, "error": None},
+                "diagnostics": {}, "digest": digest, "evidence_ref": evidence_ref}
+    manager = ContextWindowManager(budgets=ResourceBudgets(max_evidence_chars=256))
+    context = {"system": "system", "latest_evidence": evidence}
+    bounded = manager.bound_context(context, artifact_root=tmp_path / "artifacts")
+    latest = bounded["latest_evidence"]
+    assert latest["evidence_ref"] == evidence_ref
+    assert latest["digest"]["controller_result"]["routing_ref"] == run_ref
+    artifacts = latest["digest"]["artifacts"]
+    assert set(artifacts) == {"rgb", "depth", "trace", "rollout"}
+    assert artifacts["trace"] == artifact_uri.replace("rollout.mp4", "trace.json")
+    assert artifacts["rollout"] == artifact_uri
+    for key in ("rgb", "depth"):
+        sequence = artifacts[key]
+        assert sequence["total_count"] == 40
+        assert sequence["omitted_count"] == 38
+        assert all("..." not in item for item in sequence["head"] + sequence["tail"])
+
+
+def test_under_budget_latest_evidence_is_returned_without_compaction():
+    evidence = {"execution": {"completed": True, "error": None},
+                "diagnostics": {"reason": "kept"},
+                "digest": {"execution": {"completed": True, "error": None,
+                                            "controller_sha256": "sha"},
+                           "controller_result": {"message": "kept"},
+                           "tool_calls": [{"tool_id": "tool:v1", "output_summary": "kept"}],
+                           "actions": [], "verifications": [{"verified": False}],
+                           "artifacts": {"rgb": [], "depth": [], "trace": None,
+                                         "rollout": None}},
+                "evidence_ref": "evidence://small"}
+    manager = ContextWindowManager(budgets=ResourceBudgets(max_evidence_chars=20_000))
+    bounded = manager.bound_context({"latest_evidence": evidence}, artifact_root="/data/zxy/tmp")
+    assert bounded["latest_evidence"] == evidence
+    assert bounded["latest_evidence"] is evidence
+
+
 def test_compare_executions_reports_facts_without_strategy_recommendations(tmp_path):
     loop = AgentLoop.__new__(AgentLoop)
     loop.event_store = None

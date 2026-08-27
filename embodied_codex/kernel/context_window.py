@@ -10,6 +10,8 @@ import os
 import uuid
 from typing import Any, Mapping
 
+from .evidence import is_routing_reference
+
 
 @dataclass(frozen=True)
 class ResourceBudgets:
@@ -107,6 +109,8 @@ class ContextWindowManager:
                         max_items: int = 12, max_string: int = 192):
         """Bound public values while preserving both ends of long sequences."""
         if isinstance(value, str):
+            if cls._is_routing_reference(value):
+                return value
             return value if len(value) <= max_string else value[:max_string] + "..."
         if depth >= 6:
             return "<nested value omitted>"
@@ -142,6 +146,11 @@ class ContextWindowManager:
             }
         return value
 
+    @staticmethod
+    def _is_routing_reference(value: Any) -> bool:
+        """Routing URIs are atomic handles and must remain callable after bounding."""
+        return is_routing_reference(value)
+
     @classmethod
     def _compact_digest(cls, digest: Mapping[str, Any], *, max_items: int,
                         max_string: int) -> dict[str, Any]:
@@ -150,6 +159,25 @@ class ContextWindowManager:
         for key in ("execution", "controller_result", "tool_calls", "actions",
                     "verifications", "artifacts"):
             if key not in digest:
+                continue
+            if key == "artifacts" and isinstance(digest[key], Mapping):
+                # Artifact category names are part of the routing contract;
+                # only their handle sequences may be compacted.
+                artifacts = digest[key]
+                result[key] = {
+                    "rgb": cls._compact_public(artifacts.get("rgb", []),
+                                                max_items=max_items,
+                                                max_string=max_string),
+                    "depth": cls._compact_public(artifacts.get("depth", []),
+                                                  max_items=max_items,
+                                                  max_string=max_string),
+                    "trace": cls._compact_public(artifacts.get("trace"),
+                                                  max_items=1,
+                                                  max_string=max_string),
+                    "rollout": cls._compact_public(artifacts.get("rollout"),
+                                                    max_items=1,
+                                                    max_string=max_string),
+                }
                 continue
             section_limit = 64 if key == "execution" else max_items
             result[key] = cls._compact_public(digest[key], max_items=section_limit,
@@ -167,6 +195,11 @@ class ContextWindowManager:
         """Keep digest sections structured even when evidence exceeds its budget."""
         digest = value.get("digest")
         if not isinstance(digest, Mapping):
+            return value
+        # Preserve the original public structure and diagnostics whenever the
+        # evidence already fits; compaction is only a response to a real budget
+        # violation.
+        if len(json.dumps(value, default=str, sort_keys=True)) <= limit:
             return value
         # Reduce section widths and scalar previews until the bounded view fits.
         for max_items, max_string in ((16, 192), (12, 128), (8, 96), (6, 64), (4, 40)):
