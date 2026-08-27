@@ -24,14 +24,14 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                     "rule":"camera RGB/calibration are under cameras; robot state is under proprioception"},
                 "proprioception":{
                     "shape":"{step, proprioception}",
-                    "fields":"read robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, joints, and velocities from result['proprioception']",
-                    "example":"obs = robot.observe(channel='proprioception', request={}); quat = obs['proprioception']['robot0_eef_quat']"}}},
+                    "fields":"read eef_pose, gripper, joint_state, and proprioception from result['proprioception']",
+                    "example":"obs = robot.observe(channel='proprioception', request={}); pose = obs['proprioception']['eef_pose']"}}},
         "use":{
             "signature":"robot.use(tool_id, payload)",
             "returns":"direct Tool result; no receipt/result wrapper"},
         "act":{
             "signature":"robot.act(action)",
-            "returns":"action receipt with type, reached, step, eef_before, eef_after, gripper_qpos"},
+        "returns":"action receipt with type, reached, step, eef_before, eef_after, and gripper state"},
         "verify":{
             "signature":"robot.verify(verifier, payload)",
             "returns":"direct sensor-only verifier result containing boolean verified"},
@@ -88,7 +88,7 @@ LIBERO_ROBOT_SDK_CONTRACT = {
         "visual_attachment":{
             "required":["frame","object_query","source_ref"],
             "rule":"source_ref is the original pre-action detector point_ref; call only after close, lift, and a fresh observation",
-            "example":{"frame":"<fresh RGB-D frame>","object_query":"bowl",
+            "example":{"frame":"<fresh RGB-D frame>","object_query":"<object>",
                        "source_ref":"<original source point_ref>"}},
         "visual_support_relation":{
             "required":["frame","object_query","target_query","source_ref","target_ref"],
@@ -99,8 +99,8 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                 "source_ref is the original task-source point_ref, target_ref is a pre-release "
                 "support point_ref, and optional transport_ref identifies the fresh detection "
                 "whose attachment was verified; all supplied refs must be non-null"),
-            "example":{"frame":"<fresh RGB-D frame>","object_query":"bowl",
-                       "target_query":"plate","source_ref":"<source point_ref>",
+            "example":{"frame":"<fresh RGB-D frame>","object_query":"<object>",
+                       "target_query":"<support>","source_ref":"<source point_ref>",
                        "transport_ref":"<successfully attached point_ref>",
                        "target_ref":"<target point_ref>"}},
     },

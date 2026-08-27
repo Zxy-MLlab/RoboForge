@@ -195,7 +195,7 @@ class VLMVisualRelationGrounder:
             "instance that satisfy the stated language relation in the current image. "
             "Red O labels mark object candidates and blue R labels mark reference "
             "candidates. Detector labels and scores are proposals, not proof. Do not "
-            "rename a generic platform, fixture, plate, or unrelated box to make the "
+            "rename a generic platform, fixture, support surface, or unrelated box to make the "
             "relation fit: inspect visual object type, packaging/appearance, contact, "
             "and relative position. Image coordinates are x-right and y-down. If no "
             "visually supported pair exists, return null.\n"

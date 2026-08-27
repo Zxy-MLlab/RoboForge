@@ -68,7 +68,7 @@ def audit_detection_result(
     """Describe evidence quality without asserting a corrected semantic label.
 
     ``distinct_query_pairs`` must come from task semantics: for example, an
-    instruction that relates a bowl to a cookie box establishes that the two
+    instruction that relates one object to a support container establishes that the two
     entities cannot be represented by the same image region.  The auditor does
     not infer semantic exclusivity from label strings.
     """
