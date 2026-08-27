@@ -370,6 +370,61 @@ def test_compare_executions_reports_facts_without_strategy_recommendations(tmp_p
     assert comparison["actions"]["requested_targets_changed"] is True
 
 
+def test_decision_record_is_external_structured_context_and_links_execution(tmp_path):
+    adapter = FakeAdapter("set marker", tmp_path / "adapter")
+    loop = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    loop._active_tool_call_id = "decision-call"
+    loop._current_model_response_id = "response-1"
+    recorded = loop._record_decision(
+        goal="set the marker", evidence_refs=["evidence://execution-000001"],
+        hypothesis="the previous public result did not verify", decision="update controller",
+        expected_effect="verification receipt changes", uncertainty="tool output may be stale")
+    loop._active_tool_call_id = None
+    assert recorded == {"recorded": True, "decision_id": "decision-decision-call",
+                        "evidence_refs": ["evidence://execution-000001"]}
+    assert loop._list_decisions()["decisions"][0]["model_response_id"] == "response-1"
+
+    loop.workspace.write_file("controller.py", "def run(robot):\n"
+                              "    robot.act({'type':'set_value','value':1})\n"
+                              "    return robot.verify('target', {})\n")
+    evidence = loop._run_controller()
+    assert evidence["decision_id"] == "decision-decision-call"
+    execution_event = next(row for row in loop.event_store.events() if row["kind"] == "execution")
+    assert execution_event["payload"]["decision_id"] == "decision-decision-call"
+    link = next(row for row in loop.event_store.events() if row["kind"] == "decision_link")
+    assert link["payload"]["evidence_ref"] == evidence["agent_evidence"]["evidence_ref"]
+    assert loop._list_decisions()["decisions"][0]["links"][0]["controller_sha256"] == evidence["controller_sha256"]
+    assert loop._agent_evidence(evidence)["decision_id"] == "decision-decision-call"
+    encoded = json.dumps(loop._list_decisions())
+    assert "hidden reasoning" not in encoded.lower()
+    assert str(tmp_path) not in encoded
+
+
+def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):
+    adapter = FakeAdapter("set marker", tmp_path / "adapter")
+    loop = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    loop._active_tool_call_id = "same-call"
+    first = loop._record_decision(goal="g", evidence_refs=[], hypothesis="h",
+                                  decision="d", expected_effect="e", uncertainty="u")
+    duplicate = loop._record_decision(goal="changed", evidence_refs=[], hypothesis="h",
+                                      decision="d", expected_effect="e", uncertainty="u")
+    assert first["recorded"] is True
+    assert duplicate == {"recorded": False, "duplicate": True, "decision_id": "decision-same-call"}
+    loop.current_task = adapter.instruction
+    loop._checkpoint()
+    resumed = _loop(tmp_path, object(), adapter=adapter, resume=True)
+    assert resumed._list_decisions()["decisions"][0]["decision_id"] == "decision-same-call"
+    assert resumed._pending_decision_id == "decision-same-call"
+
+
+def test_decision_record_rejects_non_routing_evidence_reference(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    with pytest.raises(ProtocolError, match="opaque routing references"):
+        loop._record_decision(goal="g", evidence_refs=["/host/private.json"],
+                              hypothesis=None, decision=None, expected_effect=None,
+                              uncertainty=None)
+
+
 def test_verification_receipt_is_only_success_truth_and_one_case_skill_is_allowed(tmp_path):
     class ReceiptAdapter(FakeAdapter):
         def sensor_report(self, execution):

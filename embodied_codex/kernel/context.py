@@ -93,6 +93,8 @@ class ContextBuilder:
                   "digest": ContextBuilder._bounded_digest(digest)}
         if isinstance(value.get("evidence_ref"), str):
             result["evidence_ref"] = value["evidence_ref"]
+        if isinstance(value.get("decision_id"), str):
+            result["decision_id"] = value["decision_id"]
         return result
 
     @staticmethod

@@ -81,6 +81,9 @@ class AgentLoop:
         # Adapter artifact paths may be reused by later executions.  Handles
         # therefore point at immutable snapshots owned by this run.
         self._artifact_scope: str | None = None
+        self._pending_decision_id: str | None = None
+        self._decision_records: dict[str, dict[str, Any]] = {}
+        self._current_model_response_id: str | None = None
         self._recovery_mode = False
         restored_tool_groups: list[str] = []
         restored_tool_bindings: list[str] = []
@@ -102,6 +105,13 @@ class AgentLoop:
                                        or isinstance(self.state.get("pending_execution"), Mapping))
                 self.research_state = self._bound_research_state(
                     checkpoint.get("research_state") or self.research_state)
+                decision_state = checkpoint.get("decision_state") or {}
+                self._pending_decision_id = decision_state.get("pending_id")
+                self._decision_records = {
+                    str(key): dict(value) for key, value in
+                    dict(decision_state.get("records") or {}).items()
+                    if isinstance(value, Mapping)
+                }
                 restore_transport = getattr(self.model, "restore_transport_state", None)
                 if callable(restore_transport):
                     restore_transport(checkpoint.get("model_transport"))
@@ -287,6 +297,60 @@ class AgentLoop:
         self.research_state = {"summary": str(self.research_state.get("summary") or "")[:8000],
                                "attempts": attempts[-32:]}
 
+    def _record_decision(self, *, goal: str | None = None,
+                         evidence_refs: list[str] | None = None,
+                         hypothesis: str | None = None,
+                         decision: str | None = None,
+                         expected_effect: str | None = None,
+                         uncertainty: str | None = None,
+                         decision_id: str | None = None):
+        """Persist externally stated decision context, never private reasoning."""
+        refs = [str(ref) for ref in (evidence_refs or [])]
+        if any(not ref.startswith(("evidence://", "artifact://", "run://"))
+               for ref in refs):
+            raise ProtocolError("decision evidence_refs must be opaque routing references")
+        call_id = getattr(self, "_active_tool_call_id", None) or "unknown-call"
+        identifier = str(decision_id or f"decision-{call_id}")
+        existing = getattr(self, "_decision_records", {}).get(identifier)
+        if existing is not None:
+            self._pending_decision_id = identifier
+            return {"recorded": False, "duplicate": True, "decision_id": identifier}
+        record = {"decision_id": identifier, "goal": goal, "evidence_refs": refs[:16],
+                  "hypothesis": hypothesis, "decision": decision,
+                  "expected_effect": expected_effect, "uncertainty": uncertainty,
+                  "model_response_id": getattr(self, "_current_model_response_id", None),
+                  "model_call_id": call_id}
+        self.event_store.commit("decision_record", record)
+        self._decision_records[identifier] = record
+        self._pending_decision_id = identifier
+        return {"recorded": True, "decision_id": identifier,
+                "evidence_refs": list(record["evidence_refs"])}
+
+    def _list_decisions(self):
+        links: dict[str, list[dict[str, Any]]] = {}
+        for row in self.event_store.events():
+            if row.get("kind") != "decision_link":
+                continue
+            payload = row.get("payload") or {}
+            identifier = str(payload.get("decision_id") or "")
+            if identifier:
+                links.setdefault(identifier, []).append(dict(payload))
+        records = []
+        for record in list(getattr(self, "_decision_records", {}).values())[-32:]:
+            item = dict(record)
+            if links.get(str(item.get("decision_id"))):
+                item["links"] = links[str(item["decision_id"])][-16:]
+            records.append(item)
+        return {"decisions": records}
+
+    def _recent_decisions(self, limit: int = 4) -> list[dict[str, Any]]:
+        """Return a small factual decision view for the next model turn."""
+        records = list(getattr(self, "_decision_records", {}).values())[-max(1, int(limit)):]
+        return [{key: value for key, value in record.items()
+                 if key in {"decision_id", "goal", "evidence_refs", "hypothesis",
+                            "decision", "expected_effect", "uncertainty"}}
+                for record in records]
+
     def _build_tools(self):
         registry = ToolRegistry(); ws = self.workspace; cap = self.capability_manager
         registry.declare_group("source_inspection",
@@ -446,6 +510,21 @@ class AgentLoop:
             group="asset_authoring")
         registry.add("run_controller", "Execute the current controller once and return sensor evidence.",
                      self._schema(), lambda: self._agent_evidence(self._run_controller()))
+        registry.add("record_decision",
+                     "Record the model's concise externally stated decision context.",
+                     self._schema({"decision_id": {"type": ["string", "null"]},
+                                   "goal": {"type": ["string", "null"]},
+                                   "evidence_refs": {"type": "array", "items": string,
+                                                      "maxItems": 16},
+                                   "hypothesis": {"type": ["string", "null"]},
+                                   "decision": {"type": ["string", "null"]},
+                                   "expected_effect": {"type": ["string", "null"]},
+                                   "uncertainty": {"type": ["string", "null"]}},
+                                  ["goal", "evidence_refs", "hypothesis", "decision",
+                                   "expected_effect", "uncertainty"]),
+                     self._record_decision)
+        registry.add("list_decisions", "List bounded structured decision records.",
+                     self._schema(), self._list_decisions)
         registry.add("reset_case", "Create a fresh episode for the selected case when the Adapter supports it.",
                      self._schema(), self._reset_case)
         registry.add("inspect_execution", "Inspect the latest committed execution evidence summary.",
@@ -1039,6 +1118,8 @@ class AgentLoop:
         agent_evidence = AgentEvidence.from_execution(
             transformed_execution, public_report, digest=digest,
             evidence_ref=evidence_ref).as_dict()
+        if getattr(self, "_pending_decision_id", None):
+            agent_evidence["decision_id"] = self._pending_decision_id
         verifier = getattr(self.adapter, "verification_receipt", None)
         if not callable(verifier):
             raise ProtocolError("Adapter must implement verification_receipt(execution)")
@@ -1059,7 +1140,8 @@ class AgentLoop:
                     "verification_receipt": receipt,
                     "agent_evidence": agent_evidence,
                     "resume_token": (protocol or {}).get("resume_token"),
-                    "environment_generation": (protocol or {}).get("environment_generation")}
+                    "environment_generation": (protocol or {}).get("environment_generation"),
+                    "decision_id": getattr(self, "_pending_decision_id", None)}
         evidence_dir = self.root / "evidence"
         if not evidence_dir.exists(): evidence_dir.mkdir(parents=True)
         evidence_path = evidence_dir / f"execution-{self.cumulative_executions:06d}-{execution_key[:12]}.json"
@@ -1087,8 +1169,19 @@ class AgentLoop:
         self.latest_evidence = evidence
         self._agent_latest_evidence = agent_evidence
         self.state["restored_evidence_unverified"] = False
-        self.event_store.commit("execution", self._evidence_reference(evidence))
+        execution_reference = self._evidence_reference(evidence)
+        if evidence.get("decision_id"):
+            execution_reference["decision_id"] = evidence["decision_id"]
+        self.event_store.commit("execution", execution_reference)
+        if evidence.get("decision_id"):
+            self.event_store.commit("decision_link", {
+                "decision_id": evidence["decision_id"],
+                "evidence_ref": evidence_ref,
+                "artifact_uri": evidence["artifact_uri"],
+                "controller_sha256": controller_sha,
+                "execution_key": execution_key})
         self._artifact_scope = None
+        self._pending_decision_id = None
         self.state["pending_execution"] = None
         self.state["completed_execution"] = {"execution_key": execution_key,
                                               "call_id": call_id}
@@ -1098,6 +1191,7 @@ class AgentLoop:
         evidence = self._agent_latest_evidence
         public_state = {"research": self.research_state,
                         "session_index": self.session_index,
+                        "recent_decisions": self._recent_decisions(),
                         "active_tool_groups": list(self.tools.active_groups),
                         "active_shared_tools": list(
                             self.capability_manager.bound_tool_ids)}
@@ -1141,6 +1235,8 @@ class AgentLoop:
                 # Transport metadata is persisted for provenance, but never
                 # added to the model-visible transcript.
                 self.event_store.commit("model_call", dict(audit))
+                self._current_model_response_id = (str(audit["response_id"])
+                                                   if audit.get("response_id") else None)
             calls = response.get("tool_calls") if isinstance(response, Mapping) else None
             if not isinstance(calls, list):
                 self.event_store.commit("protocol_error", {"error": "model response must contain tool_calls", "response": response})
@@ -1215,8 +1311,13 @@ class AgentLoop:
                     record_tool_output(normalized["id"], content,
                                        multimodal_inputs=multimodal,
                                        failed=not bool(payload.get("ok")))
-                self.event_store.commit("tool_result", {"name": name,
-                    "payload": event_payload, "skipped": skipped})
+                tool_event = {"name": name, "payload": event_payload, "skipped": skipped}
+                decision_id = getattr(self, "_pending_decision_id", None)
+                if decision_id:
+                    tool_event["decision_id"] = decision_id
+                if getattr(self, "_current_model_response_id", None):
+                    tool_event["model_response_id"] = self._current_model_response_id
+                self.event_store.commit("tool_result", tool_event)
                 if not skipped:
                     self._record_attempt(name, arguments, bool(payload.get("ok")))
             self._checkpoint()
@@ -1260,7 +1361,9 @@ class AgentLoop:
             "retrieved_assets": self.retrieved_assets, "state": self.state,
             "model_transport": (self.model.transport_state()
                                  if callable(getattr(self.model, "transport_state", None)) else None),
-            "research_state": self._bound_research_state(self.research_state)})
+            "research_state": self._bound_research_state(self.research_state),
+            "decision_state": {"pending_id": getattr(self, "_pending_decision_id", None),
+                               "records": dict(list(getattr(self, "_decision_records", {}).items())[-32:])}})
 
 
 __all__ = ["AgentLoop", "LoopBudget", "ProtocolError"]

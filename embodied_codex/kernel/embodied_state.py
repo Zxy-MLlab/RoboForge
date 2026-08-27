@@ -95,15 +95,21 @@ def _matrix_quaternion(matrix: Matrix4) -> tuple[float, float, float, float]:
     index = max(range(3), key=lambda i: m[i][i])
     if index == 0:
         scale = math.sqrt(max(0.0, 1 + m[0][0] - m[1][1] - m[2][2])) * 2
+        if scale == 0:
+            return (0.0, 0.0, 0.0, 1.0)
         return (0.25 * scale, (m[0][1] + m[1][0]) / scale,
                 (m[0][2] + m[2][0]) / scale, (m[2][1] - m[1][2]) / scale)
     if index == 1:
         scale = math.sqrt(max(0.0, 1 - m[0][0] + m[1][1] - m[2][2])) * 2
+        if scale == 0:
+            return (0.0, 0.0, 0.0, 1.0)
         return ((m[0][1] + m[1][0]) / scale, 0.25 * scale,
                 (m[1][2] + m[2][1]) / scale, (m[0][2] - m[2][0]) / scale)
     scale = math.sqrt(max(0.0, 1 - m[0][0] - m[1][1] + m[2][2])) * 2
+    if scale == 0:
+        return (0.0, 0.0, 0.0, 1.0)
     return ((m[0][2] + m[2][0]) / scale, (m[1][2] + m[2][1]) / scale,
-            (m[2][1] - m[1][2]) / scale, 0.25 * scale)
+            0.25 * scale, (m[1][0] - m[0][1]) / scale)
 
 
 @dataclass(frozen=True)
