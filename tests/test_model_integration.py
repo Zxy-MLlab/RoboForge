@@ -1,3 +1,4 @@
+import json
 import pytest
 
 from embodied_codex.model import OpenAIModel
@@ -10,7 +11,10 @@ class _Responses:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return next(self.responses)
+        value = next(self.responses)
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
 
 class _Client:
@@ -31,7 +35,10 @@ def _model(client):
     model.provider = "openai"
     model.client = client
     model.previous_response_id = None
-    model._sent_message_count = 0
+    model._pending_call_ids = []
+    model._sent_call_ids = set()
+    model._sent_extra_inputs = set()
+    model._last_state_fingerprint = None
     model.audit_log = []
     return model
 
@@ -61,8 +68,10 @@ def test_responses_function_call_and_audit_metadata():
     assert result["audit"] == {
         "provider": "openai", "requested_model": "gpt-5.6-sol",
         "effective_model": "gpt-5.6-sol-2026-08-01", "reasoning_effort": "high",
-        "response_id": "resp-1", "usage": {"input_tokens": 12, "output_tokens": 8},
-        "finish_status": "completed", "tool_call_count": 1}
+        "response_id": "resp-1", "previous_response_id_used": None,
+        "usage": {"input_tokens": 12, "output_tokens": 8},
+        "finish_status": "completed", "effective_reasoning_context": None,
+        "tool_call_count": 1}
     assert model.audit_log == [result["audit"]]
 
 
@@ -79,7 +88,7 @@ def test_responses_previous_response_continuation_uses_tool_output():
     first = [{"role": "system", "content": "system"},
              {"role": "user", "content": "state-1"}]
     model.decide(messages=first, tools=[])
-    second = [*first, {"role": "assistant", "content": "", "tool_calls":
+    second = [*first, {"role": "assistant", "content": "model text", "tool_calls":
                        [{"id": "call-1", "function": {"name": "list_files", "arguments": "{}"}}]},
               {"role": "tool", "tool_call_id": "call-1", "content": "{\"files\": []}"}]
     result = model.decide(messages=second, tools=[])
@@ -92,6 +101,79 @@ def test_responses_previous_response_continuation_uses_tool_output():
     ]
     assert result["content"] == "done"
     assert model.previous_response_id == "resp-2"
+
+
+def test_continuation_survives_message_compaction_and_state_replacement():
+    client = _Client([
+        {"id": "resp-a", "model": "gpt-5.6-sol", "status": "completed",
+         "output": [{"type": "function_call", "call_id": "call-a",
+                      "name": "inspect_execution", "arguments": "{}"}]},
+        {"id": "resp-b", "model": "gpt-5.6-sol", "status": "completed", "output": []},
+    ])
+    model = _model(client)
+    model.decide(messages=[{"role": "system", "content": "s"},
+                           {"role": "user", "content": "state-old"}], tools=[])
+    # History was compacted and the state message replaced; the stable tool id
+    # still makes the output routable.
+    compacted = [{"role": "system", "content": "s"},
+                 {"role": "user", "content": "state-new"},
+                 {"role": "tool", "tool_call_id": "call-a", "content": "result"}]
+    model.decide(messages=compacted, tools=[])
+    assert client.responses.calls[1]["input"] == [
+        {"role": "user", "content": "state-new"},
+        {"type": "function_call_output", "call_id": "call-a", "output": "result"},
+    ]
+
+
+def test_multiple_function_calls_require_all_outputs_before_continuation():
+    client = _Client([{"id": "resp-many", "model": "gpt-5.6-sol", "status": "completed",
+                       "output": [{"type": "function_call", "call_id": "a", "name": "a", "arguments": "{}"},
+                                   {"type": "function_call", "call_id": "b", "name": "b", "arguments": "{}"}]}])
+    model = _model(client)
+    model.decide(messages=[{"role": "user", "content": "x"}], tools=[])
+    with pytest.raises(RuntimeError, match="unexecuted function calls: b"):
+        model.decide(messages=[{"role": "user", "content": "x"},
+                               {"role": "tool", "tool_call_id": "a", "content": "ok"}], tools=[])
+
+
+def test_non_completed_response_is_audited_and_rejected():
+    model = _model(_Client([{"id": "resp-incomplete", "model": "gpt-5.6-sol",
+                             "status": "incomplete", "output": []}]))
+    with pytest.raises(RuntimeError, match="non-completed status: incomplete"):
+        model.decide(messages=[{"role": "user", "content": "x"}], tools=[])
+    assert model.audit_log[-1]["finish_status"] == "incomplete"
+
+
+def test_transient_retry_keeps_pending_outputs_intact():
+    class APIConnectionError(Exception):
+        pass
+
+    client = _Client([
+        {"id": "resp-retry-a", "model": "gpt-5.6-sol", "status": "completed",
+         "output": [{"type": "function_call", "call_id": "call-retry",
+                      "name": "inspect_execution", "arguments": "{}"}]},
+        APIConnectionError("temporary"),
+        {"id": "resp-retry-b", "model": "gpt-5.6-sol", "status": "completed", "output": []},
+    ])
+    model = _model(client)
+    model.retry_delays = (0,)
+    model.decide(messages=[{"role": "user", "content": "x"}], tools=[])
+    messages = [{"role": "user", "content": "new"},
+                {"role": "tool", "tool_call_id": "call-retry", "content": "ok"}]
+    model.decide(messages=messages, tools=[])
+    assert client.responses.calls[2]["input"][-1] == {
+        "type": "function_call_output", "call_id": "call-retry", "output": "ok"}
+
+
+def test_transport_state_round_trips_without_reasoning_content():
+    model = _model(_Client([]))
+    model.previous_response_id = "resp-save"
+    model._pending_call_ids = ["call-save"]
+    state = model.transport_state()
+    restored = _model(_Client([]))
+    restored.restore_transport_state(state)
+    assert restored.transport_state() == state
+    assert "reasoning" not in json.dumps(state)
 
 
 def test_responses_client_without_api_is_rejected_without_chat_fallback():

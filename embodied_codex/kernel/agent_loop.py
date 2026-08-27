@@ -97,6 +97,9 @@ class AgentLoop:
                                        or isinstance(self.state.get("pending_execution"), Mapping))
                 self.research_state = self._bound_research_state(
                     checkpoint.get("research_state") or self.research_state)
+                restore_transport = getattr(self.model, "restore_transport_state", None)
+                if callable(restore_transport):
+                    restore_transport(checkpoint.get("model_transport"))
                 if checkpoint.get("snapshot_id"):
                     self.workspace.restore(checkpoint["snapshot_id"])
                 self.retrieved_assets = checkpoint.get("retrieved_assets")
@@ -1182,6 +1185,8 @@ class AgentLoop:
             "active_shared_tools": list(self.capability_manager.bound_tool_ids),
             "selected_case": getattr(self.adapter, "active_case", None),
             "retrieved_assets": self.retrieved_assets, "state": self.state,
+            "model_transport": (self.model.transport_state()
+                                 if callable(getattr(self.model, "transport_state", None)) else None),
             "research_state": self._bound_research_state(self.research_state)})
 
 
