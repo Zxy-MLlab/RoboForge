@@ -60,6 +60,22 @@ class FakeAdapter:
         raw = self.dispatch("observe", {"channel": "rgb", "request": {}})
         return self.project_rpc_output("observe", {"channel": "rgb", "request": {}}, raw)
 
+    def canonical_embodied_state(self):
+        return {"frames": {"base": {"name": "base", "parent": None}},
+                "eef_frame": "base",
+                "robot": {"eef_pose": None,
+                          "gripper": {"width_m": None, "state": None},
+                          "joint_state": {},
+                          "proprioception": {"value": self.value}},
+                "observations": {"step": len(self.actions)}}
+
+    def canonical_observation(self, observation):
+        if not isinstance(observation, dict):
+            return observation
+        result = dict(observation)
+        result["proprioception"] = self.canonical_embodied_state()["robot"]
+        return result
+
     def resume_protocol(self):
         return {"supports_resume": True, "resume_token": self.resume_token,
                 "environment_generation": self.generation,

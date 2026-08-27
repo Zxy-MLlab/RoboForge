@@ -160,6 +160,10 @@ class ControllerRuntime:
                                     raise ControllerRuntimeError("RPC budget exceeded")
                                 arguments = _rpc_arguments(method, message.get("arguments") or {})
                                 event = {"method": method, "arguments": arguments}
+                                capture_state = getattr(deployment, "canonical_embodied_state", None)
+                                state_before = capture_state() if method == "act" and callable(capture_state) else None
+                                if state_before is not None:
+                                    event["state_before"] = state_before
                                 try:
                                     raw_result = deployment.dispatch(method, arguments)
                                     projector = getattr(deployment, "project_rpc_output", None)
@@ -167,6 +171,20 @@ class ControllerRuntime:
                                         raise ControllerRuntimeError("Adapter must implement project_rpc_output")
                                     rpc_result = projector(method, arguments, raw_result)
                                     _assert_json(rpc_result)
+                                    if method == "use":
+                                        entity_projector = getattr(deployment, "project_public_entities", None)
+                                        if callable(entity_projector):
+                                            entities = entity_projector(str(arguments.get("tool_id") or ""),
+                                                                         (rpc_result.get("result")
+                                                                          if isinstance(rpc_result, Mapping)
+                                                                          else rpc_result))
+                                            if entities:
+                                                _assert_json(entities)
+                                                event["entities"] = entities
+                                    if method == "act" and callable(capture_state):
+                                        state_after = capture_state()
+                                        if state_after is not None:
+                                            event["state_after"] = state_after
                                     response = {"id": message.get("id"), "ok": True, "result": rpc_result}
                                     event["result"] = rpc_result
                                 except Exception as exc:

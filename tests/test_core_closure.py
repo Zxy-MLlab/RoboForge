@@ -203,6 +203,11 @@ def test_run_controller_agent_evidence_contains_execution_digest(tmp_path):
     assert digest["actions"][0]["requested"]["value"] == 0
     assert digest["verifications"][0]["verified"] is False
     assert "rpc_events" not in json.dumps(evidence["agent_evidence"])
+    action_event = next(event for event in evidence["execution"]["rpc_events"]
+                        if event["method"] == "act")
+    assert "state_before" in action_event and "state_after" in action_event
+    assert action_event["state_before"]["robot"]["proprioception"]["value"] == 0
+    assert action_event["state_after"]["robot"]["proprioception"]["value"] == 0
 
 
 def test_execution_artifact_handles_resolve_to_immutable_scoped_snapshots(tmp_path):
@@ -227,6 +232,38 @@ def test_execution_artifact_handles_resolve_to_immutable_scoped_snapshots(tmp_pa
     assert str(first_path) not in json.dumps({"artifact": first})
     assert str(second_path) not in json.dumps({"artifact": second})
     assert first_path.parent != second_path.parent
+
+
+def test_artifact_manifest_restores_opaque_handle_after_new_loop(tmp_path):
+    adapter = FakeAdapter("artifact", tmp_path / "adapter")
+    first = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    source = adapter.artifact_dir / "evidence.txt"
+    source.write_text("public evidence")
+    first._artifact_scope = "execution"
+    handle = first._register_artifacts({"ref": f"artifact://adapter/{source.name}"})["ref"]
+    manifest = tmp_path / "run" / "artifacts" / "manifest.json"
+    assert manifest.is_file()
+    second = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    assert handle in second._artifact_handles
+    assert second._view_artifact(handle)["content"] == "public evidence"
+    second._artifact_handles[handle].chmod(0o644)
+    second._artifact_handles[handle].write_text("tampered")
+    with pytest.raises(ProtocolError, match="checksum"):
+        second._view_artifact(handle)
+
+
+def test_decision_is_consumed_by_one_consequential_operation(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop._active_tool_call_id = "decision"
+    loop._record_decision(goal="change", evidence_refs=[], hypothesis=None,
+                          decision="write", expected_effect=None, uncertainty=None)
+    loop._active_tool_call_id = "write"
+    assert loop._claim_decision("write_file") == "decision-decision"
+    with pytest.raises(ProtocolError, match="current open Decision Record"):
+        loop._claim_decision("run_controller")
+    stored = loop._list_decisions()["decisions"][0]
+    assert stored["status"] == "committed"
+    assert stored["linked_call_ids"] == ["write"]
 
 
 def test_context_includes_bounded_execution_digest_without_rpc_event_log():

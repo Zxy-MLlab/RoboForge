@@ -13,6 +13,7 @@ class KernelTool:
     parameters: Mapping[str, Any]
     handler: Callable[..., Any]
     group: str = "core"
+    consequence: str = "READ_ONLY"
 
     @property
     def schema(self):
@@ -35,12 +36,17 @@ class ToolRegistry:
         self._group_descriptions[name] = str(description)
 
     def add(self, name: str, description: str, parameters: Mapping[str, Any],
-            handler: Callable[..., Any], *, group: str = "core"):
+            handler: Callable[..., Any], *, group: str = "core",
+            consequence: str = "READ_ONLY"):
         Draft202012Validator.check_schema(dict(parameters))
         if name in self._items: raise ValueError(f"duplicate kernel tool: {name}")
         if group not in self._group_descriptions:
             raise ValueError(f"undeclared tool group: {group}")
-        self._items[name] = KernelTool(name, description, parameters, handler, group)
+        consequence = str(consequence).upper()
+        if consequence not in {"READ_ONLY", "CONSEQUENTIAL"}:
+            raise ValueError("tool consequence must be READ_ONLY or CONSEQUENTIAL")
+        self._items[name] = KernelTool(name, description, parameters, handler, group,
+                                       consequence)
 
     @property
     def schemas(self):
@@ -79,6 +85,12 @@ class ToolRegistry:
             raise PermissionError(f"tool group is not active: {item.group}")
         Draft202012Validator(dict(item.parameters)).validate(arguments)
         return item.handler(**dict(arguments))
+
+    def metadata(self, name: str) -> KernelTool:
+        item = self._items.get(name)
+        if item is None:
+            raise KeyError(name)
+        return item
 
     def names(self, *, active_only: bool = False):
         if not active_only:

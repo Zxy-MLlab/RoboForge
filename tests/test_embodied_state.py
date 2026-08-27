@@ -15,6 +15,7 @@ from embodied_codex.kernel.embodied_state import (
     normalize_robot_state,
     pose_delta,
     relative_pose,
+    transform_pose,
     transform_point,
 )
 from embodied_codex.kernel.evidence import build_execution_digest
@@ -35,9 +36,33 @@ def test_relative_pose_respects_parent_orientation():
     parent = Pose("world", (1, 1, 0), quarter_turn)
     child = Pose("world", (1, 2, 0), quarter_turn)
     relative = relative_pose(parent, child)
-    assert relative.frame == "world"
+    assert relative.frame == "relative_to:world"
     assert relative.position == pytest.approx((1.0, 0.0, 0.0))
     assert relative.orientation == pytest.approx((0.0, 0.0, 0.0, 1.0))
+
+
+def test_frame_graph_composes_chained_rotations_and_translations():
+    frames = {
+        "world": Frame("world"),
+        "base": Frame("base", "world", ((0, -1, 0, 1), (1, 0, 0, 2),
+                                           (0, 0, 1, 0), (0, 0, 0, 1))),
+        "tool": Frame("tool", "base", ((1, 0, 0, 0), (0, 1, 0, 0),
+                                           (0, 0, 1, 3), (0, 0, 0, 1))),
+    }
+    from embodied_codex.kernel.embodied_state import frame_transform
+    transform = frame_transform(frames, "tool", "world")
+    assert transform_point((0, 0, 0), transform) == pytest.approx([1, 2, 3])
+    pose = Pose("tool", (0, 0, 0), (0, 0, 0, 1))
+    transformed = transform_pose(pose, transform, target_frame="world")
+    assert transformed.frame == "world"
+    assert transformed.position == pytest.approx((1, 2, 3))
+
+
+def test_core_rejects_native_robot_and_entity_aliases():
+    native = normalize_robot_state({"proprioception": {"native_pose": [0, 0, 0]}})
+    assert native.eef_pose is None
+    with pytest.raises(ValueError):
+        normalize_entity({"point_ref": "native", "world_xyz": [0, 0, 0]})
 
 
 def test_pose_delta_is_signed_and_action_frame_is_generic():
@@ -52,11 +77,12 @@ def test_pose_delta_is_signed_and_action_frame_is_generic():
 
 def test_entity_provenance_and_opaque_perception_refs():
     entity = normalize_entity({
-        "point_ref": "point-1", "query": "object", "score": 0.8,
-        "world_xyz": [1, 2, 3], "mask_path": "artifact://sensor/opaque",
-        "box_xyxy": [1, 2, 3, 4]}, provenance={"tool_id": "tool:v1"})
+        "entity_id": "point-1", "label": "object", "confidence": 0.8,
+        "geometry": {"frame": "camera", "center": [1, 2, 3]},
+        "perception": {"mask_ref": "artifact://sensor/opaque", "bbox": [1, 2, 3, 4]}},
+        provenance={"tool_id": "tool:v1"})
     assert entity.entity_id == "point-1"
-    assert entity.geometry["frame"] == "world"
+    assert entity.geometry["frame"] == "camera"
     assert entity.geometry["center"] == [1, 2, 3]
     assert entity.provenance == {"tool_id": "tool:v1"}
     encoded = json.dumps(entity.as_dict())
@@ -80,13 +106,34 @@ def test_transition_contains_requested_achieved_and_public_delta():
     assert "why" not in json.dumps(value).lower()
 
 
+def test_transition_decodes_canonical_before_after_state_and_action_axis():
+    before = {"eef_frame": "world", "robot": {
+        "eef_pose": {"frame": "world", "position_m": [0, 0, 0]},
+        "gripper": {"width_m": 0.04}, "joint_state": {}, "proprioception": {}}}
+    after = {"eef_frame": "world", "robot": {
+        "eef_pose": {"frame": "world", "position_m": [0, 0, 0.08]},
+        "gripper": {"width_m": 0.02}, "joint_state": {}, "proprioception": {}}}
+    transition = build_transition(before=before,
+        requested_action={"type": "oriented_move", "frame": "world",
+                          "target_xyz": [0, 0, 0.1], "action_frame_axis": [0, 0, 1]},
+        achieved_action={"type": "oriented_move", "target_xyz": [0, 0, 0.1],
+                         "eef_after": [0, 0, 0.08], "action_frame_axis": [0, 0, 1]},
+        after=after)
+    delta = transition.as_dict()["delta"]
+    assert delta["eef_displacement"] == pytest.approx([0, 0, 0.08])
+    assert delta["gripper_width"] == {"before": 0.04, "after": 0.02}
+    assert delta["action_frame"]["along_action_axis_error_m"] == pytest.approx(-0.02)
+
+
 def test_digest_exposes_generic_entities_and_transition_facts():
     digest = build_execution_digest({
         "completed": True, "program_sha256": "sha", "rpc_events": [
             {"method": "use", "arguments": {"tool_id": "perception:v1", "payload": {}},
-             "result": {"result": {"detections": [{"point_ref": "point-1",
-                 "query": "object", "score": 0.9, "world_xyz": [0, 0, 0],
-                 "mask_path": "artifact://sensor/opaque"}]}}},
+             "entities": [{"entity_id": "point-1", "label": "object", "confidence": 0.9,
+                 "geometry": {"frame": "world", "center": [0, 0, 0]},
+                 "perception": {"mask_ref": "artifact://sensor/opaque"},
+                 "provenance": {"tool_id": "perception:v1"}}],
+             "result": {"result": {"native": []}}},
             {"method": "act", "arguments": {"action": {"type": "move", "frame": "world",
                  "target_xyz": [0, 0, 1]}}, "result": {"type": "move", "target_xyz": [0, 0, 1],
                  "eef_before": [0, 0, 0], "eef_after": [0, 0, 0.9], "reached": True}},
@@ -98,15 +145,20 @@ def test_digest_exposes_generic_entities_and_transition_facts():
 
 
 def test_public_observation_normalizes_robot_and_entity_state():
-    robot = normalize_robot_state({"frame_id": "f1", "proprioception": {
-        "robot0_eef_pos": [1, 2, 3], "robot0_eef_quat": [0, 0, 0, 1],
-        "robot0_gripper_qpos": [0.2, -0.1]}})
+    robot = normalize_robot_state({"frame_id": "f1", "robot": {
+        "eef_pose": {"frame": "world", "position_m": [1, 2, 3],
+                      "orientation_xyzw": [0, 0, 0, 1]},
+        "gripper": {"width_m": 0.3, "state": "open"},
+        "joint_state": {"position": [0.0]}, "proprioception": {}}})
     assert robot.eef_pose.frame == "world"
     assert robot.gripper_width == pytest.approx(0.3)
     state = normalize_embodied_state(
-        {"frame_id": "f1", "proprioception": {"robot0_eef_pos": [1, 2, 3]}},
-        entities=[{"entity_id": "e", "world_xyz": [0, 0, 0], "label": "object"}])
-    assert state.frames["world"].name == "world"
+        {"frame_id": "f1", "robot": {"eef_pose": {"frame": "world",
+         "position_m": [1, 2, 3]}, "gripper": {}, "joint_state": {},
+         "proprioception": {}}},
+        entities=[{"entity_id": "e", "geometry": {"frame": "world", "center": [0, 0, 0]},
+                   "label": "object"}])
+    assert state.frames["unknown"].name == "unknown"
     assert state.entities[0].geometry["frame"] == "world"
 
 

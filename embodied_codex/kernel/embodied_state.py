@@ -29,6 +29,20 @@ def _matrix4(value: Sequence[Sequence[Number]]) -> Matrix4:
         raise ValueError("expected a 4x4 transform")
     if not all(math.isfinite(item) for row in result for item in row):
         raise ValueError("transform must be finite")
+    if result[3] != (0.0, 0.0, 0.0, 1.0):
+        raise ValueError("transform must be homogeneous")
+    rotation = tuple(tuple(result[i][j] for j in range(3)) for i in range(3))
+    transpose_product = tuple(tuple(sum(rotation[k][i] * rotation[k][j]
+                                         for k in range(3)) for j in range(3))
+                               for i in range(3))
+    if any(abs(transpose_product[i][j] - (1.0 if i == j else 0.0)) > 2e-5
+           for i in range(3) for j in range(3)):
+        raise ValueError("transform rotation must be orthonormal")
+    determinant = (rotation[0][0] * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
+                   - rotation[0][1] * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
+                   + rotation[0][2] * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0]))
+    if abs(determinant - 1.0) > 2e-5:
+        raise ValueError("transform rotation must be right-handed")
     return result
 
 
@@ -61,7 +75,11 @@ def transform_point(point: Sequence[Number], transform: Sequence[Sequence[Number
 
 
 def _quaternion(value: Sequence[Number]) -> tuple[float, float, float, float]:
-    return tuple(_vector(value, 4))  # type: ignore[return-value]
+    raw = _vector(value, 4)
+    norm = math.sqrt(sum(item * item for item in raw))
+    if norm < 1e-12:
+        raise ValueError("quaternion must be non-zero")
+    return tuple(item / norm for item in raw)  # type: ignore[return-value]
 
 
 def _quat_mul(a: Sequence[Number], b: Sequence[Number]) -> tuple[float, float, float, float]:
@@ -149,10 +167,10 @@ class Pose:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any], *, default_frame: str = "unknown") -> "Pose":
-        position = value.get("position", value.get("xyz", value.get("world_xyz")))
+        position = value.get("position")
         if position is None:
             raise ValueError("pose position is required")
-        orientation = value.get("orientation_xyzw", value.get("quaternion_xyzw"))
+        orientation = value.get("orientation_xyzw")
         return cls(str(value.get("frame") or default_frame), position, orientation)
 
 
@@ -167,18 +185,76 @@ def transform_pose(pose: Pose | Mapping[str, Any], transform: Sequence[Sequence[
     return Pose(target_frame or source.frame, transform_point(source.position, matrix), orientation)
 
 
-def relative_pose(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, Any]) -> Pose:
-    """Return child pose expressed in the parent's frame."""
+def frame_transform(frames: Mapping[str, Frame], source_frame: str,
+                    target_frame: str) -> Matrix4:
+    """Compose the rigid transform that expresses source coordinates in target.
+
+    ``Frame.transform_to_parent`` maps coordinates from a frame into its parent.
+    A missing frame, cycle, or disconnected graph fails closed instead of
+    silently assuming that a frame is world-aligned.
+    """
+    source_frame, target_frame = str(source_frame), str(target_frame)
+    if source_frame not in frames or target_frame not in frames:
+        raise ValueError("source and target frames must be declared")
+
+    def to_root(name: str) -> tuple[str, Matrix4]:
+        current, transform = name, _identity()
+        visited: set[str] = set()
+        while True:
+            if current in visited:
+                raise ValueError("frame graph contains a cycle")
+            visited.add(current)
+            frame = frames.get(current)
+            if frame is None:
+                raise ValueError(f"unknown frame: {current}")
+            if frame.parent is None:
+                return current, transform
+            transform = _matmul(frame.transform_to_parent, transform)
+            current = frame.parent
+
+    source_root, source_to_root = to_root(source_frame)
+    target_root, target_to_root = to_root(target_frame)
+    if source_root != target_root:
+        raise ValueError("source and target frames are disconnected")
+    return _matmul(_mat_inverse(target_to_root), source_to_root)
+
+
+def relative_pose(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, Any], *,
+                  result_frame: str | None = None) -> Pose:
+    """Return child pose expressed in the parent's local coordinate frame.
+
+    The two input poses describe frames in a common source frame.  Since the
+    returned numbers are parent-local, callers may provide the declared name
+    of that local frame; otherwise a deterministic derived frame label is used
+    instead of incorrectly reusing the source-frame label.
+    """
     first = parent if isinstance(parent, Pose) else Pose.from_mapping(parent)
     second = child if isinstance(child, Pose) else Pose.from_mapping(child)
     if first.frame != second.frame:
         raise ValueError("relative poses require a common source frame")
     translation = [second.position[i] - first.position[i] for i in range(3)]
     orientation = None
-    if first.orientation is not None and second.orientation is not None:
+    if first.orientation is not None:
         translation = _quat_rotate(_quat_conjugate(first.orientation), translation)
-        orientation = _quat_mul(_quat_conjugate(first.orientation), second.orientation)
-    return Pose(first.frame, translation, orientation)
+        if second.orientation is not None:
+            orientation = _quat_mul(_quat_conjugate(first.orientation), second.orientation)
+        return Pose(result_frame or f"relative_to:{first.frame}", translation, orientation)
+    # Without a parent orientation no parent-local transform was performed;
+    # retain the common source-frame label instead of claiming local numbers.
+    return Pose(result_frame or first.frame, translation, orientation)
+
+
+def relative_pose_in_frames(parent: Pose | Mapping[str, Any], child: Pose | Mapping[str, Any],
+                            frames: Mapping[str, Frame], *, result_frame: str | None = None) -> Pose:
+    """Compute a relative pose after transforming both poses to one frame."""
+    first = parent if isinstance(parent, Pose) else Pose.from_mapping(parent)
+    second = child if isinstance(child, Pose) else Pose.from_mapping(child)
+    common = result_frame or first.frame
+    first_common = transform_pose(first, frame_transform(frames, first.frame, common),
+                                  target_frame=common)
+    second_common = transform_pose(second, frame_transform(frames, second.frame, common),
+                                   target_frame=common)
+    return relative_pose(first_common, second_common, result_frame=result_frame)
 
 
 def pose_delta(requested: Pose | Mapping[str, Any], achieved: Pose | Mapping[str, Any]) -> dict[str, Any]:
@@ -198,7 +274,7 @@ def pose_delta(requested: Pose | Mapping[str, Any], achieved: Pose | Mapping[str
 
 
 def action_frame_error(requested: Sequence[Number], achieved: Sequence[Number],
-                       approach_axis: Sequence[Number]) -> dict[str, Any]:
+                       approach_axis: Sequence[Number], *, axis_frame: str = "unknown") -> dict[str, Any]:
     """Decompose a position error in an explicitly supplied action frame."""
     error = [float(a) - float(r) for r, a in zip(_vector(requested), _vector(achieved))]
     axis = _vector(approach_axis)
@@ -208,10 +284,11 @@ def action_frame_error(requested: Sequence[Number], achieved: Sequence[Number],
     unit = [item / norm for item in axis]
     along = sum(error[i] * unit[i] for i in range(3))
     lateral_vector = [error[i] - along * unit[i] for i in range(3)]
-    return {"along_approach_axis_error_m": along,
+    return {"along_action_axis_error_m": along,
+            "along_approach_axis_error_m": along,
             "lateral_error_m": math.sqrt(sum(item * item for item in lateral_vector)),
             "lateral_error_vector_m": lateral_vector,
-            "approach_axis": list(unit)}
+            "approach_axis": list(unit), "approach_axis_frame": str(axis_frame)}
 
 
 @dataclass(frozen=True)
@@ -233,58 +310,68 @@ class Entity:
 
 def normalize_entity(value: Mapping[str, Any], *, entity_id: str | None = None,
                      provenance: Mapping[str, Any] | None = None) -> Entity:
-    """Normalize a public detection into a task-agnostic Entity record."""
-    geometry = {key: value[key] for key in ("frame", "center", "orientation", "size", "bounds")
-                if key in value}
-    if "frame" not in geometry:
-        geometry["frame"] = str(value.get("coordinate_frame")
-                                  or ("world" if "world_xyz" in value else "unknown"))
-    if "center" not in geometry:
-        center = value.get("world_xyz") or value.get("xyz")
-        if center is not None:
-            geometry["center"] = list(center)
-    perception = {key: value[key] for key in ("rgb_ref", "rgb_path", "depth_ref", "depth_path",
-                                               "mask_ref", "mask_path", "bbox", "box_xyxy") if key in value}
-    return Entity(str(entity_id or value.get("entity_id") or value.get("point_ref") or "entity"),
-                  value.get("label") or value.get("query"), value.get("confidence", value.get("score")),
-                  geometry, perception,
+    """Validate an Adapter-normalized public Entity record.
+
+    Native detector schemas are deliberately rejected here.  Adapters and
+    capabilities own translation into this explicit contract.
+    """
+    if not isinstance(value, Mapping) or not value.get("entity_id"):
+        raise ValueError("canonical entity_id is required")
+    geometry = value.get("geometry")
+    if not isinstance(geometry, Mapping) or not geometry.get("frame"):
+        raise ValueError("canonical entity geometry.frame is required")
+    return Entity(str(entity_id or value["entity_id"]),
+                  value.get("label"), value.get("confidence"), dict(geometry),
+                  dict(value.get("perception") or {}),
                   dict(value.get("uncertainty") or {}),
                   dict(provenance or value.get("provenance") or {}))
 
 
-def normalize_robot_state(value: Mapping[str, Any], *, eef_frame: str = "world") -> RobotState:
-    """Normalize public proprioception without assuming a robot or task model."""
-    proprioception = dict(value.get("proprioception") or value)
-    position = (proprioception.get("eef_position") or proprioception.get("robot0_eef_pos")
-                or proprioception.get("eef_pos"))
-    orientation = (proprioception.get("eef_orientation_xyzw")
-                   or proprioception.get("robot0_eef_quat") or proprioception.get("eef_quat"))
+def normalize_robot_state(value: Mapping[str, Any], *, eef_frame: str = "unknown") -> RobotState:
+    """Validate an Adapter-normalized, physically observable RobotState."""
+    canonical = value.get("robot") if isinstance(value.get("robot"), Mapping) else value
+    pose_value = canonical.get("eef_pose") if isinstance(canonical, Mapping) else None
     pose = None
-    if position is not None:
-        try:
-            pose = Pose(eef_frame, position, orientation)
-        except (TypeError, ValueError):
-            pose = None
-    width = proprioception.get("gripper_width_m")
-    if width is None:
-        qpos = proprioception.get("robot0_gripper_qpos") or proprioception.get("gripper_qpos")
-        if isinstance(qpos, Sequence) and len(qpos) >= 2:
-            try:
-                width = abs(float(qpos[0])) + abs(float(qpos[1]))
-            except (TypeError, ValueError):
-                width = None
-    return RobotState(eef_pose=pose,
-                      gripper_state=proprioception.get("gripper_state"),
-                      gripper_width=float(width) if width is not None else None,
-                      proprioception=proprioception,
-                      observations={key: value[key] for key in ("frame_id", "step") if key in value})
+    if isinstance(pose_value, Pose):
+        pose = pose_value
+    elif isinstance(pose_value, Mapping):
+        position = pose_value.get("position_m")
+        orientation = pose_value.get("orientation_xyzw")
+        if position is not None:
+            pose = Pose(str(pose_value.get("frame") or eef_frame), position, orientation)
+    gripper = canonical.get("gripper") if isinstance(canonical, Mapping) else None
+    if not isinstance(gripper, Mapping):
+        gripper = {}
+    width = gripper.get("width_m")
+    if width is not None:
+        width = float(width)
+        if not math.isfinite(width) or width < 0:
+            raise ValueError("canonical gripper width_m must be finite and non-negative")
+    joint_state = canonical.get("joint_state", {})
+    if not isinstance(joint_state, Mapping):
+        joint_state = {}
+    proprioception = canonical.get("proprioception", {})
+    if not isinstance(proprioception, Mapping):
+        proprioception = {}
+    observations = {key: value[key] for key in ("frame_id", "step") if key in value}
+    return RobotState(eef_pose=pose, gripper_state=gripper.get("state"),
+                      gripper_width=width, joint_state=dict(joint_state),
+                      proprioception=dict(proprioception), observations=observations)
 
 
 def normalize_embodied_state(observation: Mapping[str, Any], *,
                              entities: Sequence[Entity | Mapping[str, Any]] = (),
-                             eef_frame: str = "world") -> EmbodiedState:
-    """Build a generic state from public observation and optional detections."""
-    frames = {eef_frame: Frame(eef_frame)}
+                             eef_frame: str = "unknown") -> EmbodiedState:
+    """Build a generic state from an Adapter's canonical public observation."""
+    declared_frames = observation.get("frames") if isinstance(observation, Mapping) else None
+    if isinstance(declared_frames, Mapping):
+        frames = {str(name): (frame if isinstance(frame, Frame)
+                              else Frame(str(name), frame.get("parent") if isinstance(frame, Mapping) else None,
+                                         frame.get("transform_to_parent", _identity())
+                                         if isinstance(frame, Mapping) else _identity()))
+                  for name, frame in declared_frames.items()}
+    else:
+        frames = {eef_frame: Frame(eef_frame)}
     normalized_entities = tuple(item if isinstance(item, Entity)
                                 else normalize_entity(item) for item in entities)
     return EmbodiedState(frames=frames, robot=normalize_robot_state(observation, eef_frame=eef_frame),
@@ -293,17 +380,33 @@ def normalize_embodied_state(observation: Mapping[str, Any], *,
                                        if key in observation})
 
 
+def embodied_state_from_mapping(value: Any) -> EmbodiedState | None:
+    """Decode only the canonical state representation emitted by an Adapter."""
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        raw_entities = value.get("entities") or ()
+        if not isinstance(raw_entities, (list, tuple)):
+            return None
+        return normalize_embodied_state(value, entities=raw_entities,
+                                        eef_frame=str(value.get("eef_frame") or "unknown"))
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class RobotState:
     eef_pose: Pose | None = None
     gripper_state: Any = None
     gripper_width: float | None = None
+    joint_state: Mapping[str, Any] = field(default_factory=dict)
     proprioception: Mapping[str, Any] = field(default_factory=dict)
     observations: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         result = {"eef_pose": self.eef_pose.as_dict() if self.eef_pose else None,
                   "gripper_state": self.gripper_state, "gripper_width": self.gripper_width,
+                  "joint_state": dict(self.joint_state),
                   "proprioception": dict(self.proprioception), "observations": dict(self.observations)}
         return result
 
@@ -366,6 +469,8 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
                      after: EmbodiedState | Mapping[str, Any] | None,
                      verification: Mapping[str, Any] | None = None) -> EmbodiedTransition:
     """Construct a transition from public state/action receipts."""
+    before_state = before if isinstance(before, EmbodiedState) else embodied_state_from_mapping(before)
+    after_state = after if isinstance(after, EmbodiedState) else embodied_state_from_mapping(after)
     delta: dict[str, Any] = {}
     if isinstance(achieved_action, Mapping):
         target = achieved_action.get("target_xyz")
@@ -380,10 +485,20 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
                     Pose(frame, actual, achieved_action.get("eef_quaternion_xyzw")))
             except (TypeError, ValueError):
                 pass
-            axis = achieved_action.get("approach_axis") or requested_action.get("approach_axis")
+            axis = (achieved_action.get("action_frame_axis")
+                    or achieved_action.get("approach_axis")
+                    or requested_action.get("action_frame_axis")
+                    or requested_action.get("approach_axis"))
+            if isinstance(axis, Mapping):
+                axis = axis.get("axis")
             if axis is not None:
                 try:
-                    delta["action_frame"] = action_frame_error(target, actual, axis)
+                    delta["action_frame"] = action_frame_error(
+                        target, actual, axis,
+                        axis_frame=str(achieved_action.get("action_frame_axis_frame")
+                                       or requested_action.get("action_frame_axis_frame")
+                                       or achieved_action.get("target_frame")
+                                       or requested_action.get("frame") or "unknown"))
                 except (TypeError, ValueError):
                     pass
         if achieved_action.get("eef_before") is not None and actual is not None:
@@ -392,14 +507,14 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
                                                for i in range(3)]
             except (TypeError, ValueError, IndexError):
                 pass
-    if isinstance(before, EmbodiedState) and isinstance(after, EmbodiedState):
-        before_pose = before.robot.eef_pose
-        after_pose = after.robot.eef_pose
+    if before_state is not None and after_state is not None:
+        before_pose = before_state.robot.eef_pose
+        after_pose = after_state.robot.eef_pose
         if before_pose is not None and after_pose is not None and before_pose.frame == after_pose.frame:
             delta.setdefault("eef_displacement", [after_pose.position[i] - before_pose.position[i]
                                                     for i in range(3)])
-        before_entities = {item.entity_id: item for item in before.entities}
-        after_entities = {item.entity_id: item for item in after.entities}
+        before_entities = {item.entity_id: item for item in before_state.entities}
+        after_entities = {item.entity_id: item for item in after_state.entities}
         displacements = {}
         for entity_id in sorted(before_entities.keys() & after_entities.keys()):
             first = before_entities[entity_id].geometry.get("center")
@@ -411,14 +526,15 @@ def build_transition(*, before: EmbodiedState | Mapping[str, Any] | None,
                     pass
         if displacements:
             delta["entity_displacement"] = displacements
-        if before.robot.gripper_width is not None or after.robot.gripper_width is not None:
-            delta["gripper_width"] = {"before": before.robot.gripper_width,
-                                       "after": after.robot.gripper_width}
+        if before_state.robot.gripper_width is not None or after_state.robot.gripper_width is not None:
+            delta["gripper_width"] = {"before": before_state.robot.gripper_width,
+                                       "after": after_state.robot.gripper_width}
     return EmbodiedTransition(before, dict(requested_action),
                               dict(achieved_action or {}), after, delta, verification)
 
 
 __all__ = ["Frame", "Pose", "Entity", "RobotState", "InteractionState", "EmbodiedState",
            "EmbodiedTransition", "transform_point", "transform_pose", "relative_pose",
-           "pose_delta", "action_frame_error", "normalize_entity", "normalize_robot_state",
+           "relative_pose_in_frames", "frame_transform", "pose_delta", "action_frame_error",
+           "normalize_entity", "normalize_robot_state", "embodied_state_from_mapping",
            "normalize_embodied_state", "build_transition"]

@@ -64,6 +64,18 @@ class CampaignAdapter:
     def project_rpc_output(self, method, arguments, result):
         return self.active.project_rpc_output(method, arguments, result)
 
+    def canonical_embodied_state(self):
+        provider = getattr(self.active, "canonical_embodied_state", None)
+        return provider() if callable(provider) else {}
+
+    def canonical_observation(self, observation):
+        provider = getattr(self.active, "canonical_observation", None)
+        return provider(observation) if callable(provider) else observation
+
+    def project_public_entities(self, tool_id, result):
+        provider = getattr(self.active, "project_public_entities", None)
+        return provider(tool_id, result) if callable(provider) else []
+
     def sensor_report(self, execution):
         return self.active.sensor_report(execution)
 

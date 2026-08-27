@@ -74,7 +74,8 @@ class LiberoDeployment:
         "observe":{"frame_id","step","cameras","proprioception"},
         "act":{"type","step","reached","eef_before","eef_after","gripper_qpos",
                "target_xyz","target_quaternion_xyzw","final_position_error_m",
-               "final_orientation_error_rad"},
+               "final_orientation_error_rad","target_frame","action_frame_axis",
+               "action_frame_axis_frame"},
         "use":{"tool_id","step","result"},"record":{"recorded"},
         "verify":{"verified","sensor_only","verifier_error","reason",
                   "target_xy_error_m","vertical_offset_m",
@@ -333,6 +334,34 @@ class LiberoDeployment:
     def _proprio(self):
         return {key:np.asarray(self.obs[key]).tolist() for key in PROPRIO}
 
+    def canonical_embodied_state(self):
+        """Translate native observation fields into the Core public contract."""
+        raw = self._proprio()
+        qpos = raw["robot0_gripper_qpos"]
+        return {"frames": {"world": {"name": "world", "parent": None}},
+                "eef_frame": "world",
+                "robot": {
+                    "eef_pose": {"frame": "world", "position_m": raw["robot0_eef_pos"],
+                                  "orientation_xyzw": raw["robot0_eef_quat"]},
+                    "gripper": {"width_m": float(abs(qpos[0]) + abs(qpos[1])),
+                                 "state": "closed" if float(abs(qpos[0]) + abs(qpos[1])) < 0.02 else "open"},
+                    "joint_state": {"position": raw["robot0_joint_pos"],
+                                    "velocity": raw["robot0_joint_vel"],
+                                    "gripper_velocity": raw["robot0_gripper_qvel"]},
+                    "proprioception": {"joint_position": raw["robot0_joint_pos"],
+                                       "joint_velocity": raw["robot0_joint_vel"]}},
+                "observations": {"step": self.step}}
+
+    def canonical_observation(self, observation):
+        """Project a native observation for Core/context without native aliases."""
+        if not isinstance(observation, Mapping):
+            return observation
+        result = dict(observation)
+        canonical = self.canonical_embodied_state()
+        result["proprioception"] = canonical["robot"]
+        result["eef_frame"] = "world"
+        return result
+
     def dispatch(self,method,arguments):
         if self.closed:raise LiberoDeploymentError("deployment closed")
         if self._controller_execution_sealed:
@@ -495,7 +524,14 @@ class LiberoDeployment:
         result={"type":kind,"step":self.step,"reached":bool(reached),"eef_before":before.tolist(),
                 "eef_after":np.asarray(self.obs["robot0_eef_pos"]).tolist(),
                 "gripper_qpos":np.asarray(self.obs["robot0_gripper_qpos"]).tolist()}
-        if target is not None:result["target_xyz"]=target.tolist()
+        if kind in ("move_to_point", "move_to_pose"):
+            reference = self.references.get(str(action.get("pose_ref") or action.get("target_ref")), {})
+            axis = reference.get("action_frame_axis") or reference.get("approach_world")
+            if axis is not None:
+                result["action_frame_axis"] = list(axis)
+                result["action_frame_axis_frame"] = "world"
+        if target is not None:
+            result["target_xyz"]=target.tolist();result["target_frame"]="world"
         if kind=="move_to_pose":
             result.update({"target_quaternion_xyzw":target_quaternion.tolist(),
                            "final_position_error_m":final_position_error,
@@ -517,6 +553,12 @@ class LiberoDeployment:
                 if rotation is not None:
                     reference["eef_rotation_world"]=_validated_rotation_matrix(rotation).tolist()
                     result["pose_ref"]=token
+                axis=result.get("approach_world") or result.get("action_frame_axis")
+                if axis is not None:
+                    axis_array=np.asarray(axis,float)
+                    if axis_array.shape != (3,) or not np.isfinite(axis_array).all() or np.linalg.norm(axis_array) < 1e-8:
+                        raise LiberoDeploymentError("action frame axis must be a finite non-zero vector")
+                    reference["action_frame_axis"]=(axis_array / np.linalg.norm(axis_array)).tolist()
                 self.references[token]=reference
                 result["point_ref"]=token
             return result
@@ -564,6 +606,40 @@ class LiberoDeployment:
         result=self._references(tool_id,raw_result)
         receipt={"tool_id":tool_id,"step":self.step,"result":result}
         self.trace.append({"event":"use","tool_id":tool_id,"step":self.step});return receipt
+
+    def project_public_entities(self, tool_id, result):
+        """Translate a capability's native detections at the Adapter boundary."""
+        if not isinstance(result, Mapping):
+            return []
+        grouped = result.get("detections")
+        candidates = []
+        if isinstance(grouped, Mapping):
+            for label, values in grouped.items():
+                if isinstance(values, list):
+                    candidates.extend((label, item) for item in values)
+        elif isinstance(grouped, list):
+            candidates.extend((None, item) for item in grouped)
+        entities = []
+        for label, item in candidates:
+            if not isinstance(item, Mapping) or not isinstance(item.get("world_xyz"), list):
+                continue
+            entity_id = item.get("point_ref") or item.get("entity_id")
+            if not entity_id:
+                continue
+            perception = {}
+            for key in ("mask_path", "rgb_path", "depth_path", "box_xyxy"):
+                if key in item:
+                    perception[{"mask_path": "mask_ref", "rgb_path": "rgb_ref",
+                                 "depth_path": "depth_ref", "box_xyxy": "bbox"}[key]] = item[key]
+            entities.append({"entity_id": str(entity_id),
+                             "label": item.get("label") or label,
+                             "confidence": item.get("score"),
+                             "geometry": {"frame": "world", "center": list(item["world_xyz"]),
+                                          "bounds": item.get("world_bounds_10_90")},
+                             "perception": perception,
+                             "uncertainty": {},
+                             "provenance": {"tool_id": str(tool_id)}})
+        return entities
 
     def _verify(self,name,payload):
         validate_verifier_request(name,payload)
@@ -635,7 +711,8 @@ class LiberoDeployment:
                 "outcome_observations":{"before":self._outcome_before,
                     "after":self._outcome_after},
                 "final_step":self.step,
-                "final_proprioception":self._proprio(),"trace_path":self._execution_artifacts.get("trace_path"),
+                "final_proprioception":self.canonical_embodied_state()["robot"],
+                "trace_path":self._execution_artifacts.get("trace_path"),
                 "rollout_path":self._execution_artifacts.get("rollout_path"),"benchmark_signal_exposed":False,
                 # Consumed only by the Harness generalization gate.  Keys
                 # prefixed with _harness_ are removed from model evidence.

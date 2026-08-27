@@ -78,11 +78,16 @@ class AgentLoop:
                                       "completion_valid": False, "successful_cases": 0}
         self._active_tool_call_id: str | None = None
         self._artifact_handles: dict[str, Path] = {}
+        self._artifact_handle_digests: dict[str, str] = {}
         # Adapter artifact paths may be reused by later executions.  Handles
         # therefore point at immutable snapshots owned by this run.
         self._artifact_scope: str | None = None
+        self._artifact_manifest_path = self.root / "artifacts" / "manifest.json"
+        self._load_artifact_manifest()
         self._pending_decision_id: str | None = None
         self._decision_records: dict[str, dict[str, Any]] = {}
+        self._decision_protocol_active = False
+        self._active_operation_decision_id: str | None = None
         self._current_model_response_id: str | None = None
         self._recovery_mode = False
         restored_tool_groups: list[str] = []
@@ -112,6 +117,7 @@ class AgentLoop:
                     dict(decision_state.get("records") or {}).items()
                     if isinstance(value, Mapping)
                 }
+                self._decision_protocol_active = bool(decision_state.get("protocol_active"))
                 restore_transport = getattr(self.model, "restore_transport_state", None)
                 if callable(restore_transport):
                     restore_transport(checkpoint.get("model_transport"))
@@ -155,13 +161,67 @@ class AgentLoop:
                     self._recovery_mode = False
         initial = getattr(self.adapter, "initial_observation", None)
         if callable(initial) and getattr(self.context_builder, "initial_observation", None) is None:
-            self.context_builder.initial_observation = initial()
+            self.context_builder.initial_observation = self._canonical_observation(initial())
         self.context_builder.initial_observation = self._register_artifacts(
-            self.context_builder.initial_observation)
+            self._canonical_observation(self.context_builder.initial_observation))
 
     def _schema(self, properties=None, required=()):
         return {"type": "object", "properties": dict(properties or {}),
                 "required": list(required), "additionalProperties": False}
+
+    def _canonical_observation(self, observation: Any) -> Any:
+        provider = getattr(self.adapter, "canonical_observation", None)
+        if callable(provider):
+            projected = provider(observation)
+            if isinstance(projected, Mapping):
+                return projected
+        return observation
+
+    def _load_artifact_manifest(self) -> None:
+        """Restore only checksum-validated, run-relative artifact handles."""
+        path = self._artifact_manifest_path
+        if not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text())
+            entries = payload.get("artifacts") if isinstance(payload, Mapping) else None
+            if not isinstance(entries, list):
+                raise ValueError("artifact manifest entries are missing")
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                uri, relative, digest = (entry.get("uri"), entry.get("path"), entry.get("sha256"))
+                if not (isinstance(uri, str) and isinstance(relative, str)
+                        and isinstance(digest, str) and uri.startswith(("artifact://", "run://"))):
+                    continue
+                candidate = (self.root / relative).resolve()
+                if self.root not in candidate.parents or not candidate.is_file():
+                    continue
+                if _file_sha256(candidate) != digest:
+                    continue
+                self._artifact_handles[uri] = candidate
+                self._artifact_handle_digests[uri] = digest
+        except (OSError, ValueError, json.JSONDecodeError):
+            # A corrupt optional index must not grant any file access.
+            return
+
+    def _persist_artifact_manifest(self) -> None:
+        entries = []
+        for uri, path in sorted(self._artifact_handles.items()):
+            try:
+                relative = path.resolve().relative_to(self.root).as_posix()
+                if not path.is_file():
+                    continue
+                entries.append({"uri": uri, "path": relative, "sha256": _file_sha256(path)})
+            except (OSError, ValueError):
+                continue
+        target = getattr(self, "_artifact_manifest_path",
+                         self.root / "artifacts" / "manifest.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"protocol": "roboforge-artifact-manifest-v1",
+                                         "artifacts": entries}, sort_keys=True, indent=2) + "\n")
+        temporary.replace(target)
 
     def _immutable_artifact(self, source: Path) -> tuple[str, Path]:
         """Snapshot an authorized source file before exposing an opaque handle."""
@@ -203,6 +263,8 @@ class AgentLoop:
             return [self._register_artifacts(item) for item in value]
         if not isinstance(value, str):
             return value
+        if value in self._artifact_handles:
+            return value
         candidate = None
         if value.startswith("artifact://adapter/"):
             candidate = Path(getattr(self.adapter, "artifact_dir", "")) / value.removeprefix("artifact://adapter/")
@@ -231,6 +293,10 @@ class AgentLoop:
                 return f"artifact://agent/denied/{token}"
             handle, snapshot = self._immutable_artifact(candidate)
             self._artifact_handles[handle] = snapshot
+            if not hasattr(self, "_artifact_handle_digests"):
+                self._artifact_handle_digests = {}
+            self._artifact_handle_digests[handle] = _file_sha256(snapshot)
+            self._persist_artifact_manifest()
             return handle
         except OSError:
             token = hashlib.sha256(str(value).encode()).hexdigest()[:24]
@@ -313,7 +379,8 @@ class AgentLoop:
         identifier = str(decision_id or f"decision-{call_id}")
         existing = getattr(self, "_decision_records", {}).get(identifier)
         if existing is not None:
-            self._pending_decision_id = identifier
+            if existing.get("status") == "open":
+                self._pending_decision_id = identifier
             return {"recorded": False, "duplicate": True, "decision_id": identifier}
         def public_text(value):
             if value is None:
@@ -326,13 +393,33 @@ class AgentLoop:
         record = {"decision_id": identifier, "goal": public_text(goal), "evidence_refs": refs[:16],
                   "hypothesis": public_text(hypothesis), "decision": public_text(decision),
                   "expected_effect": public_text(expected_effect), "uncertainty": public_text(uncertainty),
+                  "status": "open", "linked_call_ids": [],
                   "model_response_id": getattr(self, "_current_model_response_id", None),
                   "model_call_id": call_id}
         self.event_store.commit("decision_record", record)
         self._decision_records[identifier] = record
+        self._decision_protocol_active = True
         self._pending_decision_id = identifier
         return {"recorded": True, "decision_id": identifier,
                 "evidence_refs": list(record["evidence_refs"])}
+
+    def _claim_decision(self, operation: str, *, consequence: str = "CONSEQUENTIAL") -> str | None:
+        """Claim one open external intervention for the current explicit decision."""
+        if str(consequence).upper() != "CONSEQUENTIAL":
+            return None
+        identifier = getattr(self, "_pending_decision_id", None)
+        record = getattr(self, "_decision_records", {}).get(identifier) if identifier else None
+        if not isinstance(record, dict) or record.get("status") != "open":
+            if getattr(self, "_decision_protocol_active", False):
+                raise ProtocolError(
+                    f"consequential operation {operation!r} requires a current open Decision Record")
+            return None
+        call_id = getattr(self, "_active_tool_call_id", None)
+        record["status"] = "committed"
+        record.setdefault("linked_call_ids", []).append(str(call_id or operation))
+        record["committed_operation"] = str(operation)
+        self._pending_decision_id = None
+        return str(identifier)
 
     def _list_decisions(self):
         links: dict[str, list[dict[str, Any]]] = {}
@@ -355,8 +442,9 @@ class AgentLoop:
         """Return a small factual decision view for the next model turn."""
         records = list(getattr(self, "_decision_records", {}).values())[-max(1, int(limit)):]
         return [{key: value for key, value in record.items()
-                 if key in {"decision_id", "goal", "evidence_refs", "hypothesis",
-                            "decision", "expected_effect", "uncertainty"}}
+                if key in {"decision_id", "goal", "evidence_refs", "hypothesis",
+                            "decision", "expected_effect", "uncertainty", "status",
+                            "committed_operation"}}
                 for record in records]
 
     def _build_tools(self):
@@ -433,24 +521,28 @@ class AgentLoop:
             {"path": string, "start_line": integer, "end_line": integer}, ["path"]),
             lambda path, start_line=1, end_line=400: ws.read_file(path, start_line, end_line))
         registry.add("write_file", "Atomically write one workspace file.", self._schema(
-            {"path": string, "content": string}, ["path", "content"]), ws.write_file)
+            {"path": string, "content": string}, ["path", "content"]), ws.write_file,
+            consequence="CONSEQUENTIAL")
         registry.add("replace_file_lines", "Atomically replace an inspected line range.", self._schema(
             {"path": string, "start_line": integer, "end_line": integer, "new_content": string,
-             "expected_old_sha256": string}, ["path", "start_line", "end_line", "new_content"]), ws.replace_file_lines)
+             "expected_old_sha256": string}, ["path", "start_line", "end_line", "new_content"]), ws.replace_file_lines,
+            consequence="CONSEQUENTIAL")
         registry.add("run_command", "Run a bounded engineering/test command in the workspace.", self._schema(
             {"argv": {"type": "array", "items": string, "minItems": 1},
-             "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600}}, ["argv"]), ws.run_command)
+             "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600}}, ["argv"]), ws.run_command,
+            consequence="CONSEQUENTIAL")
         registry.add("search_assets", "Search promoted shared Tool, Skill and Experience summaries.", self._schema(
             {"query": string, "limit": integer, "include_gaps": {"type": "boolean"}}, ["query"]), cap.search)
         registry.add("inspect_asset", "Load selected asset manual/contract detail.", self._schema({"asset_id": string}, ["asset_id"]), cap.inspect)
         registry.add("activate_shared_tool", "Bind one inspected promoted Tool to the current Adapter.",
-                     self._schema({"tool_id": string}, ["tool_id"]), cap.activate_tool)
+                     self._schema({"tool_id": string}, ["tool_id"]), cap.activate_tool,
+                     consequence="CONSEQUENTIAL")
         registry.add("load_tool_source", "Explicitly load a Tool implementation after manual inspection.",
                      self._schema({"tool_id": string}, ["tool_id"]), cap.load_tool_source,
                      group="source_inspection")
         registry.add("materialize_skill", "Materialize a selected Skill controller into the workspace.",
                      self._schema({"skill_id": string}, ["skill_id"]), cap.materialize_skill,
-                     group="source_inspection")
+                     group="source_inspection", consequence="CONSEQUENTIAL")
         registry.add("search_web", "Search public web sources for a capability.",
                      self._schema({"query": string, "limit": integer}, ["query"]),
                      cap.web_search, group="web_acquisition")
@@ -459,13 +551,13 @@ class AgentLoop:
                      cap.fetch_page, group="web_acquisition")
         registry.add("download_public_asset", "Download one HTTPS asset into the workspace with optional SHA256.", self._schema(
             {"url": string, "filename": string, "sha256": string}, ["url", "filename"]),
-            cap.download, group="web_acquisition")
+            cap.download, group="web_acquisition", consequence="CONSEQUENTIAL")
         registry.add("unpack_public_asset", "Safely unpack a downloaded archive inside the workspace.", self._schema(
             {"path": string, "destination": string}, ["path", "destination"]),
-            cap.unpack, group="web_acquisition")
+            cap.unpack, group="web_acquisition", consequence="CONSEQUENTIAL")
         registry.add("build_capability", "Build or compile-check an acquired capability bundle in isolation.", self._schema(
             {"directory": string, "argv": {"type": "array", "items": string}}, ["directory"]),
-            cap.build, group="web_acquisition")
+            cap.build, group="web_acquisition", consequence="CONSEQUENTIAL")
         tool_schema = self._schema({"name": string, "source_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
             "source_urls": {"type": "array", "items": string},
@@ -484,13 +576,13 @@ class AgentLoop:
             "package_spec": package_spec_schema, "source_urls": {"type": "array", "items": string}},
             ["name", "bundle_path", "description", "input_schema", "output_schema", "package_spec"])
         registry.add("register_tool", "Register an immutable Tool version; call test_tool before it can be bound.",
-                     tool_schema, cap.register_tool, group="asset_authoring")
+                     tool_schema, cap.register_tool, group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("register_capability_package", "Register an acquired bundle for isolated execution.",
-                     package_schema, cap.register_package, group="asset_authoring")
+                     package_schema, cap.register_package, group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("revise_tool_manual", "Update a Tool manual using explicit execution evidence.", self._schema(
             {"tool_id": string, "manual": manual_schema, "evidence_paths": {"type": "array", "items": string, "minItems": 1}},
             ["tool_id", "manual", "evidence_paths"]), cap.revise_manual,
-            group="asset_authoring")
+            group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("test_tool", "Run JSON contract tests against a registered Tool.", self._schema(
             {"tool_id": string, "cases": {"type": "array", "items": test_case_schema, "minItems": 1}}, ["tool_id", "cases"]),
             cap.test_tool, group="asset_authoring")
@@ -498,26 +590,27 @@ class AgentLoop:
             {"name": string, "task": string, "controller": string, "tool_ids": {"type": "array", "items": string},
              "evidence_paths": {"type": "array", "items": string}, "evidence": {"type": "object"}},
             ["name", "task", "controller", "tool_ids", "evidence_paths"]), cap.register_skill,
-            group="asset_authoring")
+            group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("register_experience", "Persist an evidence-backed Experience.", self._schema(
             {"name": string, "summary": string, "applicability": string, "keywords": {"type": "array", "items": string},
              "evidence_paths": {"type": "array", "items": string},
              "outcome": {"type": "string", "enum": ["success", "failure", "mixed"]}},
             ["name", "summary", "applicability", "evidence_paths"]), cap.register_experience,
-            group="asset_authoring")
+            group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("promote_asset", "Promote a verified asset after successful integration evidence.", self._schema(
             {"asset_id": string, "evidence_paths": {"type": "array", "items": string, "minItems": 1},
              "applicability": {"type": "object"}}, ["asset_id", "evidence_paths"]), cap.promote_asset,
-            group="asset_authoring")
+            group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("record_gap", "Persist an unresolved capability Gap.", self._schema(
             {"name": string, "task": string, "failure_summary": string, "evidence_paths": {"type": "array", "items": string},
              "attempted_methods": {"type": "array", "items": string}, "missing_capability": string,
              "blocked_reason": string, "next_steps": {"type": "array", "items": string}},
             ["name", "task", "failure_summary", "evidence_paths", "attempted_methods",
              "missing_capability", "blocked_reason", "next_steps"]), cap.record_gap,
-            group="asset_authoring")
+            group="asset_authoring", consequence="CONSEQUENTIAL")
         registry.add("run_controller", "Execute the current controller once and return sensor evidence.",
-                     self._schema(), lambda: self._agent_evidence(self._run_controller()))
+                     self._schema(), lambda: self._agent_evidence(self._run_controller()),
+                     consequence="CONSEQUENTIAL")
         registry.add("record_decision",
                      "Record the model's concise externally stated decision context.",
                      self._schema({"decision_id": {"type": ["string", "null"]},
@@ -534,7 +627,7 @@ class AgentLoop:
         registry.add("list_decisions", "List bounded structured decision records.",
                      self._schema(), self._list_decisions)
         registry.add("reset_case", "Create a fresh episode for the selected case when the Adapter supports it.",
-                     self._schema(), self._reset_case)
+                     self._schema(), self._reset_case, consequence="CONSEQUENTIAL")
         registry.add("inspect_execution", "Inspect the latest committed execution evidence summary.",
                      self._schema({"evidence_ref": string}), self._inspect_execution)
         registry.add("list_executions", "List opaque references to prior Controller experiments.",
@@ -748,12 +841,14 @@ class AgentLoop:
         selector(str(case_id))
         observe = getattr(self.adapter, "initial_observation", None)
         observation = observe() if callable(observe) else None
-        self.context_builder.initial_observation = self._register_artifacts(observation)
+        self.context_builder.initial_observation = self._register_artifacts(
+            self._canonical_observation(observation))
         # Keep full previous evidence for recovery/audit, but remove it from
         # the replaceable model view after an explicit environment switch.
         self._agent_latest_evidence = None
         return {"selected": str(getattr(self.adapter, "active_case", case_id)),
-                "observation": self.context_builder._observation_summary(observation)}
+                "observation": self.context_builder._observation_summary(
+                    self.context_builder.initial_observation)}
 
     def _reset_case(self):
         reset = getattr(self.adapter, "reset_case", None)
@@ -780,7 +875,7 @@ class AgentLoop:
         self._agent_latest_evidence = None
         self.state.update({"completion_valid": False, "finished": False,
                            "restored_evidence_unverified": False})
-        observation = self._register_artifacts(observation)
+        observation = self._register_artifacts(self._canonical_observation(observation))
         self.context_builder.initial_observation = observation
         return {"reset": True, "observation": self.context_builder._observation_summary(observation)}
 
@@ -801,6 +896,9 @@ class AgentLoop:
             candidate = self._artifact_handles.get(handle)
             if candidate is None:
                 raise ProtocolError("artifact handle is not registered")
+            expected_digest = getattr(self, "_artifact_handle_digests", {}).get(handle)
+            if expected_digest and (not candidate.is_file() or _file_sha256(candidate) != expected_digest):
+                raise ProtocolError("registered artifact checksum mismatch")
         else:
             candidate = (self.workspace.root / handle).resolve()
             if self.workspace.root not in candidate.parents:
@@ -945,6 +1043,10 @@ class AgentLoop:
                 temporary.unlink(missing_ok=True)
         summary["artifact_uri"] = f"run://artifacts/tool-results/{target.name}"
         self._artifact_handles[summary["artifact_uri"]] = target
+        if not hasattr(self, "_artifact_handle_digests"):
+            self._artifact_handle_digests = {}
+        self._artifact_handle_digests[summary["artifact_uri"]] = _file_sha256(target)
+        self._persist_artifact_manifest()
         return json.dumps(summary, default=str), summary
 
     @staticmethod
@@ -1028,6 +1130,8 @@ class AgentLoop:
         controller_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
         identity = self._execution_identity()
         protocol = self._resume_protocol()
+        decision_id = (getattr(self, "_active_operation_decision_id", None)
+                       or self._claim_decision("run_controller"))
         # A fresh model tool call is always a new experiment.  Only recovery
         # may reuse the exact call identity persisted in the checkpoint.
         call_id = self._active_tool_call_id or f"direct-{time.time_ns()}"
@@ -1126,8 +1230,8 @@ class AgentLoop:
         agent_evidence = AgentEvidence.from_execution(
             transformed_execution, public_report, digest=digest,
             evidence_ref=evidence_ref).as_dict()
-        if getattr(self, "_pending_decision_id", None):
-            agent_evidence["decision_id"] = self._pending_decision_id
+        if decision_id:
+            agent_evidence["decision_id"] = decision_id
         verifier = getattr(self.adapter, "verification_receipt", None)
         if not callable(verifier):
             raise ProtocolError("Adapter must implement verification_receipt(execution)")
@@ -1149,7 +1253,7 @@ class AgentLoop:
                     "agent_evidence": agent_evidence,
                     "resume_token": (protocol or {}).get("resume_token"),
                     "environment_generation": (protocol or {}).get("environment_generation"),
-                    "decision_id": getattr(self, "_pending_decision_id", None)}
+                    "decision_id": decision_id}
         evidence_dir = self.root / "evidence"
         if not evidence_dir.exists(): evidence_dir.mkdir(parents=True)
         evidence_path = evidence_dir / f"execution-{self.cumulative_executions:06d}-{execution_key[:12]}.json"
@@ -1272,6 +1376,7 @@ class AgentLoop:
             for call_index, (call, normalized) in enumerate(call_pairs):
                 name = ""
                 arguments: dict[str, Any] = {}
+                claimed_decision_id = None
                 skipped = call_index >= maximum_calls
                 try:
                     name = str(call.get("name") or call.get("function", {}).get("name") or "")
@@ -1283,6 +1388,10 @@ class AgentLoop:
                                       f"exceeded the per-turn limit of {maximum_calls}")}
                     else:
                         self._active_tool_call_id = normalized["id"]
+                        metadata = self.tools.metadata(name)
+                        claimed_decision_id = self._claim_decision(
+                            name, consequence=metadata.consequence)
+                        self._active_operation_decision_id = claimed_decision_id
                         result = self.tools.invoke(name, arguments)
                         if name == "search_assets": self.retrieved_assets = result
                         payload = {"ok": True, "result": result}
@@ -1290,6 +1399,7 @@ class AgentLoop:
                     payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 finally:
                     self._active_tool_call_id = None
+                    self._active_operation_decision_id = None
                 multimodal = []
                 if payload.get("ok") and isinstance(payload.get("result"), Mapping):
                     value = payload["result"]
@@ -1320,9 +1430,8 @@ class AgentLoop:
                                        multimodal_inputs=multimodal,
                                        failed=not bool(payload.get("ok")))
                 tool_event = {"name": name, "payload": event_payload, "skipped": skipped}
-                decision_id = getattr(self, "_pending_decision_id", None)
-                if decision_id:
-                    tool_event["decision_id"] = decision_id
+                if claimed_decision_id:
+                    tool_event["decision_id"] = claimed_decision_id
                 if getattr(self, "_current_model_response_id", None):
                     tool_event["model_response_id"] = self._current_model_response_id
                 self.event_store.commit("tool_result", tool_event)
@@ -1370,7 +1479,8 @@ class AgentLoop:
             "model_transport": (self.model.transport_state()
                                  if callable(getattr(self.model, "transport_state", None)) else None),
             "research_state": self._bound_research_state(self.research_state),
-            "decision_state": {"pending_id": getattr(self, "_pending_decision_id", None),
+            "decision_state": {"protocol_active": getattr(self, "_decision_protocol_active", False),
+                               "pending_id": getattr(self, "_pending_decision_id", None),
                                "records": dict(list(getattr(self, "_decision_records", {}).items())[-32:])}})
 
 
