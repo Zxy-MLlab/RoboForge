@@ -18,6 +18,7 @@ from evaluation.sealed_evaluation import SealedEvaluationPolicy
 
 
 class FakeAdapter:
+    observation_protocol = "non_embodied"
     instruction = "move the marker"
     def __init__(self): self.value = 0; self.generation = "fake-generation-1"
     def dispatch(self, method, arguments):
@@ -70,8 +71,13 @@ class CrashModel:
     def decide(self, *, messages, tools):
         self.turn += 1
         if not self.resume and self.turn == 1:
-            return call("write_file", {"path": "controller.py", "content": "def run(robot):\n    robot.act({'value': 1})\n    return robot.verify('goal', {})\n"}, self.turn)
+            return call("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified",
+                "decision": "update controller", "expected_effect": "verification succeeds",
+                "uncertainty": None}, self.turn)
         if not self.resume and self.turn == 2:
+            return call("write_file", {"path": "controller.py", "content": "def run(robot):\n    robot.act({'value': 1})\n    return robot.verify('goal', {})\n"}, self.turn)
+        if not self.resume and self.turn == 3:
             return call("run_controller", {}, self.turn)
         if not self.resume: raise RuntimeError("simulated process crash")
         if self.turn == 1: return call("run_controller", {}, self.turn)
@@ -104,16 +110,25 @@ class FakeModel:
     def decide(self, *, messages, tools):
         self.turn += 1
         if self.turn == 1:
-            return call("write_file", {"path": "controller.py", "content": "def run(robot):\n    robot.act({'value': 0})\n    return robot.verify('goal', {})\n"}, self.turn)
+            return call("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified",
+                "decision": "update controller", "expected_effect": "verification succeeds",
+                "uncertainty": None}, self.turn)
         if self.turn == 2:
-            return call("run_controller", {}, self.turn)
+            return call("write_file", {"path": "controller.py", "content": "def run(robot):\n    robot.act({'value': 0})\n    return robot.verify('goal', {})\n"}, self.turn)
         if self.turn == 3:
-            return call("read_file", {"path": "controller.py"}, self.turn)
-        if self.turn == 4:
-            return call("write_file", {"path": "controller.py", "content": "def run(robot):\n    robot.act({'value': 1})\n    return robot.verify('goal', {})\n"}, self.turn)
-        if self.turn == 5:
             return call("run_controller", {}, self.turn)
+        if self.turn == 4:
+            return call("read_file", {"path": "controller.py"}, self.turn)
+        if self.turn == 5:
+            return call("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the previous execution did not verify", "decision": "update controller",
+                "expected_effect": "verification succeeds", "uncertainty": None}, self.turn)
         if self.turn == 6:
+            return call("write_file", {"path": "controller.py", "content": "def run(robot):\n    robot.act({'value': 1})\n    return robot.verify('goal', {})\n"}, self.turn)
+        if self.turn == 7:
+            return call("run_controller", {}, self.turn)
+        if self.turn == 8:
             return call("finish", {"summary": "verified"}, self.turn)
         return call("finish", {"summary": "done"}, self.turn)
 

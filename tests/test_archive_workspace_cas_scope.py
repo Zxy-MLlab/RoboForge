@@ -14,6 +14,7 @@ from embodied_codex.kernel.workspace import PersistentWorkspace
 
 
 class _Adapter:
+    observation_protocol = "non_embodied"
     pass
 
 
@@ -235,4 +236,3 @@ def test_many_file_commit_has_one_cas_index_save(tmp_path, monkeypatch):
     workspace.apply({f"files/{index}.txt": str(index) for index in range(1000)})
     assert len(saves) == 1
     assert len(list(cas.blob_root.glob("*/*"))) == 1000
-

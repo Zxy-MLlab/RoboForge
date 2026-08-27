@@ -288,6 +288,7 @@ root = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 
 class Adapter:
+    observation_protocol = "non_embodied"
     instruction = "set persistent target"
     sdk_index = {"protocol": "kill-recovery-v1"}
     def __init__(self):
@@ -336,6 +337,13 @@ def call(name, arguments, identifier):
 
 class FirstModel:
     def decide(self, *, messages, tools):
+        if not any(row.get("role") == "assistant"
+                   and any(call.get("function", {}).get("name") == "record_decision"
+                           for call in row.get("tool_calls", []))
+                   for row in messages if isinstance(row, dict)):
+            return call("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "public execution is not verified", "decision": "update controller",
+                "expected_effect": "verification succeeds", "uncertainty": None}, "decision")
         context = next((json.loads(row["content"]) for row in reversed(messages)
             if row.get("role") == "user" and isinstance(row.get("content"), str)
             and row["content"].startswith("{")), {})
@@ -631,6 +639,7 @@ class _EvidenceReactiveCampaignModel:
     """Selects cases itself and reacts to public failure evidence."""
 
     def __init__(self):
+        self.decision_recorded = False
         self.saw_second_failure = False
         self.writes = 0
         self.first_passed = False
@@ -666,15 +675,31 @@ class _EvidenceReactiveCampaignModel:
         selected = state.get("selected_case")
         latest = context.get("latest_evidence") or {}
         diagnostics = latest.get("diagnostics") or {}
+        if last_call == "run_controller":
+            self.decision_recorded = False
+        observed = diagnostics.get("observed_value")
+        target = diagnostics.get("target_value")
+        needs_case_switch = ((selected == "case-001" and not self.first_passed)
+                             or (selected == "case-002" and self.saw_second_failure))
+        if (not self.decision_recorded and last_call != "record_decision"
+                and (controller is None or last_call == "read_file" or
+                     (observed is not None and observed == target and needs_case_switch))):
+            self.decision_recorded = True
+            return _decision("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified", "decision": "continue intervention",
+                "expected_effect": "verification succeeds", "uncertainty": None})
         if controller is None:
+            if not self.decision_recorded:
+                self.decision_recorded = True
+                return _decision("record_decision", {"goal": "repair", "evidence_refs": [],
+                    "hypothesis": "public execution is not verified", "decision": "update controller",
+                    "expected_effect": "verification succeeds", "uncertainty": None})
             self.writes += 1
             return _decision("write_file", {"path": "controller.py", "content":
                 "def run(robot):\n    robot.act({'type':'set_value','value':1})\n"
                 "    return robot.verify('target', {})\n"})
         if last_call == "write_file":
             return _decision("run_controller", {})
-        observed = diagnostics.get("observed_value")
-        target = diagnostics.get("target_value")
         if observed is not None and observed != target:
             if selected == "case-002": self.saw_second_failure = True
             if last_call != "read_file":

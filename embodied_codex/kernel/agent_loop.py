@@ -177,12 +177,7 @@ class AgentLoop:
     def _canonical_observation(self, observation: Any) -> Any:
         provider = getattr(self.adapter, "canonical_observation", None)
         if not callable(provider):
-            # Adapters that expose only task-neutral scalar metadata (for
-            # example a fake target value) have no embodied observation to
-            # normalize. Native robot observations must never take this path.
-            if isinstance(observation, Mapping) and not any(
-                    key in observation for key in ("robot", "proprioception", "frames", "entities",
-                                                   "eef_pose", "cameras")):
+            if getattr(self.adapter, "observation_protocol", None) == "non_embodied":
                 return observation
             raise ProtocolError("Adapter must provide canonical_observation")
         projected = provider(observation)
@@ -565,7 +560,11 @@ class AgentLoop:
         registry.add("run_command", "Run a bounded engineering/test command in the workspace.", self._schema(
             {"argv": {"type": "array", "items": string, "minItems": 1},
              "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600}}, ["argv"]), ws.run_command,
-            consequence="VALIDATION")
+            consequence="WORKSPACE_MUTATION")
+        registry.add("run_validation", "Run a command in an isolated disposable workspace stage.", self._schema(
+            {"argv": {"type": "array", "items": string, "minItems": 1},
+             "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600}}, ["argv"]),
+            ws.run_validation, consequence="VALIDATION")
         registry.add("search_assets", "Search promoted shared Tool, Skill and Experience summaries.", self._schema(
             {"query": string, "limit": integer, "include_gaps": {"type": "boolean"}}, ["query"]), cap.search)
         registry.add("inspect_asset", "Load selected asset manual/contract detail.", self._schema({"asset_id": string}, ["asset_id"]), cap.inspect)
@@ -592,7 +591,7 @@ class AgentLoop:
                      cap.unpack, group="web_acquisition", consequence="ASSET_MUTATION")
         registry.add("build_capability", "Build or compile-check an acquired capability bundle in isolation.", self._schema(
             {"directory": string, "argv": {"type": "array", "items": string}}, ["directory"]),
-                     cap.build, group="web_acquisition", consequence="VALIDATION")
+            cap.build, group="web_acquisition", consequence="ASSET_MUTATION")
         tool_schema = self._schema({"name": string, "source_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
             "source_urls": {"type": "array", "items": string},
@@ -1443,12 +1442,8 @@ class AgentLoop:
                                 and not ((pending_record.get("status") == "open")
                                          or (active_id and active_id == pending_id
                                              and active_record.get("status") in {"active", "committed"}))):
-                            # Keep the runtime fail-closed contract while
-                            # giving legacy model adapters a durable
-                            # intervention record to attach their call to.
-                            self._record_decision(
-                                goal=f"intervention:{name}", evidence_refs=[],
-                                decision=name, expected_effect=None, uncertainty=None)
+                            raise ProtocolError(
+                                "A Decision Record is required before starting a consequential intervention.")
                         if (active_id and self._pending_decision_id == active_id
                                 and active_record.get("status") in {"active", "committed"}
                                 and metadata.consequence not in {"READ_ONLY", "VALIDATION"}):
@@ -1456,7 +1451,17 @@ class AgentLoop:
                         else:
                             claimed_decision_id = self._claim_decision(
                                 name, consequence=metadata.consequence)
-                        self._active_operation_decision_id = claimed_decision_id
+                        if metadata.consequence in {"READ_ONLY", "VALIDATION"} and active_id:
+                            # Read/validation calls remain part of the current
+                            # intervention for provenance and never clear it.
+                            claimed_decision_id = active_id
+                            token = str(normalized["id"])
+                            if token not in active_record.setdefault("linked_call_ids", []):
+                                active_record["linked_call_ids"].append(token)
+                                active_record.setdefault("operations", []).append(
+                                    {"name": name, "level": metadata.consequence})
+                        if claimed_decision_id is not None:
+                            self._active_operation_decision_id = claimed_decision_id
                         result = self.tools.invoke(name, arguments)
                         if name == "search_assets": self.retrieved_assets = result
                         payload = {"ok": True, "result": result}

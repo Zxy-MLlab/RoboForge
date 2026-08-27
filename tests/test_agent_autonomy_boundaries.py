@@ -52,15 +52,24 @@ class _CaseSelectingModel:
     def decide(self, *, messages, tools):
         self.turn += 1
         sequence = {
-            1: ("write_file", {"path": "controller.py", "content":
+            1: ("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified", "decision": "update controller",
+                "expected_effect": "verification succeeds", "uncertainty": None}),
+            2: ("write_file", {"path": "controller.py", "content":
                 "def run(robot):\n    robot.act({'type':'set_value','value':1})\n"
                 "    return robot.verify('target', {})\n"}),
-            2: ("select_case", {"case_id": "case-002"}),
-            3: ("run_controller", {}),
+            3: ("select_case", {"case_id": "case-002"}),
             4: ("run_controller", {}),
-            5: ("select_case", {"case_id": "case-001"}),
+            5: ("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified", "decision": "rerun selected case",
+                "expected_effect": "verification succeeds", "uncertainty": None}),
             6: ("run_controller", {}),
-            7: ("finish", {"summary": "current case verified"}),
+            7: ("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified", "decision": "switch selected case",
+                "expected_effect": "verification succeeds", "uncertainty": None}),
+            8: ("select_case", {"case_id": "case-001"}),
+            9: ("run_controller", {}),
+            10: ("finish", {"summary": "current case verified"}),
         }
         name, arguments = sequence[self.turn]
         return _call(name, arguments, self.turn)
@@ -108,6 +117,10 @@ class _EvidenceCaptureModel:
     def decide(self, *, messages, tools):
         self.turn += 1
         if self.turn == 1:
+            return _call("record_decision", {"goal": "inspect", "evidence_refs": [],
+                "hypothesis": "public execution requires inspection", "decision": "inspect evidence",
+                "expected_effect": "diagnostic facts available", "uncertainty": None}, self.turn)
+        if self.turn == 2:
             return _call("run_controller", {}, self.turn)
         self.second_messages = json.loads(json.dumps(messages))
         return _call("read_file", {"path": "controller.py"}, self.turn)
@@ -117,7 +130,7 @@ def test_agent_evidence_excludes_harness_and_evaluator_metadata(tmp_path):
     adapter = _EvidenceBoundaryAdapter("test evidence boundary", tmp_path / "adapter")
     model = _EvidenceCaptureModel()
     loop = _loop(tmp_path, model, adapter,
-        budget=LoopBudget(max_steps=2, max_executions=2))
+        budget=LoopBudget(max_steps=3, max_executions=2))
     loop.workspace.write_file("controller.py",
         "def run(robot):\n    return robot.verify('target', {})\n")
     loop.run(adapter.instruction)

@@ -81,9 +81,13 @@ def test_execution_evidence_has_one_full_copy_and_checkpoint_is_bounded(tmp_path
         def decide(self, **_kwargs):
             self.turn += 1
             if self.turn == 1:
-                return _call("write_file", {"path": "controller.py", "content":
-        "def run(robot):\n return robot.verify('target', {})\n"}, "write")
+                return _call("record_decision", {"goal": "repair", "evidence_refs": [],
+                    "hypothesis": "public execution is not verified", "decision": "update controller",
+                    "expected_effect": "verification succeeds", "uncertainty": None}, "decision")
             if self.turn == 2:
+                return _call("write_file", {"path": "controller.py", "content":
+                    "def run(robot):\n return robot.verify('target', {})\n"}, "write")
+            if self.turn == 3:
                 return _call("run_controller", {}, "run")
             return _call("finish", {"summary": "verified"}, "finish")
 
@@ -495,9 +499,13 @@ def test_verification_receipt_is_only_success_truth_and_one_case_skill_is_allowe
         def decide(self, **_kwargs):
             self.turn += 1
             if self.turn == 1:
+                return _call("record_decision", {"goal": "repair", "evidence_refs": [],
+                    "hypothesis": "public execution is not verified", "decision": "update controller",
+                    "expected_effect": "verification succeeds", "uncertainty": None})
+            if self.turn == 2:
                 return _call("write_file", {"path": "controller.py", "content":
                     "def run(robot):\n return robot.verify('target', {})\n"})
-            if self.turn == 2: return _call("run_controller", {})
+            if self.turn == 3: return _call("run_controller", {})
             return _call("finish", {"summary": "canonical receipt"})
     loop = _loop(tmp_path, Model(), adapter=adapter)
     result = loop.run("receipt")
@@ -514,9 +522,10 @@ def test_verification_receipt_is_only_success_truth_and_one_case_skill_is_allowe
 def test_new_explicit_session_gets_fresh_budget_and_preserves_research_state(tmp_path):
     class First:
         def decide(self, **_kwargs):
-            return _call("write_file", {"path": "controller.py", "content":
-                "def run(robot):\n robot.act({'type':'set_value','value':1})\n"
-                " return robot.verify('target', {})\n"})
+            return _call("record_decision", {"goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified",
+                "decision": "update controller", "expected_effect": "verification succeeds",
+                "uncertainty": None})
     first = _loop(tmp_path, First(), budget=LoopBudget(max_steps=1, max_executions=1))
     first.retrieved_assets = {"tools": [{"tool_id": "remembered:v001"}]}
     first_result = first.run("session task")
@@ -527,14 +536,18 @@ def test_new_explicit_session_gets_fresh_budget_and_preserves_research_state(tmp
         turn = 0
         def decide(self, **_kwargs):
             self.turn += 1
-            return (_call("run_controller", {}) if self.turn == 1
+            if self.turn == 1:
+                return _call("write_file", {"path": "controller.py", "content":
+                    "def run(robot):\n    robot.act({'type':'set_value','value':1})\n"
+                    "    return robot.verify('target', {})\n"})
+            return (_call("run_controller", {}) if self.turn == 2
                     else _call("finish", {"summary": "resumed"}))
     resumed = _loop(tmp_path, Second(), budget=LoopBudget(max_steps=3, max_executions=2))
     result = resumed.run("session task")
     assert result["finished"] is True and result["resumable"] is False
     assert result["session"]["index"] == 2
-    assert result["session"]["steps"] == 2
-    assert result["cumulative"]["steps"] == 3
+    assert result["session"]["steps"] == 3
+    assert result["cumulative"]["steps"] == 4
     assert resumed.retrieved_assets == {"tools": [{"tool_id": "remembered:v001"}]}
     assert resumed.workspace.controller.is_file()
 

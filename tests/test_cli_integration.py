@@ -12,6 +12,7 @@ def test_cli_runs_real_function_calling_controller_loop(tmp_path):
 import json
 from pathlib import Path
 class Adapter:
+    observation_protocol = "non_embodied"
     instruction = "set marker"
     def __init__(self, task=None, root=None):
         self.value = 0; self.generation = "cli-fake-1"; self.root = Path(root)
@@ -42,9 +43,12 @@ class Model:
         self.turn += 1
         def call(name, args): return {"tool_calls": [{"id": str(self.turn), "name": name,
             "arguments": json.dumps(args)}], "content": ""}
-        if self.turn == 1: return call("write_file", {"path": "controller.py",
+        if self.turn == 1: return call("record_decision", {"goal": "repair", "evidence_refs": [],
+            "hypothesis": "the current public result is not verified", "decision": "update controller",
+            "expected_effect": "verification succeeds", "uncertainty": None})
+        if self.turn == 2: return call("write_file", {"path": "controller.py",
             "content": "def run(robot):\\n    robot.act({'value': 1})\\n    return robot.verify('goal', {})\\n"})
-        if self.turn == 2: return call("run_controller", {})
+        if self.turn == 3: return call("run_controller", {})
         return call("finish", {"summary": "verified"})
 ''')
     run_dir = tmp_path / "run"; assets = tmp_path / "assets"
@@ -109,6 +113,7 @@ def doctor_checks():
     return {"ok": os.environ.get("PREFLIGHT_OK") == "1", "dependency": "deliberately unavailable"}
 
 class Adapter:
+    observation_protocol = "non_embodied"
     def __init__(self, task=None, root=None):
         Path(os.environ["ADAPTER_INIT_MARKER"]).write_text("initialized")
 ''')

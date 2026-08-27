@@ -14,6 +14,7 @@ import numpy as np
 
 
 class FakeAdapter:
+    observation_protocol = "canonical_embodied"
     sdk_index = {"protocol": "roboforge-fake-adapter-v1",
                  "sensors": ["rgb", "proprioception"],
                  "actions": {"set_value": {"value": "integer"}},
@@ -180,6 +181,8 @@ class FakeModel:
 
     def __init__(self):
         self.turn = 0
+        # The fixture models the public intervention protocol explicitly.
+        self.decision_open = False
         self.searched = False
         self.reuse = False
         self.inspected = False
@@ -263,6 +266,10 @@ class FakeModel:
         name = self._last_call(messages)
         payload = self._latest_tool_payload(messages)
         result = payload.get("result") if payload.get("ok") else None
+        if name == "record_decision" and payload.get("ok"):
+            self.decision_open = True
+        elif name == "run_controller" and payload.get("ok"):
+            self.decision_open = False
         if name == "search_assets" and isinstance(result, dict):
             self.searched = True
             promoted = next((item for item in result.get("tools", [])
@@ -317,6 +324,13 @@ class FakeModel:
         self.turn += 1
         documents = self._documents(messages)
         self._consume_result(messages)
+        if self.turn > 1 and not self.decision_open:
+            return _call(self.turn, "record_decision", {
+                "goal": "repair", "evidence_refs": [],
+                "hypothesis": "the current public result is not verified",
+                "decision": "perform the next intervention",
+                "expected_effect": "the public verification result improves",
+                "uncertainty": None})
         context = self._current_context(documents)
         latest = context.get("latest_evidence") or {}
         diagnostics = latest.get("diagnostics") or {}

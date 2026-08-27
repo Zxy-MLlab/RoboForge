@@ -363,9 +363,10 @@ class PersistentWorkspace:
         updated = "".join(lines[:start - 1]) + str(new_content) + "".join(lines[end:])
         return self.write_file(path, updated)
 
-    def run_command(self, argv: list[str], *, timeout_seconds: float = 120,
-                    env: Mapping[str, str] | None = None,
-                    cwd: str | Path | None = None) -> dict[str, Any]:
+    def _run_staged_command(self, argv: list[str], *, timeout_seconds: float = 120,
+                            env: Mapping[str, str] | None = None,
+                            cwd: str | Path | None = None,
+                            commit: bool = True) -> dict[str, Any]:
         if not argv or not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
             raise WorkspaceError("argv must be a nonempty string list")
         safe_env = {"PYTHONNOUSERSITE": "1"}
@@ -407,17 +408,33 @@ class PersistentWorkspace:
                     item = staged.get(locked)
                     if item is None or item["sha256"] != expected:
                         raise WorkspaceError(f"workspace command changed immutable file: {locked}")
-                changed = self._commit_validated_stage(stage, before, staged)
-                self.snapshot()
+                changed = (self._commit_validated_stage(stage, before, staged)
+                           if commit else [])
+                if commit:
+                    self.snapshot()
             output = (completed.stdout + completed.stderr)[-30000:]
             return {"argv": argv, "exit_code": completed.returncode,
                     "timed_out": completed.timed_out,
                     "output_limited": completed.output_limited, "output": output,
                     "sandbox": f"{self.sandbox.name}-workspace-v2",
                     "cwd": str(relative) or ".", "changed": changed,
-                    "committed": completed.returncode == 0 and not completed.timed_out}
+                    "committed": bool(commit and completed.returncode == 0 and not completed.timed_out)}
         finally:
             shutil.rmtree(stage, ignore_errors=True)
+
+    def run_command(self, argv: list[str], *, timeout_seconds: float = 120,
+                    env: Mapping[str, str] | None = None,
+                    cwd: str | Path | None = None) -> dict[str, Any]:
+        """Run a command and commit successful staged workspace changes."""
+        return self._run_staged_command(argv, timeout_seconds=timeout_seconds,
+                                        env=env, cwd=cwd, commit=True)
+
+    def run_validation(self, argv: list[str], *, timeout_seconds: float = 120,
+                       env: Mapping[str, str] | None = None,
+                       cwd: str | Path | None = None) -> dict[str, Any]:
+        """Run against an isolated workspace stage; discard all file changes."""
+        return self._run_staged_command(argv, timeout_seconds=timeout_seconds,
+                                        env=env, cwd=cwd, commit=False)
 
     def _validate_staged_tree(self, stage: Path,
                               known: Mapping[str, Mapping[str, Any]] | None = None
