@@ -105,7 +105,10 @@ class ResponsesHistory:
             for part in cls._value(item, "content", []) or []:
                 part_type = cls._value(part, "type")
                 if part_type in {"output_text", "text", "input_text"}:
-                    content.append({"type": "input_text",
+                    # Replayed assistant messages remain model output items.
+                    # Apex accepts output_text (or refusal) for this role, not
+                    # the input_text shape used by user/current-state messages.
+                    content.append({"type": "output_text",
                                     "text": str(cls._value(part, "text", ""))})
                 elif part_type in {"input_image", "image_url"}:
                     image_url = cls._value(part, "image_url")

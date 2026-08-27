@@ -150,8 +150,22 @@ def test_output_to_input_normalization_drops_output_only_metadata():
                         "call_id": "call-1", "name": "read_file",
                         "arguments": "{}", "caller": "assistant"}
     assert message == {"type": "message", "role": "assistant",
-                       "content": [{"type": "input_text", "text": "done"}]}
+                       "content": [{"type": "output_text", "text": "done"}]}
     assert "status" not in json.dumps([reasoning, function, message])
+
+
+def test_user_state_and_replayed_assistant_text_use_distinct_input_shapes():
+    history = ResponsesHistory()
+    current = history.set_authoritative_messages([
+        {"role": "user", "content": "authoritative state"}])
+    history.append_response(response_id="response", output=[{
+        "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "tool preamble"}]}])
+    replay = history.serialize(current)
+    assert replay[0] == {"role": "user", "content": "authoritative state"}
+    assert replay[1] == {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text",
+                                      "text": "tool preamble"}]}
 
 
 def test_unknown_output_item_fails_instead_of_being_silently_dropped():
