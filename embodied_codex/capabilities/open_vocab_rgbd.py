@@ -428,9 +428,14 @@ class OpenVocabularyRGBD:
         if source_anchor.shape!=(3,) or not isinstance(frame,Mapping):
             return {"verified":False,"reason":"fresh frame and independent source_ref are required"}
         proprio=frame.get("proprioception") or {}
-        eef=np.asarray(proprio.get("robot0_eef_pos") or (),float)
-        gripper=np.asarray(proprio.get("robot0_gripper_qpos") or (),float)
-        if eef.shape!=(3,) or gripper.size<1:
+        eef_pose=proprio.get("eef_pose") if isinstance(proprio, Mapping) else None
+        gripper_state=proprio.get("gripper") if isinstance(proprio, Mapping) else None
+        eef=np.asarray(eef_pose.get("position_m") if isinstance(eef_pose, Mapping) else (),float)
+        try:
+            width=float(gripper_state.get("width_m")) if isinstance(gripper_state, Mapping) else float("nan")
+        except (TypeError, ValueError):
+            width=float("nan")
+        if eef.shape!=(3,) or not np.isfinite(eef).all() or not np.isfinite(width):
             return {"verified":False,"reason":"EEF/gripper proprioception absent"}
         result=self.detect({"frame":frame,"camera":payload.get("camera","agentview"),
             "queries":[object_query],"box_threshold":payload.get("box_threshold",.16),
@@ -438,7 +443,6 @@ class OpenVocabularyRGBD:
             "max_detections_per_query":payload.get("max_detections_per_query",8)})
         objects=[item for item in result["detections"].get(object_query,[])
                  if "world_xyz" in item]
-        width=float(np.sum(np.abs(gripper)))
         if not objects:
             return {"verified":False,"reason":"object not visible near gripper",
                     "object_count":0,"gripper_width_m":width}

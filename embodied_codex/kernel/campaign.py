@@ -96,6 +96,12 @@ class CampaignAdapter:
     def verification_receipt(self, execution):
         return self.active.verification_receipt(execution)
 
+    def begin_controller_execution(self):
+        begin = getattr(self.active, "begin_controller_execution", None)
+        if callable(begin):
+            return begin()
+        return None
+
     def execution_identity(self):
         return self.active.execution_identity()
 

@@ -114,6 +114,28 @@ def _array(item, length: int | None = None):
 
 def _frame_schema():
     number = {"type": "number"}
+    vector3 = _array(number, 3)
+    quaternion = _array(number, 4)
+    eef_pose = {"type": "object", "properties": {
+        "frame": {"type": "string"}, "position_m": vector3,
+        "orientation_xyzw": quaternion},
+        "required": ["frame", "position_m", "orientation_xyzw"],
+        "additionalProperties": False}
+    gripper = {"type": "object", "properties": {"width_m": number},
+               "required": ["width_m"], "additionalProperties": False}
+    joint_state = {"type": "object", "properties": {
+        "position": {"type": "array", "items": number},
+        "velocity": {"type": "array", "items": number},
+        "gripper_velocity": {"type": "array", "items": number}},
+        "additionalProperties": False}
+    proprioception = {"type": "object", "properties": {
+        "eef_pose": eef_pose, "gripper": gripper,
+        "joint_state": joint_state,
+        "proprioception": {"type": "object", "properties": {
+            "joint_position": {"type": "array", "items": number},
+            "joint_velocity": {"type": "array", "items": number}},
+            "additionalProperties": False}},
+        "additionalProperties": False}
     camera = {"type": "object", "properties": {
         "rgb_path": {"type": "string"}, "rgb_sha256": {"type": "string"},
         "depth_path": {"type": "string"}, "depth_sha256": {"type": "string"},
@@ -125,8 +147,7 @@ def _frame_schema():
     return {"type": "object", "properties": {
         "frame_id": {"type": "string"}, "step": {"type": "integer"},
         "cameras": {"type": "object", "additionalProperties": camera},
-        "proprioception": {"type": "object", "additionalProperties": {
-            "oneOf": [number, _array(number)]}},
+        "proprioception": proprioception,
     }, "required": ["frame_id", "cameras"], "additionalProperties": False}
 
 
