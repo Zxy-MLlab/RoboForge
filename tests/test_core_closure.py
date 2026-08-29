@@ -233,6 +233,35 @@ def test_progress_can_link_authentic_related_records(tmp_path):
                               related_progress_ids=["progress-missing"])
 
 
+def test_campaign_run_controller_is_episodic_and_preserves_learning(tmp_path):
+    from embodied_codex.kernel.campaign import CampaignAdapter
+
+    class EpisodicFake(FakeAdapter):
+        episodic_trials = True
+        trial_horizon_exhausted = False
+
+        @property
+        def step(self):
+            return len(self.actions)
+
+    case = EpisodicFake("set marker", tmp_path / "case")
+    campaign = CampaignAdapter([("opaque", case)])
+    loop = _loop(tmp_path, object(), adapter=campaign, resume=False)
+    source = ("def run(robot):\n"
+              "    robot.act({'type': 'set_value', 'value': 1})\n"
+              "    return robot.verify('target', {})\n")
+    loop.workspace.write_file("controller.py", source)
+    first = loop._run_controller()
+    second = loop._run_controller()
+    assert first["environment_identity"]["environment_generation"] != second[
+        "environment_identity"]["environment_generation"]
+    assert [first["trial_control_steps"], second["trial_control_steps"]] == [1, 1]
+    assert second["cumulative_control_steps"] == 2
+    assert [item["trial_index"] for item in loop.controller_versions] == [1, 2]
+    assert len(loop._list_executions()["executions"]) == 2
+    assert loop.workspace.controller.read_text() == source
+
+
 def test_execution_artifact_handles_resolve_to_immutable_scoped_snapshots(tmp_path):
     adapter = FakeAdapter("set marker", tmp_path / "adapter")
     loop = _loop(tmp_path, object(), adapter=adapter, resume=False)
