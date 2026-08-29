@@ -225,6 +225,7 @@ def run_command(args) -> int:
                 protected_paths=[asset_root]),
             event_store=EventStore(run_dir / "events", protect=True),
             budget=LoopBudget(max_steps=args.max_steps, max_executions=args.max_executions,
+                              max_trials=args.max_trials,
                               timeout_seconds=args.session_timeout),
             root=run_dir, web_search=manager.web_search,
             resume=bool(getattr(args, "resume", False)))
@@ -437,6 +438,8 @@ def main(argv=None) -> int:
         command.add_argument("--verifier-reasoning-effort", default="low")
         command.add_argument("--max-steps", type=int, default=60)
         command.add_argument("--max-executions", type=int, default=20)
+        command.add_argument("--max-trials", type=int,
+                             help="maximum fresh physical Controller trials")
         command.add_argument("--session-timeout", type=float, default=3600)
         command.add_argument("--controller-timeout", type=float, default=600)
         command.set_defaults(handler=run_command, resume=resume)

@@ -296,6 +296,16 @@ def test_campaign_preserves_episodic_trial_and_control_step_contract():
         "asset_id": "native:v1", "manual": "complete"}
 
 
+def test_explicit_trial_budget_is_independent_of_legacy_execution_limit():
+    from embodied_codex.kernel.agent_loop import LoopBudget
+
+    budget = LoopBudget(max_steps=60, max_executions=2, max_trials=12)
+    budget.executions = 2
+    assert budget.exhausted() is False
+    budget.executions = 12
+    assert budget.exhausted() is True
+
+
 def test_libero_horizon_exhaustion_is_trial_local():
     import numpy as np
     from embodied_codex.deployments.libero import LiberoDeployment, LiberoDeploymentError
