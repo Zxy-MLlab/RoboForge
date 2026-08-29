@@ -461,6 +461,8 @@ class OpenAIModel:
         return audit
 
     def _decide_once(self, *, messages, tools):
+        if (self.provider or "").lower() == "apex":
+            return self._decide_chat(messages=messages, tools=tools)
         if not hasattr(self.client, "responses"):
             raise RuntimeError("OpenAI SDK/client does not support the Responses API")
         pending = self.history.pending_call_ids()
@@ -514,6 +516,85 @@ class OpenAIModel:
                             input_items=input_items)
         return {"content": "".join(text_parts), "tool_calls": calls,
                 "response_items": normalized, "audit": audit}
+
+    @staticmethod
+    def _chat_messages(messages):
+        converted = []
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            item = {"role": str(message.get("role", "user"))}
+            content = message.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if not isinstance(part, Mapping):
+                        continue
+                    kind = part.get("type")
+                    if kind in {"text", "input_text", "output_text"}:
+                        parts.append({"type": "text", "text": str(part.get("text", ""))})
+                    elif kind in {"image_url", "input_image"}:
+                        image = part.get("image_url")
+                        url = image.get("url") if isinstance(image, Mapping) else image
+                        parts.append({"type": "image_url", "image_url": {"url": url}})
+                item["content"] = parts
+            else:
+                item["content"] = str(content)
+            if item["role"] == "assistant" and message.get("tool_calls"):
+                item["tool_calls"] = list(message["tool_calls"])
+            if item["role"] == "tool":
+                item["tool_call_id"] = str(message.get("tool_call_id", ""))
+            converted.append(item)
+        return converted
+
+    def _decide_chat(self, *, messages, tools):
+        if not hasattr(self.client, "chat"):
+            raise RuntimeError("OpenAI SDK/client does not support Chat Completions")
+        current_state = self.history.set_authoritative_messages(list(messages))
+        with _total_deadline(self.total_response_timeout):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=self._chat_messages(messages),
+                tools=[{"type": "function", "function": dict(tool.get("function") or tool)}
+                       for tool in tools],
+                tool_choice="auto",
+                max_tokens=self.max_tokens)
+        choice = (self._value(response, "choices") or [None])[0]
+        message = self._value(choice, "message")
+        if message is None:
+            raise ModelResponseIncomplete("Chat Completions returned no message")
+        calls = []
+        history_output = []
+        for item in self._value(message, "tool_calls", []) or []:
+            function = self._value(item, "function")
+            call_id = self._value(item, "id") or ""
+            name = self._value(function, "name") or ""
+            arguments = self._value(function, "arguments") or "{}"
+            calls.append({"id": call_id, "name": name, "arguments": arguments})
+            history_output.append({"type": "function_call", "call_id": call_id,
+                                   "name": name, "arguments": arguments})
+        content = self._value(message, "content") or ""
+        if content:
+            history_output.insert(0, {"type": "message", "role": "assistant",
+                                      "content": [{"type": "text", "text": str(content)}]})
+        response_id = self._value(response, "id") or hashlib.sha256(
+            json.dumps({"messages": messages, "response": response},
+                       default=str, sort_keys=True).encode()).hexdigest()
+        self.history.append_response(response_id=str(response_id), output=history_output)
+        usage = self._usage(response)
+        audit = {"provider": self.provider or "apex", "requested_model": self.model,
+                 "effective_model": self._value(response, "model"),
+                 "reasoning_effort": self.reasoning_effort,
+                 "response_id": self._value(response, "id"),
+                 "previous_response_id_used": None, "usage": usage,
+                 "response_status": self._value(choice, "finish_reason"),
+                 "finish_status": self._value(choice, "finish_reason"),
+                 "tool_call_count": len(calls),
+                 "history_item_count": len(messages),
+                 "serialized_history_bytes": len(json.dumps(messages, default=str).encode()),
+                 "estimated_history_tokens": max(1, len(json.dumps(messages, default=str)) // 4)}
+        self.audit_log.append(audit)
+        return {"content": str(content), "tool_calls": calls, "audit": audit}
 
     def decide(self, *, messages, tools):
         for attempt in range(len(self.retry_delays) + 1):

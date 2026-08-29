@@ -5,6 +5,27 @@ import pytest
 from embodied_codex.model import OpenAIModel, ResponsesHistory
 
 
+def test_cli_propagates_provider_to_model(monkeypatch):
+    import argparse
+    import embodied_codex.cli as cli
+    from embodied_codex.providers import ProviderConfiguration
+
+    captured = {}
+
+    class StubModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "OpenAIModel", StubModel)
+    args = argparse.Namespace(model=None, provider="apex",
+                               base_url="https://api.apexin.ai/v1",
+                               model_name="gpt-5.6-sol", reasoning_effort="high")
+    configuration = ProviderConfiguration("apex", "https://api.apexin.ai/v1",
+                                          "APEX_API_KEY", "test-secret")
+    cli._model(args, configuration)
+    assert captured["provider"] == "apex"
+
+
 class _Responses:
     def __init__(self, responses):
         self.responses = iter(responses)

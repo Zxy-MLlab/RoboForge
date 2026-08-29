@@ -41,7 +41,8 @@ def _model(args, configuration=None):
         base_url=getattr(args, "base_url", None))
     return OpenAIModel(api_key=configuration.api_key, base_url=configuration.endpoint,
                        model=args.model_name,
-                       reasoning_effort=args.reasoning_effort)
+                       reasoning_effort=args.reasoning_effort,
+                       provider=configuration.provider)
 
 
 def _libraries(asset_root: Path, workspace: PersistentWorkspace, adapter=None, sandbox=None):
