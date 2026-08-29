@@ -45,6 +45,18 @@ class CampaignAdapter:
         return [getattr(adapter, "artifact_dir") for adapter in self._cases.values()
                 if getattr(adapter, "artifact_dir", None)]
 
+    @property
+    def episodic_trials(self):
+        return bool(getattr(self.active, "episodic_trials", False))
+
+    @property
+    def step(self):
+        return int(getattr(self.active, "step", 0) or 0)
+
+    @property
+    def trial_horizon_exhausted(self):
+        return bool(getattr(self.active, "trial_horizon_exhausted", False))
+
     def case_adapters(self):
         """Expose case membership to external evaluation only."""
         return self._evaluator_cases

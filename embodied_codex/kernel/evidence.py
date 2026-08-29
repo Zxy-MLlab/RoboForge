@@ -10,8 +10,22 @@ from .embodied_state import build_transition, normalize_entity
 _PUBLIC_RESULT_FIELDS = (
     "reached", "target_xyz", "target_quaternion_xyzw", "eef_before", "eef_after",
     "final_position_error_m", "final_orientation_error_rad",
-    "gripper", "gripper_width_m", "action_axis", "action_axis_frame", "action_frame_axis", "verified", "sensor_only",
+    "gripper", "gripper_width_m", "action_axis", "action_axis_frame", "action_frame_axis", "target_source", "verified", "sensor_only",
     "verifier_error", "reason", "criterion",
+)
+_PUBLIC_VERIFIER_FIELDS = (
+    "verified", "sensor_only", "verifier_error", "reason", "criterion",
+    "target_xy_error_m", "vertical_offset_m", "source_vacated",
+    "nearest_source_detection_m", "object_to_eef_distance_m", "gripper_width_m",
+    "retained_width", "object_count", "object", "target", "eef_world_xyz",
+    "source_anchor_world_xyz", "support_overlap_fraction", "object_coverage_fraction",
+    "target_coverage_fraction", "support_overlap_normalization", "target_geometry_source",
+    "minimum_support_overlap", "support_gap_m", "support_gap_range_m",
+    "center_inside_target_bounds", "target_count", "target_anchor_world_xyz",
+    "target_association_rank", "maximum_target_association_rank", "support_height_source",
+    "support_plane_height_m", "target_surface_height_error_m",
+    "maximum_target_surface_height_error_m", "selected_object_source_displacement_m",
+    "geometric_source_vacated", "source_transport_verified", "source_vacancy_method",
 )
 _PRIVATE_KEYS = {"reward", "done", "env.check_success", "env_check_success",
                  "check_success", "hidden_evaluator", "hidden evaluator", "evaluator"}
@@ -133,8 +147,7 @@ def build_execution_digest(execution: Mapping[str, Any], *,
             public_result = result if isinstance(result, Mapping) else {}
             verification = {"verifier": arguments.get("verifier"),
                 **{key: _bounded_public(public_result.get(key))
-                   for key in ("verified", "sensor_only", "verifier_error", "reason", "criterion")
-                   if key in public_result}}
+                   for key in _PUBLIC_VERIFIER_FIELDS if key in public_result}}
             if event.get("error"):
                 verification["error"] = _bounded_public(event.get("error"))
             digest["verifications"].append(verification)

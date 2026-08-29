@@ -115,7 +115,7 @@ class OpenVocabularyRGBD:
         configuration.device = self.device
         configuration.text_encoder_type = str(self.groundingdino_text_encoder)
         model = build_model(configuration)
-        checkpoint = torch.load(str(self.groundingdino_checkpoint), map_location="cpu")
+        checkpoint = torch.load(str(self.groundingdino_checkpoint), map_location="cpu", weights_only=False)
         model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
         self._detector = model.eval().to(self.device)
 

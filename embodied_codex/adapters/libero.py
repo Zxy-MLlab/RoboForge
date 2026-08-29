@@ -47,14 +47,22 @@ def _sdk_index(capabilities, verifiers, contracts=None):
                 "required": list(schema.get("required") or []),
                 "fields": sorted(str(key) for key in properties)}
 
+    def action_contract(name, contract):
+        result = {key: value for key, value in contract.items()
+                  if key in {"required", "any_of", "enum", "optional", "field_semantics",
+                             "rule", "example"}}
+        if name == "move_to_point":
+            # Preserve the v1 index marker while runtime validation accepts
+            # the numeric frame/position alternative.
+            result["required"] = ["type", "target_ref"]
+        return result
+
     return {
         "protocol": "embodied-codex-libero-robot-sdk-v1",
         "operations": ["observe", "use", "act", "verify", "record"],
         "methods": LIBERO_ROBOT_SDK_CONTRACT["methods"],
         "action_contracts": {
-            name: {key: value for key, value in contract.items()
-                   if key in {"required", "any_of", "enum", "optional", "field_semantics",
-                              "rule", "example"}}
+            name: action_contract(name, contract)
             for name, contract in LIBERO_ROBOT_SDK_CONTRACT["actions"].items()
         },
         "verifier_contracts": {

@@ -25,12 +25,14 @@ from .tools import CONSEQUENCE_LEVELS, ToolRegistry
 @dataclass
 class LoopBudget:
     max_steps: int = 60; max_executions: int = 20; timeout_seconds: float = 3600
+    max_trials: int | None = None
     started: float = field(default_factory=time.monotonic); steps: int = 0; executions: int = 0
     elapsed_before: float = 0.0
     def elapsed(self):
         return self.elapsed_before + time.monotonic() - self.started
     def exhausted(self):
-        return (self.steps >= self.max_steps or self.executions >= self.max_executions
+        execution_limit = self.max_trials if self.max_trials is not None else self.max_executions
+        return (self.steps >= self.max_steps or self.executions >= execution_limit
                 or self.elapsed() >= self.timeout_seconds)
 
 
@@ -73,6 +75,12 @@ class AgentLoop:
         self.cumulative_steps = 0
         self.cumulative_executions = 0
         self.cumulative_elapsed = 0.0
+        self.trial_index = 0
+        self.trial_control_steps = 0
+        self.cumulative_control_steps = 0
+        self.controller_versions: list[dict[str, Any]] = []
+        self.progress_ledger: list[dict[str, Any]] = []
+        self._load_learning_state()
         self.research_state: dict[str, Any] = {"summary": "", "attempts": []}
         self.state: dict[str, Any] = {"finished": False, "last_tool_call": None,
                                       "completion_valid": False, "successful_cases": 0}
@@ -103,6 +111,8 @@ class AgentLoop:
                 self.cumulative_executions = int(cumulative.get("executions", checkpoint.get("executions", 0)))
                 self.cumulative_elapsed = float(cumulative.get("elapsed_seconds",
                     checkpoint.get("elapsed_seconds", 0.0)))
+                self.trial_index = int(checkpoint.get("trial_index", self.cumulative_executions))
+                self.cumulative_control_steps = int(checkpoint.get("cumulative_control_steps", 0))
                 self.session_index = int((checkpoint.get("session") or {}).get("index", 1)) + 1
                 self.checkpoint_task = checkpoint.get("task")
                 self.latest_evidence = self._load_evidence_reference(
@@ -112,6 +122,10 @@ class AgentLoop:
                                        or isinstance(self.state.get("pending_execution"), Mapping))
                 self.research_state = self._bound_research_state(
                     checkpoint.get("research_state") or self.research_state)
+                self.controller_versions = [dict(x) for x in checkpoint.get("controller_versions", [])
+                                            if isinstance(x, Mapping)] or self.controller_versions
+                self.progress_ledger = [dict(x) for x in checkpoint.get("progress_ledger", [])
+                                        if isinstance(x, Mapping)] or self.progress_ledger
                 decision_state = checkpoint.get("decision_state") or {}
                 self._pending_decision_id = decision_state.get("pending_id")
                 self._decision_records = {
@@ -173,6 +187,41 @@ class AgentLoop:
     def _schema(self, properties=None, required=()):
         return {"type": "object", "properties": dict(properties or {}),
                 "required": list(required), "additionalProperties": False}
+
+    def _load_learning_state(self):
+        versions = self.root / "controller_versions" / "index.json"
+        ledger = self.root / "progress" / "ledger.json"
+        try:
+            value = json.loads(versions.read_text())
+            if isinstance(value, list): self.controller_versions = [dict(x) for x in value if isinstance(x, Mapping)]
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        try:
+            value = json.loads(ledger.read_text())
+            if isinstance(value, list): self.progress_ledger = [dict(x) for x in value if isinstance(x, Mapping)]
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    def _persist_learning_state(self):
+        directory = self.root / "controller_versions"; directory.mkdir(parents=True, exist_ok=True)
+        (directory / "index.json").write_text(json.dumps(self.controller_versions[-128:], indent=2, sort_keys=True) + "\n")
+        directory = self.root / "progress"; directory.mkdir(parents=True, exist_ok=True)
+        (directory / "ledger.json").write_text(json.dumps(self.progress_ledger[-128:], indent=2, sort_keys=True) + "\n")
+
+    def _snapshot_controller(self, trial_index: int, controller_sha: str) -> dict[str, Any]:
+        source = self.workspace.controller.read_text()
+        version_id = f"controller-v{trial_index:04d}-{controller_sha[:12]}"
+        path = self.root / "controller_versions" / f"{version_id}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(source)
+        record = {"version_id": version_id, "controller_sha256": controller_sha,
+                  "path": f"run://controller_versions/{path.name}",
+                  "trial_index": trial_index, "environment_generation":
+                  self._execution_identity().get("environment_generation")}
+        self.controller_versions = [x for x in self.controller_versions if x.get("version_id") != version_id]
+        self.controller_versions.append(record); self._persist_learning_state()
+        return record
 
     def _canonical_observation(self, observation: Any) -> Any:
         provider = getattr(self.adapter, "canonical_observation", None)
@@ -666,6 +715,31 @@ class AgentLoop:
                      self._schema({"evidence_ref": string}), self._inspect_execution)
         registry.add("list_executions", "List opaque references to prior Controller experiments.",
                      self._schema(), self._list_executions)
+        registry.add("list_controller_versions", "List immutable Controller versions from this run.",
+                     self._schema(), lambda: {"versions": self.controller_versions[-32:]})
+        registry.add("inspect_controller_version", "Inspect one immutable Controller version.",
+                     self._schema({"version_id": string}, ["version_id"]), self._inspect_controller_version)
+        registry.add("compare_controller_versions", "Compare bounded facts about two Controller versions.",
+                     self._schema({"version_a": string, "version_b": string}, ["version_a", "version_b"]),
+                     self._compare_controller_versions)
+        registry.add("restore_controller_version", "Restore a selected Controller version into the workspace.",
+                     self._schema({"version_id": string}, ["version_id"]), self._restore_controller_version,
+                     consequence="WORKSPACE_MUTATION")
+        registry.add("record_progress", "Record model-authored task progress linked to evidence.",
+                     self._schema({"summary": string, "status": {"type": "string",
+                         "enum": ["working", "failed", "uncertain", "superseded"]},
+                         "evidence_refs": {"type": "array", "items": string, "maxItems": 16},
+                         "controller_version_id": {"type": ["string", "null"]},
+                         "notes": {"type": ["string", "null"]}},
+                         ["summary", "status", "evidence_refs"]), self._record_progress)
+        registry.add("update_progress", "Update one model-authored progress record.",
+                     self._schema({"progress_id": string, "summary": string,
+                         "status": {"type": "string", "enum": ["working", "failed", "uncertain", "superseded"]},
+                         "evidence_refs": {"type": "array", "items": string, "maxItems": 16},
+                         "notes": {"type": ["string", "null"]}},
+                         ["progress_id", "summary", "status", "evidence_refs"]), self._update_progress)
+        registry.add("list_progress", "List bounded model-authored task progress.",
+                     self._schema(), lambda: {"progress": self.progress_ledger[-32:]})
         registry.add("compare_executions",
                      "Compare public facts from two committed Controller executions.",
                      self._schema({"evidence_ref_a": string, "evidence_ref_b": string},
@@ -709,6 +783,62 @@ class AgentLoop:
                     continue
                 refs.append({"evidence_ref": ref, "summary": payload.get("summary") or {}})
         return {"executions": refs[-64:]}
+
+    def _version(self, version_id):
+        for item in self.controller_versions:
+            if item.get("version_id") == str(version_id): return item
+        raise ProtocolError("unknown Controller version")
+
+    def _inspect_controller_version(self, version_id):
+        item = self._version(version_id)
+        path = self.root / "controller_versions" / Path(str(item["path"])).name
+        if not path.is_file() or _file_sha256(path) != item.get("controller_sha256"):
+            raise ProtocolError("Controller version integrity check failed")
+        return {**item, "source": path.read_text()}
+
+    def _compare_controller_versions(self, version_a, version_b):
+        a, b = self._version(version_a), self._version(version_b)
+        source_a = self._inspect_controller_version(version_a)["source"]
+        source_b = self._inspect_controller_version(version_b)["source"]
+        return {"version_a": a["version_id"], "version_b": b["version_id"],
+                "sha256_equal": a["controller_sha256"] == b["controller_sha256"],
+                "source_changed": source_a != source_b,
+                "source_bytes_a": len(source_a.encode()), "source_bytes_b": len(source_b.encode())}
+
+    def _restore_controller_version(self, version_id):
+        item = self._inspect_controller_version(version_id)
+        self.workspace.write_file("controller.py", item["source"])
+        return {"restored": True, "version_id": item["version_id"],
+                "controller_sha256": item["controller_sha256"]}
+
+    def _validate_progress_refs(self, refs):
+        valid = []
+        for ref in refs or []:
+            ref = str(ref)
+            if not (ref.startswith("evidence://execution-") or ref.startswith("run://")):
+                raise ProtocolError("progress evidence_refs must be run/evidence references")
+            if ref.startswith("evidence://execution-"):
+                try: self._execution_by_ref(ref)
+                except Exception as exc: raise ProtocolError("progress evidence reference is invalid") from exc
+            valid.append(ref)
+        return valid
+
+    def _record_progress(self, summary, status, evidence_refs, controller_version_id=None, notes=None):
+        if controller_version_id is not None: self._version(controller_version_id)
+        refs = self._validate_progress_refs(evidence_refs)
+        record = {"progress_id": f"progress-{time.time_ns()}", "summary": str(summary),
+                  "status": str(status), "evidence_refs": refs,
+                  "controller_version_id": controller_version_id,
+                  "trial_index": self.trial_index, "notes": notes}
+        self.progress_ledger.append(record); self._persist_learning_state(); return record
+
+    def _update_progress(self, progress_id, summary, status, evidence_refs, notes=None):
+        refs = self._validate_progress_refs(evidence_refs)
+        for record in self.progress_ledger:
+            if record.get("progress_id") == str(progress_id):
+                record.update(summary=str(summary), status=str(status), evidence_refs=refs, notes=notes)
+                self._persist_learning_state(); return dict(record)
+        raise ProtocolError("unknown progress record")
 
     def _inspect_execution(self, evidence_ref: str | None = None):
         if evidence_ref:
@@ -798,6 +928,13 @@ class AgentLoop:
                                 for item in actions_b]
         transitions_a = [item.get("transition") or {} for item in actions_a]
         transitions_b = [item.get("transition") or {} for item in actions_b]
+        facts_a = [dict(item) for item in verify_a if isinstance(item, Mapping)]
+        facts_b = [dict(item) for item in verify_b if isinstance(item, Mapping)]
+        fact_fields = sorted({str(key) for row in facts_a + facts_b for key in row
+                              if key != "verifier"})
+        changed_fact_fields = [key for key in fact_fields
+                               if [row.get(key) for row in facts_a] !=
+                                  [row.get(key) for row in facts_b]]
         def transition_values(transitions, key):
             values = []
             for transition in transitions:
@@ -835,7 +972,10 @@ class AgentLoop:
                              transition_values(transitions_a, "action_frame")) !=
                              self._comparison_value(transition_values(transitions_b, "action_frame"))},
             "verification": {"changed": self._comparison_value(verify_a) !=
-                                      self._comparison_value(verify_b)},
+                                      self._comparison_value(verify_b),
+                              "facts_a": self._comparison_value(facts_a),
+                              "facts_b": self._comparison_value(facts_b),
+                              "changed_fields": changed_fact_fields},
         }
 
     def _list_artifacts(self, evidence_ref: str):
@@ -1162,7 +1302,16 @@ class AgentLoop:
 
     def _run_controller(self):
         if self.runtime is None: raise RuntimeError("controller runtime is not configured")
+        episodic = bool(getattr(self.adapter, "episodic_trials", False))
+        if episodic and not self._recovery_mode:
+            reset = getattr(self.adapter, "reset_case", None)
+            if not callable(reset):
+                raise ProtocolError("episodic Adapter must provide reset_case")
+            reset()
+        self.trial_index = self.cumulative_executions + 1
+        self.trial_control_steps = 0
         controller_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest()
+        version = self._snapshot_controller(self.trial_index, controller_sha)
         identity = self._execution_identity()
         protocol = self._resume_protocol()
         decision_id = (getattr(self, "_active_operation_decision_id", None)
@@ -1237,6 +1386,8 @@ class AgentLoop:
         if callable(begin):
             begin()
         result = self.runtime.execute(self.workspace.controller, self.adapter)
+        self.trial_control_steps = int(getattr(self.adapter, "step", 0) or 0)
+        self.cumulative_control_steps += self.trial_control_steps
         self._register_artifacts(result)
         report = self.adapter.sensor_report(result)
         public_provider = getattr(self.adapter, "agent_evidence", None)
@@ -1268,6 +1419,12 @@ class AgentLoop:
         agent_evidence = AgentEvidence.from_execution(
             transformed_execution, public_report, digest=digest,
             evidence_ref=evidence_ref).as_dict()
+        agent_evidence["trial"] = {"trial_index": self.trial_index,
+                                   "trial_control_steps": self.trial_control_steps,
+                                   "cumulative_control_steps": self.cumulative_control_steps,
+                                   "trial_horizon_exhausted": bool(getattr(
+                                       self.adapter, "trial_horizon_exhausted", False)),
+                                   "controller_version_id": version["version_id"]}
         if decision_id:
             agent_evidence["decision_id"] = decision_id
         verifier = getattr(self.adapter, "verification_receipt", None)
@@ -1291,7 +1448,13 @@ class AgentLoop:
                     "agent_evidence": agent_evidence,
                     "resume_token": (protocol or {}).get("resume_token"),
                     "environment_generation": (protocol or {}).get("environment_generation"),
-                    "decision_id": decision_id}
+                    "decision_id": decision_id,
+                    "trial_index": self.trial_index,
+                    "trial_control_steps": self.trial_control_steps,
+                    "cumulative_control_steps": self.cumulative_control_steps,
+                    "trial_horizon_exhausted": bool(getattr(
+                        self.adapter, "trial_horizon_exhausted", False)),
+                    "controller_version_id": version["version_id"]}
         evidence_dir = self.root / "evidence"
         if not evidence_dir.exists(): evidence_dir.mkdir(parents=True)
         evidence_path = evidence_dir / f"execution-{self.cumulative_executions:06d}-{execution_key[:12]}.json"
@@ -1347,6 +1510,9 @@ class AgentLoop:
         evidence = self._agent_latest_evidence
         public_state = {"research": self.research_state,
                         "session_index": self.session_index,
+                        "trial_index": self.trial_index,
+                        "controller_versions": self.controller_versions[-16:],
+                        "task_progress": self.progress_ledger[-16:],
                         "recent_decisions": self._recent_decisions(),
                         "active_tool_groups": list(self.tools.active_groups),
                         "active_shared_tools": list(
@@ -1523,7 +1689,9 @@ class AgentLoop:
                                  "executions": self.cumulative_executions,
                                  "elapsed_seconds": self.cumulative_elapsed
                                     + self.budget.elapsed()},
-                  "completion_valid": self.state.get("completion_valid", False),
+                                 "completion_valid": self.state.get("completion_valid", False),
+                  "physical_trials": self.cumulative_executions,
+                  "cumulative_control_steps": self.cumulative_control_steps,
                   "latest_evidence": (self._evidence_reference(self.latest_evidence)
                                       if isinstance(self.latest_evidence, Mapping)
                                       else None)}
@@ -1541,6 +1709,10 @@ class AgentLoop:
                            "executions": self.cumulative_executions,
                            "elapsed_seconds": self.cumulative_elapsed
                               + self.budget.elapsed()},
+            "trial_index": self.trial_index,
+            "cumulative_control_steps": self.cumulative_control_steps,
+            "controller_versions": self.controller_versions[-128:],
+            "progress_ledger": self.progress_ledger[-128:],
             "latest_evidence": (self._evidence_reference(self.latest_evidence)
                                 if isinstance(self.latest_evidence, Mapping) else None),
             "snapshot_id": snapshot.snapshot_id,

@@ -79,6 +79,14 @@ class CapabilityManager:
                         self._inspected_tools.add(str(tool_id))
                 return result
             except (FileNotFoundError, KeyError, ValueError): pass
+        native = getattr(self.adapter, "inspect_native_capability", None)
+        if callable(native):
+            try:
+                result = native(str(asset_id))
+                if isinstance(result, Mapping):
+                    return dict(result)
+            except (FileNotFoundError, KeyError, ValueError, CapabilityError):
+                pass
         raise CapabilityError(f"unknown asset: {asset_id}")
 
     def load_tool_source(self, tool_id: str):

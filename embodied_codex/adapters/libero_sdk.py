@@ -41,7 +41,7 @@ LIBERO_ROBOT_SDK_CONTRACT = {
         "output_fields":["type","step","reached","eef_before","eef_after","gripper_width_m",
                           "target_xyz","target_quaternion_xyzw","final_position_error_m",
                           "final_orientation_error_rad","target_frame","action_frame_axis",
-                          "action_frame_axis_frame"]},
+                          "action_frame_axis_frame","target_source"]},
         "verify":{
             "signature":"robot.verify(verifier, payload)",
             "returns":"direct sensor-only verifier result containing boolean verified",
@@ -63,10 +63,13 @@ LIBERO_ROBOT_SDK_CONTRACT = {
     },
     "actions":{
         "move_to_point":{
-            "required":["type","target_ref"],
+            "required":["type"],
+            "any_of":[{"required":["target_ref"]},{"required":["frame","position_m"]}],
             "optional":{"offset":"world [dx,dy,dz], default [0,0,0]",
                         "tolerance_m":"0.002..0.06","gain":"1..30",
-                        "max_steps":"1..100","gripper":"-1 open, +1 close"},
+                        "max_steps":"1..100","gripper":"-1 open, +1 close",
+                        "frame":"explicit Adapter-supported coordinate frame",
+                        "position_m":"metric XYZ in frame"},
             "example":{"type":"move_to_point","target_ref":"<point_ref>",
                        "offset":[0,0,0.10],"gripper":-1}},
         "move_to_pose":{
@@ -75,6 +78,8 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                 {"required":["pose_ref"]},
                 {"required":["target_ref","quaternion_xyzw"]},
                 {"required":["target_ref","rotation_matrix"]},
+                {"required":["frame","position_m","quaternion_xyzw"]},
+                {"required":["frame","position_m","rotation_matrix"]},
             ],
             "optional":{"offset":"world [dx,dy,dz], default [0,0,0]",
                         "quaternion_xyzw":"explicit orientation override",
@@ -82,7 +87,9 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                         "position_tolerance_m":"0.002..0.06",
                         "orientation_tolerance_rad":"0.02..0.5",
                         "position_gain":"1..30","orientation_gain":"0.05..1",
-                        "max_steps":"1..180","gripper":"-1 open, +1 close"},
+                        "max_steps":"1..180","gripper":"-1 open, +1 close",
+                        "frame":"explicit Adapter-supported coordinate frame",
+                        "position_m":"metric XYZ in frame"},
             "rule":("Use pose_ref for a Tool-issued metric pose. To keep metric position and "
                     "orientation provenance separate, use target_ref from metric perception "
                     "together with an explicit quaternion_xyzw or rotation_matrix."),
@@ -159,6 +166,19 @@ def validate_action(action: Mapping[str,Any]) -> str:
     for key in ("target_ref","pose_ref"):
         if key in action and (not isinstance(action[key],str) or not action[key]):
             raise SDKContractError(f"{kind} {key} must be a nonempty opaque string")
+    if kind in ("move_to_point", "move_to_pose") and "position_m" in action:
+        value = action.get("position_m")
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise SDKContractError(f"{kind} position_m must contain exactly 3 values")
+        import math
+        try:
+            finite = all(math.isfinite(float(item)) for item in value)
+        except (TypeError, ValueError):
+            finite = False
+        if not finite:
+            raise SDKContractError(f"{kind} position_m must be finite numbers")
+        if not isinstance(action.get("frame"), str) or not action["frame"]:
+            raise SDKContractError(f"{kind} numeric control requires an explicit frame")
     return str(kind)
 
 

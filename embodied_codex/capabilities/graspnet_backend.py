@@ -72,7 +72,7 @@ def infer(npz_path, checkpoint, output, downward_min=.55, preferred_downward_min
     sampled,cloud=sample_cloud(depth,intrinsic,bbox,data["object_mask"] if "object_mask" in data.files else None)
     net=GraspNet(input_feature_dim=0,num_view=300,num_angle=12,num_depth=4,
         cylinder_radius=.05,hmin=-.02,hmax_list=[.01,.02,.03,.04],is_training=False).cuda().eval()
-    state=torch.load(checkpoint,map_location="cpu"); net.load_state_dict(state["model_state_dict"])
+    state=torch.load(checkpoint,map_location="cpu",weights_only=False); net.load_state_dict(state["model_state_dict"])
     with torch.no_grad(): raw=pred_decode(net({"point_clouds":torch.from_numpy(sampled[None]).cuda()}))[0].cpu().numpy()
     collision_iou,inner_occupancy=model_free_collision_metrics(raw,cloud)
     # GraspNet rows: score,width,height,depth,R(9),translation(3),object_id.

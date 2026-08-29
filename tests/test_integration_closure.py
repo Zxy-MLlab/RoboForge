@@ -269,6 +269,41 @@ def test_libero_reset_uses_same_warmup_and_changes_generation(tmp_path):
     assert deployment.environment_generation != first_generation
 
 
+def test_campaign_preserves_episodic_trial_and_control_step_contract():
+    from embodied_codex.kernel.campaign import CampaignAdapter
+
+    class Episodic:
+        episodic_trials = True
+        trial_horizon_exhausted = False
+        step = 17
+        instruction = "task"
+        sdk_index = {}
+
+        def reset_case(self):
+            self.step = 3
+
+    case = Episodic()
+    campaign = CampaignAdapter([("opaque", case)])
+    assert campaign.episodic_trials is True
+    assert campaign.step == 17
+    assert campaign.trial_horizon_exhausted is False
+    campaign.reset_case()
+    assert campaign.step == 3
+
+
+def test_libero_horizon_exhaustion_is_trial_local():
+    import numpy as np
+    from embodied_codex.deployments.libero import LiberoDeployment, LiberoDeploymentError
+
+    deployment = LiberoDeployment.__new__(LiberoDeployment)
+    deployment.episode = type("Episode", (), {"horizon": 1})()
+    deployment.step = 1
+    deployment.trial_horizon_exhausted = False
+    with pytest.raises(LiberoDeploymentError, match="horizon exhausted"):
+        deployment._sim_step(np.zeros(7))
+    assert deployment.trial_horizon_exhausted is True
+
+
 def test_libero_hidden_evaluator_reads_env_success_only_after_seal():
     from embodied_codex.deployments.libero import LiberoDeployment, LiberoDeploymentError
     deployment = LiberoDeployment.__new__(LiberoDeployment)

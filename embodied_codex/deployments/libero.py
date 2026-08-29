@@ -70,6 +70,7 @@ class LiberoEpisode:
 
 
 class LiberoDeployment:
+    episodic_trials = True
     _OUTPUT_FIELDS = {name: set(spec.get("output_fields") or [])
                       for name, spec in LIBERO_ROBOT_SDK_CONTRACT["methods"].items()}
     def __init__(self, *, episode: LiberoEpisode, artifact_dir: str|Path,
@@ -109,7 +110,7 @@ class LiberoDeployment:
                 Draft202012Validator.check_schema(contract["output_schema"])
             except Exception as exc:
                 raise LiberoDeploymentError(f"invalid deployment Tool contract {tool_id}: {exc}") from exc
-        self.verifiers=dict(verifiers or {});self.references={};self.trace=[];self.video=[]
+        self.verifiers=dict(verifiers or {});self.references={};self._retired_references=set();self.trace=[];self.video=[]
         self.verified_attachments=set()
         self.step=0;self.frame=0;self.closed=False;self.last_verify=False
         self.environment_generation=""
@@ -186,10 +187,14 @@ class LiberoDeployment:
         return self.initial_observation()
 
     def _reset_to_initial_condition(self):
+        if not hasattr(self, "_retired_references"):
+            self._retired_references = set()
+        self._retired_references.update(getattr(self, "references", {}).keys())
         self.obs = self.env.reset()
         self.obs = self.env.set_init_state(self._init_states[self.episode.initial_state_index])
         self.environment_generation = uuid.uuid4().hex
         self.step = 0; self.frame = 0; self.trace = []; self.video = []
+        self.trial_horizon_exhausted = False
         self.references = {}; self.last_verify = False
         self.verified_attachments = set()
         self._controller_execution_sealed = False; self._evaluator_calls = 0
@@ -233,6 +238,25 @@ class LiberoDeployment:
                 "version": version,
                 "contract_sha256": hashlib.sha256(encoded.encode()).hexdigest()}
         return result
+
+    def inspect_native_capability(self, capability_id: str):
+        """Return the complete manual/contract for one Adapter-native Tool."""
+        capability_id = str(capability_id)
+        if capability_id not in self._native_capability_ids:
+            raise LiberoDeploymentError("unknown native capability")
+        contract = self.capability_contracts.get(capability_id)
+        if not isinstance(contract, Mapping):
+            raise LiberoDeploymentError("native capability contract is unavailable")
+        return {"manifest": {"tool_id": capability_id,
+                              "capability_id": capability_id,
+                              "version": capability_id.rpartition(":")[2] or None,
+                              "description": "Adapter-native embodied capability",
+                              "input_schema": dict(contract.get("input_schema") or {}),
+                              "output_schema": dict(contract.get("output_schema") or {}),
+                              "manual": {"summary": "Adapter-native capability; callable through robot.use.",
+                                          "failure_modes": ["contract_error", "sensor_failure"],
+                                          "provenance": "trusted Adapter implementation"}},
+                "source": None}
 
     def register_controller_artifact(self, path: str | Path) -> str:
         """Return an opaque Controller capability for one exact Adapter file."""
@@ -404,7 +428,9 @@ class LiberoDeployment:
         self.trace.append({"event":"observe","frame_id":frame_id,"step":self.step});return report
 
     def _sim_step(self,action):
-        if self.step>=self.episode.horizon:raise LiberoDeploymentError("action horizon exhausted")
+        if self.step>=self.episode.horizon:
+            self.trial_horizon_exhausted = True
+            raise LiberoDeploymentError("action horizon exhausted")
         obs,_reward,_done,_info=self.env.step(np.clip(action,-1,1).tolist())
         self.obs=obs;self.step+=1
         if self.step%3==0:self.video.append(np.ascontiguousarray(self.obs["agentview_image"][::-1]))
@@ -435,11 +461,24 @@ class LiberoDeployment:
 
     def _act(self,action):
         kind=validate_action(action);before=np.asarray(self.obs["robot0_eef_pos"],float).copy();target=None
+        target_source = None
         if kind=="move_to_point":
             ref=str(action.get("target_ref") or "")
-            if ref not in self.references:raise LiberoDeploymentError("unknown target_ref")
-            target=np.asarray(self.references[ref]["world_xyz"],float)+np.asarray(action.get("offset") or [0,0,0],float)
-            if target.shape!=(3,):raise LiberoDeploymentError("invalid target")
+            if ref:
+                if ref not in self.references:
+                    if ref in self._retired_references: raise LiberoDeploymentError("reference belongs to a previous environment generation")
+                    raise LiberoDeploymentError("unknown target_ref")
+                target=np.asarray(self.references[ref]["world_xyz"],float)
+                target_source="reference"
+            else:
+                if action.get("frame") != "world":
+                    raise LiberoDeploymentError("unsupported coordinate frame")
+                target=np.asarray(action.get("position_m"),float)
+                if target.shape!=(3,) or not np.isfinite(target).all():
+                    raise LiberoDeploymentError("invalid numeric target")
+                target_source="controller_numeric"
+            target=target+np.asarray(action.get("offset") or [0,0,0],float)
+            if target.shape!=(3,) or not np.isfinite(target).all():raise LiberoDeploymentError("invalid target")
             tolerance=float(np.clip(action.get("tolerance_m",.015),.002,.06));gain=float(np.clip(action.get("gain",20),1,30))
             maximum=int(np.clip(action.get("max_steps",50),1,100));gripper=float(action.get("gripper",-1));reached=False
             for _ in range(maximum):
@@ -453,9 +492,20 @@ class LiberoDeployment:
             # world coordinates are deliberately not accepted here: every
             # translational target must retain sensor/Tool provenance.
             ref=str(action.get("pose_ref") or action.get("target_ref") or "")
-            if ref not in self.references:raise LiberoDeploymentError("unknown pose_ref/target_ref")
-            reference=self.references[ref]
-            target=np.asarray(reference["world_xyz"],float)+np.asarray(action.get("offset") or [0,0,0],float)
+            if ref:
+                if ref not in self.references:
+                    if ref in self._retired_references: raise LiberoDeploymentError("reference belongs to a previous environment generation")
+                    raise LiberoDeploymentError("unknown pose_ref/target_ref")
+                reference=self.references[ref]
+                target=np.asarray(reference["world_xyz"],float)
+                target_source="reference"
+            else:
+                if action.get("frame") != "world":
+                    raise LiberoDeploymentError("unsupported coordinate frame")
+                reference={}
+                target=np.asarray(action.get("position_m"),float)
+                target_source="controller_numeric"
+            target=target+np.asarray(action.get("offset") or [0,0,0],float)
             if target.shape!=(3,) or not np.isfinite(target).all():raise LiberoDeploymentError("invalid target")
             if "quaternion_xyzw" in action:
                 target_quaternion=_validated_quaternion(action["quaternion_xyzw"])
@@ -515,6 +565,7 @@ class LiberoDeployment:
                 result["action_frame_axis_frame"] = "world"
         if target is not None:
             result["target_xyz"]=target.tolist();result["target_frame"]="world"
+            result["target_source"]=target_source
         if kind=="move_to_pose":
             result.update({"target_quaternion_xyzw":target_quaternion.tolist(),
                            "final_position_error_m":final_position_error,
@@ -526,7 +577,8 @@ class LiberoDeployment:
             result={str(k):self._references(tool_id,v) for k,v in value.items()}
             xyz=result.get("world_xyz")
             if isinstance(xyz,list) and len(xyz)==3 and np.isfinite(np.asarray(xyz,float)).all():
-                token="point-"+uuid.uuid4().hex[:16];reference={"world_xyz":xyz,"tool_id":tool_id}
+                token="point-"+uuid.uuid4().hex[:16];reference={"world_xyz":xyz,"tool_id":tool_id,
+                    "environment_generation":self.environment_generation}
                 bounds=result.get("world_bounds_10_90")
                 if bounds is not None:
                     metric_bounds=np.asarray(bounds,float)
