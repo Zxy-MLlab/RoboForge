@@ -70,6 +70,8 @@ class AgentLoop:
         self.web_search = web_search
         self.latest_evidence = None; self.retrieved_assets = None; self.messages: list[dict[str, Any]] = []
         self.latest_physical_evidence = None
+        self.restored_latest_evidence_valid = False
+        self.restored_physical_evidence_valid = False
         self._agent_latest_evidence: dict[str, Any] | None = None
         self.context_window = context_window or ContextWindowManager()
         self.max_context_chars = self.context_window.max_message_chars
@@ -181,15 +183,18 @@ class AgentLoop:
             self.capability_manager.restore_tool_binding(tool_id)
         if self.latest_evidence is not None:
             self._agent_latest_evidence = self._agent_evidence(self.latest_evidence)
+            self.restored_latest_evidence_valid = True
+            physical = self.latest_physical_evidence
             protocol = self._resume_protocol()
             identity = self._execution_identity()
             validator = getattr(self.adapter, "validate_execution_receipt", None)
-            valid = bool(protocol and self.latest_evidence.get("resume_token") == protocol.get("resume_token")
-                         and self.latest_evidence.get("environment_identity") == identity
+            valid = bool(isinstance(physical, Mapping) and protocol and physical.get("resume_token") == protocol.get("resume_token")
+                         and physical.get("environment_identity") == identity
                          and callable(validator)
-                         and validator(self.latest_evidence.get("verification_receipt") or {}) is True)
+                         and validator(physical.get("verification_receipt") or {}) is True)
+            self.restored_physical_evidence_valid = valid
             self.state["restored_evidence_unverified"] = not valid
-            if not valid and self.latest_evidence.get("execution_kind") == "physical_trial":
+            if not valid and isinstance(physical, Mapping):
                 self.state["finished"] = False
                 self.state["completion_valid"] = False
                 # Historical evidence validity cannot resolve an in-flight
@@ -326,10 +331,18 @@ class AgentLoop:
         target = getattr(self, "_artifact_manifest_path",
                          self.root / "artifacts" / "manifest.json")
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"protocol": "roboforge-artifact-manifest-v1",
+        temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}-{time.time_ns()}")
+        try:
+            with temporary.open("w") as stream:
+                stream.write(json.dumps({"protocol": "roboforge-artifact-manifest-v1",
                                          "artifacts": entries}, sort_keys=True, indent=2) + "\n")
-        temporary.replace(target)
+                stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            directory = os.open(target.parent, os.O_RDONLY)
+            try: os.fsync(directory)
+            finally: os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _immutable_artifact(self, source: Path) -> tuple[str, Path]:
         """Snapshot an authorized source file before exposing an opaque handle."""
@@ -723,7 +736,7 @@ class AgentLoop:
             "consequence": {"type": "string", "enum": ["READ_ONLY", "VALIDATION", "WORKSPACE_MUTATION", "ASSET_MUTATION", "ENVIRONMENT_MUTATION", "PHYSICAL_INTERVENTION"]},
             "source_urls": {"type": "array", "items": string},
             "runtime_spec": runtime_environment_schema,
-            "manual": manual_schema}, ["name", "source_path", "description", "input_schema", "output_schema"])
+            "manual": manual_schema}, ["name", "source_path", "description", "input_schema", "output_schema", "consequence"])
         package_spec_schema = {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["algorithm", "perception", "planner", "policy", "model"]},
             "entrypoint": string, "accelerator": {"type": "string", "enum": ["cpu", "cuda"]},
@@ -736,7 +749,7 @@ class AgentLoop:
             "input_schema": schema_document, "output_schema": schema_document,
             "consequence": {"type": "string", "enum": ["READ_ONLY", "VALIDATION", "WORKSPACE_MUTATION", "ASSET_MUTATION", "ENVIRONMENT_MUTATION", "PHYSICAL_INTERVENTION"]},
             "package_spec": package_spec_schema, "source_urls": {"type": "array", "items": string}},
-            ["name", "bundle_path", "description", "input_schema", "output_schema", "package_spec"])
+            ["name", "bundle_path", "description", "input_schema", "output_schema", "package_spec", "consequence"])
         registry.add("register_tool", "Register an immutable Tool version; call test_tool before it can be bound.",
                      tool_schema, cap.register_tool, group="asset_authoring", consequence="ASSET_MUTATION")
         registry.add("register_capability_package", "Register an acquired bundle for isolated execution.",
@@ -1165,6 +1178,8 @@ class AgentLoop:
         self._recovery_mode = False
         self.latest_evidence = None
         self.latest_physical_evidence = None
+        self.restored_latest_evidence_valid = False
+        self.restored_physical_evidence_valid = False
         self._agent_latest_evidence = None
         self.state.update({"completion_valid": False, "finished": False,
                            "restored_evidence_unverified": False})
@@ -1397,7 +1412,7 @@ class AgentLoop:
         if not isinstance(evidence, Mapping):
             errors.append("controller has not been executed")
         else:
-            if self.state.get("restored_evidence_unverified"):
+            if not self.restored_physical_evidence_valid and self.state.get("restored_evidence_unverified"):
                 errors.append("restored evidence is not valid for the current Adapter generation")
             if evidence.get("controller_sha256") != current_sha:
                 errors.append("latest evidence belongs to an older Controller")
@@ -1623,6 +1638,8 @@ class AgentLoop:
         evidence["artifact_sha256"] = _file_sha256(evidence_path)
         self.latest_evidence = evidence
         self.latest_physical_evidence = evidence
+        self.restored_latest_evidence_valid = True
+        self.restored_physical_evidence_valid = True
         self._agent_latest_evidence = agent_evidence
         self.state["restored_evidence_unverified"] = False
         execution_reference = self._evidence_reference(evidence)
@@ -1929,6 +1946,8 @@ class AgentLoop:
                                 if isinstance(self.latest_evidence, Mapping) else None),
             "latest_physical_evidence": (self._evidence_reference(self.latest_physical_evidence)
                                           if isinstance(self.latest_physical_evidence, Mapping) else None),
+            "restored_latest_evidence_valid": self.restored_latest_evidence_valid,
+            "restored_physical_evidence_valid": self.restored_physical_evidence_valid,
             "snapshot_id": snapshot.snapshot_id,
             "active_tool_groups": list(self.tools.active_groups),
             "active_shared_tools": list(self.capability_manager.bound_tool_ids),

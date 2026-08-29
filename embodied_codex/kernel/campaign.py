@@ -148,8 +148,22 @@ class CampaignAdapter:
     def register_capability(self, tool_id, function, contract):
         # Binding is a deployment mechanism, not a test-order strategy. A Tool
         # selected by the model is made available to every selectable case.
-        for adapter in self._cases.values():
-            adapter.register_capability(tool_id, function, contract)
+        adapters = list(self._cases.values())
+        for adapter in adapters:
+            validator = getattr(adapter, "validate_capability_registration", None)
+            if callable(validator):
+                validator(tool_id, contract)
+        registered = []
+        try:
+            for adapter in adapters:
+                adapter.register_capability(tool_id, function, contract)
+                registered.append(adapter)
+        except Exception:
+            for adapter in registered:
+                rollback = getattr(adapter, "unregister_capability", None)
+                if callable(rollback):
+                    rollback(tool_id)
+            raise
 
     def native_capability_manifest(self):
         manifests = []

@@ -19,6 +19,7 @@ import numpy as np
 from jsonschema import Draft202012Validator, ValidationError
 
 from ..adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT, validate_action,validate_verifier_request
+from ..kernel.tools import CONSEQUENCE_LEVELS
 
 
 PROPRIO = ("robot0_joint_pos","robot0_joint_vel","robot0_eef_pos",
@@ -239,14 +240,31 @@ class LiberoDeployment:
     def register_capability(self,tool_id,function,contract):
         if tool_id in self.capabilities: raise LiberoDeploymentError("duplicate Tool")
         value={key:dict(contract.get(key) or {}) for key in ("input_schema","output_schema")}
-        if "consequence" in contract:
-            value["consequence"] = str(contract["consequence"]).upper()
+        consequence = str(contract.get("consequence", "UNKNOWN")).upper()
+        if consequence not in CONSEQUENCE_LEVELS | {"UNKNOWN"}:
+            raise LiberoDeploymentError("invalid capability consequence")
+        value["consequence"] = consequence
         try:
-            for schema in value.values():Draft202012Validator.check_schema(schema)
+            for schema in (value["input_schema"], value["output_schema"]):
+                Draft202012Validator.check_schema(schema)
         except Exception as exc:
             raise LiberoDeploymentError(f"invalid dynamic Tool contract {tool_id}: {exc}") from exc
         self.capabilities[str(tool_id)]=function
         self.capability_contracts[str(tool_id)]=value
+
+    def validate_capability_registration(self, tool_id, contract):
+        if str(tool_id) in self.capabilities:
+            raise LiberoDeploymentError("duplicate Tool")
+        value = dict(contract or {})
+        for key in ("input_schema", "output_schema"):
+            Draft202012Validator.check_schema(dict(value.get(key) or {}))
+        consequence = str(value.get("consequence", "UNKNOWN")).upper()
+        if consequence not in CONSEQUENCE_LEVELS | {"UNKNOWN"}:
+            raise LiberoDeploymentError("invalid capability consequence")
+
+    def unregister_capability(self, tool_id):
+        self.capabilities.pop(str(tool_id), None)
+        self.capability_contracts.pop(str(tool_id), None)
 
     def capability_consequence(self, tool_id):
         contract = self.capability_contracts.get(str(tool_id), {})

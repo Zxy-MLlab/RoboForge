@@ -5,6 +5,7 @@ from embodied_codex.fake_adapter import FakeAdapter
 from embodied_codex.kernel.agent_loop import LoopBudget
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.tools import ToolRegistry
+from embodied_codex.kernel.campaign import CampaignAdapter
 
 
 def _make_loop(tmp_path):
@@ -95,6 +96,52 @@ def test_fake_adapter_lifecycle_records_execution_kind(tmp_path):
     adapter = FakeAdapter("task", tmp_path / "adapter")
     adapter.begin_execution("diagnostic")
     assert adapter._diagnostic_state["kind"] == "diagnostic"
+
+
+def test_campaign_registration_failure_rolls_back_prior_cases(tmp_path):
+    first = FakeAdapter("task", tmp_path / "one")
+    second = FakeAdapter("task", tmp_path / "two")
+    original = second.register_capability
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected registration failure")
+    second.register_capability = fail
+    campaign = CampaignAdapter([("one", first), ("two", second)])
+    try:
+        campaign.register_capability("new:v1", lambda payload: {},
+                                     {"input_schema": {"type": "object"},
+                                      "output_schema": {"type": "object"},
+                                      "consequence": "READ_ONLY"})
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("campaign registration unexpectedly succeeded")
+    assert "new:v1" not in first.capabilities
+    second.register_capability = original
+    campaign.register_capability("new:v1", lambda payload: {},
+                                 {"input_schema": {"type": "object"},
+                                  "output_schema": {"type": "object"},
+                                  "consequence": "READ_ONLY"})
+    assert "new:v1" in first.capabilities and "new:v1" in second.capabilities
+
+
+def test_campaign_unknown_consequence_is_not_readonly(tmp_path):
+    campaign = CampaignAdapter([("one", FakeAdapter("task", tmp_path / "one"))])
+    campaign.register_capability("unknown:v1", lambda payload: {},
+                                 {"input_schema": {"type": "object"},
+                                  "output_schema": {"type": "object"}})
+    assert campaign.capability_consequence("unknown:v1") == "UNKNOWN"
+
+
+def test_manifest_persistence_uses_replace_and_fsync(tmp_path, monkeypatch):
+    loop = _make_loop(tmp_path)
+    calls = []
+    import embodied_codex.kernel.agent_loop as module
+    real_replace = module.os.replace
+    real_fsync = module.os.fsync
+    monkeypatch.setattr(module.os, "replace", lambda *args: (calls.append("replace"), real_replace(*args))[1])
+    monkeypatch.setattr(module.os, "fsync", lambda fd: (calls.append("fsync"), real_fsync(fd))[1])
+    loop._persist_artifact_manifest()
+    assert "replace" in calls and calls.count("fsync") >= 1
 
 
 def test_diagnostic_budget_is_independent_and_bounded():

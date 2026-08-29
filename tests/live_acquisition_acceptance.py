@@ -78,6 +78,7 @@ class LiveAcquisitionModel:
                     "required": ["value"], "additionalProperties": False},
                 "package_spec": {"kind": "algorithm", "entrypoint": "acquired_tool.py",
                     "accelerator": "cpu", "runtime_requirements": []},
+                "consequence": "READ_ONLY",
                 "source_urls": ["https://github.com/Zxy-MLlab/RoboForge"]}),
             13: ("test_tool", {"tool_id": "live_acquired_ranker:v001",
                 "cases": [{"input": {"query": "set target"}, "expected": {"value": 1}}]}),

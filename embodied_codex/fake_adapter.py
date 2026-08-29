@@ -89,6 +89,16 @@ class FakeAdapter:
         self.capabilities[str(tool_id)] = function
         self.contracts[str(tool_id)] = dict(contract)
 
+    def validate_capability_registration(self, tool_id, contract):
+        if str(tool_id) in self.capabilities:
+            raise RuntimeError("duplicate capability")
+        if str(contract.get("consequence", "UNKNOWN")).upper() == "INVALID":
+            raise RuntimeError("invalid capability consequence")
+
+    def unregister_capability(self, tool_id):
+        self.capabilities.pop(str(tool_id), None)
+        self.contracts.pop(str(tool_id), None)
+
     def capability_consequence(self, tool_id):
         return str(self.contracts.get(str(tool_id), {}).get("consequence", "UNKNOWN")).upper()
 
@@ -395,7 +405,7 @@ class FakeModel:
             return _call(self.turn, "register_tool", {"name": "fake_target", "source_path": "target_tool.py",
                 "description": "Return the generic target value", "input_schema": {"type": "object", "properties": {},
                 "additionalProperties": False}, "output_schema": {"type": "object", "properties": {"value": {"type": "integer"}},
-                "required": ["value"], "additionalProperties": False}})
+                "required": ["value"], "additionalProperties": False}, "consequence": "READ_ONLY"})
         if not self.tool_verified:
             return _call(self.turn, "test_tool", {"tool_id": self.tool_id,
                 "cases": [{"input": {}, "expected": {"value": 1}}]})
