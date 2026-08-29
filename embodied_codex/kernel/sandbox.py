@@ -147,6 +147,22 @@ _LL_TRUNCATE = 1 << 14
 _LL_READ = _LL_EXECUTE | _LL_READ_FILE | _LL_READ_DIR
 
 
+def _landlock_path_rights(path: Path, requested: int, abi: int) -> int:
+    """Return access rights valid for this inode type.
+
+    Landlock rejects directory-only rights on regular files (and vice versa)
+    with EINVAL when adding a path-beneath rule.  Keep the ruleset-wide
+    handled mask broad, but narrow each rule to the rights meaningful for its
+    target inode.
+    """
+    if path.is_dir():
+        return requested
+    file_rights = _LL_EXECUTE | _LL_READ_FILE | _LL_WRITE_FILE
+    if abi >= 3:
+        file_rights |= _LL_TRUNCATE
+    return requested & file_rights
+
+
 def _landlock_rights(abi: int) -> int:
     rights = (1 << 13) - 1
     if abi >= 2:
@@ -173,10 +189,13 @@ def _apply_landlock(read_only: Sequence[Path], read_write: Sequence[Path]) -> No
         entries: dict[Path, int] = {}
         for path in read_only:
             if path.exists():
-                entries[path.resolve()] = entries.get(path.resolve(), 0) | _LL_READ
+                resolved = path.resolve()
+                entries[resolved] = entries.get(resolved, 0) | _landlock_path_rights(
+                    resolved, _LL_READ, abi)
         for path in read_write:
             if path.exists():
-                entries[path.resolve()] = handled
+                resolved = path.resolve()
+                entries[resolved] = _landlock_path_rights(resolved, handled, abi)
         for path, rights in entries.items():
             descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC)
             try:
@@ -351,7 +370,7 @@ class PosixSandboxBackend:
                 "posix-hardened requires Landlock filesystem isolation; this kernel does not provide it")
         working = Path(cwd).resolve()
         temporary = Path(temporary_dir or working).resolve()
-        read_only = self._paths([*read_only_paths, Path(sys.prefix), "/usr", "/bin",
+        read_only = self._paths([*read_only_paths, Path(sys.prefix), Path(sys.base_prefix), "/usr", "/bin",
                                  "/lib", "/lib64", "/etc", "/proc", "/dev"])
         read_write = self._paths([*read_write_paths, temporary])
         process_env = _clean_environment(env, home=working, temporary=temporary)
