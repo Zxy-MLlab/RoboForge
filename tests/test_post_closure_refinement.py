@@ -4,6 +4,97 @@ from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 from embodied_codex.fake_adapter import FakeAdapter
 from embodied_codex.kernel.agent_loop import LoopBudget
 from embodied_codex.kernel.capability_manager import CapabilityManager
+from embodied_codex.kernel.tools import ToolRegistry
+
+
+def _make_loop(tmp_path):
+    from tests.test_core_closure import _loop
+    return _loop(tmp_path, object(), budget=LoopBudget(max_steps=20, max_executions=2,
+                                                       max_diagnostics=4))
+
+
+def test_diagnostic_observation_is_not_a_physical_trial(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.observe('rgb', {})\n")
+    before = loop.adapter.generation
+    evidence = loop._run_diagnostic()
+    assert evidence["execution_kind"] == "diagnostic"
+    assert loop.budget.executions == 0
+    assert loop.adapter.generation == before
+    assert loop._artifact_scope is None
+
+
+def test_diagnostic_act_fails_closed_without_mutation(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.act({'type':'set_value','value':1})\n")
+    before = (loop.adapter.value, loop.budget.executions)
+    try:
+        loop._run_diagnostic()
+    except Exception as exc:
+        assert "diagnostic" in str(exc).lower()
+    else:
+        raise AssertionError("diagnostic act unexpectedly succeeded")
+    assert (loop.adapter.value, loop.budget.executions) == before
+    assert loop._artifact_scope is None
+
+
+def test_two_diagnostics_have_distinct_durable_references(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.observe('rgb', {})\n")
+    first = loop._run_diagnostic(); second = loop._run_diagnostic()
+    assert first["artifact_uri"] != second["artifact_uri"]
+    assert first["artifact_sha256"] != ""
+    assert second["artifact_sha256"] != ""
+    assert len(loop._list_executions()["executions"]) == 2
+
+
+def test_diagnostic_readonly_capability_is_allowed(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.adapter.register_capability("read:v1", lambda payload: {"ok": True},
+                                    {"input_schema": {"type": "object"},
+                                     "output_schema": {"type": "object"},
+                                     "consequence": "READ_ONLY"})
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.use('read:v1', {})\n")
+    evidence = loop._run_diagnostic()
+    assert evidence["execution"]["completed"] is True
+
+
+def test_diagnostic_unknown_consequence_is_rejected(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.adapter.register_capability("unknown:v1", lambda payload: {"changed": True},
+                                    {"input_schema": {"type": "object"},
+                                     "output_schema": {"type": "object"}})
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.use('unknown:v1', {})\n")
+    try:
+        loop._run_diagnostic()
+    except Exception as exc:
+        assert "diagnostic" in str(exc).lower()
+    else:
+        raise AssertionError("unknown consequence unexpectedly succeeded")
+
+
+def test_diagnostic_evidence_is_not_physical_completion_evidence(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.observe('rgb', {})\n")
+    evidence = loop._run_diagnostic()
+    assert evidence["execution_kind"] == "diagnostic"
+    assert loop.latest_physical_evidence is None
+
+
+def test_tool_registry_rejects_unknown_consequence():
+    registry = ToolRegistry()
+    try:
+        registry.add("bad", "bad", {"type": "object"}, lambda: None, consequence="UNKNOWN")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown kernel consequence was accepted")
+
+
+def test_fake_adapter_lifecycle_records_execution_kind(tmp_path):
+    adapter = FakeAdapter("task", tmp_path / "adapter")
+    adapter.begin_execution("diagnostic")
+    assert adapter._diagnostic_state["kind"] == "diagnostic"
 
 
 def test_diagnostic_budget_is_independent_and_bounded():

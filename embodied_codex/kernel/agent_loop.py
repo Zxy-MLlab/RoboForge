@@ -69,6 +69,7 @@ class AgentLoop:
         self.budget = budget or LoopBudget()
         self.web_search = web_search
         self.latest_evidence = None; self.retrieved_assets = None; self.messages: list[dict[str, Any]] = []
+        self.latest_physical_evidence = None
         self._agent_latest_evidence: dict[str, Any] | None = None
         self.context_window = context_window or ContextWindowManager()
         self.max_context_chars = self.context_window.max_message_chars
@@ -131,6 +132,11 @@ class AgentLoop:
                 self.checkpoint_task = checkpoint.get("task")
                 self.latest_evidence = self._load_evidence_reference(
                     checkpoint.get("latest_evidence"))
+                self.latest_physical_evidence = self._load_evidence_reference(
+                    checkpoint.get("latest_physical_evidence"))
+                if self.latest_physical_evidence is None and isinstance(self.latest_evidence, Mapping) \
+                        and self.latest_evidence.get("execution_kind", "physical_trial") == "physical_trial":
+                    self.latest_physical_evidence = self.latest_evidence
                 self.state.update(checkpoint.get("state") or {})
                 self._recovery_mode = (isinstance(self.state.get("completed_execution"), Mapping)
                                        or isinstance(self.state.get("pending_execution"), Mapping))
@@ -183,7 +189,7 @@ class AgentLoop:
                          and callable(validator)
                          and validator(self.latest_evidence.get("verification_receipt") or {}) is True)
             self.state["restored_evidence_unverified"] = not valid
-            if not valid:
+            if not valid and self.latest_evidence.get("execution_kind") == "physical_trial":
                 self.state["finished"] = False
                 self.state["completion_valid"] = False
                 # Historical evidence validity cannot resolve an in-flight
@@ -693,7 +699,7 @@ class AgentLoop:
                      consequence="ASSET_MUTATION")
         registry.add("load_tool_source", "Explicitly load a Tool implementation after manual inspection.",
                      self._schema({"tool_id": string}, ["tool_id"]), cap.load_tool_source,
-                     group="source_inspection")
+                     group="source_inspection", consequence="WORKSPACE_MUTATION")
         registry.add("materialize_skill", "Materialize a selected Skill controller into the workspace.",
                      self._schema({"skill_id": string}, ["skill_id"]), cap.materialize_skill,
                      group="source_inspection", consequence="ASSET_MUTATION")
@@ -714,6 +720,7 @@ class AgentLoop:
             cap.build, group="web_acquisition", consequence="ASSET_MUTATION")
         tool_schema = self._schema({"name": string, "source_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
+            "consequence": {"type": "string", "enum": ["READ_ONLY", "VALIDATION", "WORKSPACE_MUTATION", "ASSET_MUTATION", "ENVIRONMENT_MUTATION", "PHYSICAL_INTERVENTION"]},
             "source_urls": {"type": "array", "items": string},
             "runtime_spec": runtime_environment_schema,
             "manual": manual_schema}, ["name", "source_path", "description", "input_schema", "output_schema"])
@@ -727,6 +734,7 @@ class AgentLoop:
             "required": ["kind", "entrypoint"], "additionalProperties": False}
         package_schema = self._schema({"name": string, "bundle_path": string, "description": string,
             "input_schema": schema_document, "output_schema": schema_document,
+            "consequence": {"type": "string", "enum": ["READ_ONLY", "VALIDATION", "WORKSPACE_MUTATION", "ASSET_MUTATION", "ENVIRONMENT_MUTATION", "PHYSICAL_INTERVENTION"]},
             "package_spec": package_spec_schema, "source_urls": {"type": "array", "items": string}},
             ["name", "bundle_path", "description", "input_schema", "output_schema", "package_spec"])
         registry.add("register_tool", "Register an immutable Tool version; call test_tool before it can be bound.",
@@ -739,7 +747,7 @@ class AgentLoop:
             group="asset_authoring", consequence="ASSET_MUTATION")
         registry.add("test_tool", "Run JSON contract tests against a registered Tool.", self._schema(
             {"tool_id": string, "cases": {"type": "array", "items": test_case_schema, "minItems": 1}}, ["tool_id", "cases"]),
-            cap.test_tool, group="asset_authoring")
+            cap.test_tool, group="asset_authoring", consequence="ASSET_MUTATION")
         registry.add("register_skill", "Persist a successful reusable Skill.", self._schema(
             {"name": string, "task": string, "controller": string, "tool_ids": {"type": "array", "items": string},
              "evidence_paths": {"type": "array", "items": string}, "evidence": {"type": "object"}},
@@ -806,7 +814,8 @@ class AgentLoop:
                          "notes": {"type": ["string", "null"]},
                          "related_progress_ids": {"type": "array", "items": string,
                                                   "maxItems": 16}},
-                         ["summary", "status", "evidence_refs"]), self._record_progress)
+                         ["summary", "status", "evidence_refs"]), self._record_progress,
+                         consequence="ASSET_MUTATION")
         registry.add("update_progress", "Update one model-authored progress record.",
                      self._schema({"progress_id": string, "summary": string,
                          "status": {"type": "string", "enum": ["working", "failed", "uncertain", "superseded"]},
@@ -814,7 +823,8 @@ class AgentLoop:
                          "notes": {"type": ["string", "null"]},
                          "related_progress_ids": {"type": "array", "items": string,
                                                   "maxItems": 16}},
-                         ["progress_id", "summary", "status", "evidence_refs"]), self._update_progress)
+                         ["progress_id", "summary", "status", "evidence_refs"]), self._update_progress,
+                         consequence="ASSET_MUTATION")
         registry.add("list_progress", "List bounded model-authored task progress.",
                      self._schema(), lambda: {"progress": self.progress_ledger[-32:]})
         registry.add("compare_executions",
@@ -894,7 +904,7 @@ class AgentLoop:
         valid = []
         for ref in refs or []:
             ref = str(ref)
-            if not (ref.startswith("evidence://execution-") or ref.startswith("run://")):
+            if not (ref.startswith("evidence://") or ref.startswith("run://")):
                 raise ProtocolError("progress evidence_refs must be run/evidence references")
             try:
                 self._execution_by_ref(ref)
@@ -1154,6 +1164,7 @@ class AgentLoop:
         self.state["completed_execution"] = None
         self._recovery_mode = False
         self.latest_evidence = None
+        self.latest_physical_evidence = None
         self._agent_latest_evidence = None
         self.state.update({"completion_valid": False, "finished": False,
                            "restored_evidence_unverified": False})
@@ -1379,7 +1390,7 @@ class AgentLoop:
         return result
 
     def _finish(self, summary: str):
-        evidence = self.latest_evidence
+        evidence = self.latest_physical_evidence
         current_sha = hashlib.sha256(self.workspace.controller.read_bytes()).hexdigest() \
             if self.workspace.controller.is_file() else None
         errors = []
@@ -1443,6 +1454,7 @@ class AgentLoop:
                     candidate = self._load_evidence_reference(payload)
                     candidate = {"reused_committed_execution": True, **candidate}
                     self.latest_evidence = candidate
+                    self.latest_physical_evidence = candidate
                     self._agent_latest_evidence = self._agent_evidence(candidate)
                     self.state["completed_execution"] = None
                     self.state["pending_execution"] = None
@@ -1455,6 +1467,7 @@ class AgentLoop:
                     candidate = self._load_evidence_reference(payload)
                     candidate = {"reused_committed_execution": True, **candidate}
                     self.latest_evidence = candidate
+                    self.latest_physical_evidence = candidate
                     self._agent_latest_evidence = self._agent_evidence(candidate)
                     self.state["pending_execution"] = None
                     self.state["completed_execution"] = None
@@ -1473,6 +1486,7 @@ class AgentLoop:
                     candidate = self._load_evidence_reference(payload)
                     candidate = {"reused_committed_execution": True, **candidate}
                     self.latest_evidence = candidate
+                    self.latest_physical_evidence = candidate
                     self._agent_latest_evidence = self._agent_evidence(candidate)
                     self.state["pending_execution"] = None
                     self.state["completed_execution"] = None
@@ -1608,6 +1622,7 @@ class AgentLoop:
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
         evidence["artifact_sha256"] = _file_sha256(evidence_path)
         self.latest_evidence = evidence
+        self.latest_physical_evidence = evidence
         self._agent_latest_evidence = agent_evidence
         self.state["restored_evidence_unverified"] = False
         execution_reference = self._evidence_reference(evidence)
@@ -1635,12 +1650,21 @@ class AgentLoop:
         return evidence
 
     def _run_diagnostic(self):
+        try:
+            return self._run_diagnostic_impl()
+        finally:
+            self._artifact_scope = None
+
+    def _run_diagnostic_impl(self):
         """Execute read-only Controller code under an independent finite budget."""
         if self.runtime is None:
             raise RuntimeError("controller runtime is not configured")
         if self.budget.diagnostics_exhausted():
             raise ProtocolError("diagnostic budget exhausted")
         self.budget.diagnostics += 1
+        diagnostic_id = hashlib.sha256(
+            f"{time.time_ns()}:{os.getpid()}:{self.budget.diagnostics}:{self.workspace.controller.read_bytes()}".encode()
+        ).hexdigest()[:24]
         begin = getattr(self.adapter, "begin_execution", None)
         if callable(begin):
             begin("diagnostic")
@@ -1657,16 +1681,17 @@ class AgentLoop:
                                         controller_sha256=result.get("program_sha256"), diagnostics=public_report)
         agent_evidence = AgentEvidence.from_execution(
             transformed_execution, public_report, digest=digest,
-            evidence_ref=f"evidence://diagnostic-{self.budget.diagnostics:06d}").as_dict()
+            evidence_ref=f"evidence://diagnostic-{diagnostic_id}").as_dict()
         evidence = {"execution": transformed_execution, "sensor_report": report,
                     "execution_kind": "diagnostic",
                     "controller_sha256": result.get("program_sha256"),
                     "environment_identity": self._execution_identity(),
                     "diagnostic_index": self.budget.diagnostics,
+                    "diagnostic_id": diagnostic_id,
                     "agent_evidence": agent_evidence}
         evidence_dir = self.root / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
-        evidence_path = evidence_dir / f"diagnostic-{self.budget.diagnostics:06d}-{result['program_sha256'][:12]}.json"
+        evidence_path = evidence_dir / f"diagnostic-{diagnostic_id}.json"
         temporary = evidence_path.with_suffix(".tmp")
         try:
             with temporary.open("w") as stream:
@@ -1680,11 +1705,14 @@ class AgentLoop:
             temporary.unlink(missing_ok=True)
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
         evidence["artifact_sha256"] = _file_sha256(evidence_path)
+        self.latest_evidence = evidence
+        self._agent_latest_evidence = agent_evidence
         self._artifact_scope = None
         self.event_store.commit("execution", {"execution_kind": "diagnostic",
                                                 "artifact_uri": evidence["artifact_uri"],
                                                 "artifact_sha256": evidence["artifact_sha256"],
-                                                "summary": {"diagnostic_index": self.budget.diagnostics}})
+                                                "summary": {"diagnostic_index": self.budget.diagnostics,
+                                                             "diagnostic_id": diagnostic_id}})
         return evidence
 
     def _messages(self, task: str):
@@ -1899,6 +1927,8 @@ class AgentLoop:
             "progress_ledger": self.progress_ledger[-128:],
             "latest_evidence": (self._evidence_reference(self.latest_evidence)
                                 if isinstance(self.latest_evidence, Mapping) else None),
+            "latest_physical_evidence": (self._evidence_reference(self.latest_physical_evidence)
+                                          if isinstance(self.latest_physical_evidence, Mapping) else None),
             "snapshot_id": snapshot.snapshot_id,
             "active_tool_groups": list(self.tools.active_groups),
             "active_shared_tools": list(self.capability_manager.bound_tool_ids),

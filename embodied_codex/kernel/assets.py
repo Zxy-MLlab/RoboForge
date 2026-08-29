@@ -21,6 +21,7 @@ import tempfile
 import time
 import uuid
 from typing import Any, Mapping
+from .tools import CONSEQUENCE_LEVELS
 
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -226,7 +227,11 @@ class CapabilityLibrary:
                       runtime_requirements: list[str] | None = None,
                       runtime_spec: Mapping[str, Any] | None = None,
                       provenance: Mapping[str, Any] | None = None,
+                      consequence: str = "UNKNOWN",
                       **_unused) -> dict[str, Any]:
+        consequence = str(consequence).upper()
+        if consequence not in CONSEQUENCE_LEVELS | {"UNKNOWN"}:
+            raise AssetError("unsupported capability consequence")
         source = self._workspace_file(source_path)
         text = source.read_text()
         compile(text, str(source), "exec")
@@ -244,12 +249,14 @@ class CapabilityLibrary:
             if (old.get("name") == name and old.get("source_sha256") == digest
                     and old.get("input_schema") == input_schema
                     and old.get("output_schema") == output_schema
+                    and old.get("consequence", "UNKNOWN") == consequence
                     and (old.get("dependencies") or {}).get("runtime_requirements", [])
                         == requirements
                     and old.get("runtime_environment") == environment):
                 return {"tool_id": old["tool_id"], "status": old["status"], "duplicate_of": old["tool_id"]}
         manifest = {"protocol": "roboforge-tool-v2", "name": name, "description": str(description),
                     "input_schema": input_schema, "output_schema": output_schema,
+                    "consequence": consequence,
                     "source_sha256": digest, "source_urls": list(source_urls or []),
                     "dependencies": {"runtime": "isolated-python",
                                      "runtime_requirements": requirements},
@@ -263,7 +270,11 @@ class CapabilityLibrary:
                          input_schema: Mapping[str, Any], output_schema: Mapping[str, Any],
                          package_spec: Mapping[str, Any], source_urls: list[str] | None = None,
                          provenance: Mapping[str, Any] | None = None,
+                         consequence: str = "UNKNOWN",
                          **_unused) -> dict[str, Any]:
+        consequence = str(consequence).upper()
+        if consequence not in CONSEQUENCE_LEVELS | {"UNKNOWN"}:
+            raise AssetError("unsupported capability consequence")
         bundle = (self.workspace / str(bundle_path)).resolve()
         if self.workspace not in bundle.parents or not bundle.is_dir():
             raise AssetError("capability bundle must be a workspace directory")
@@ -323,7 +334,8 @@ class CapabilityLibrary:
             tree_digest.update(bytes.fromhex(str(record["sha256"])))
         manifest = {"protocol": "roboforge-capability-package-v2", "name": name,
                     "description": str(description), "input_schema": input_schema,
-                    "output_schema": output_schema, "source_sha256": _sha256(bundle / entry),
+                    "output_schema": output_schema, "consequence": consequence,
+                    "source_sha256": _sha256(bundle / entry),
                     "bundle_tree_sha256": tree_digest.hexdigest(),
                     "bundle_files": records, "asset_kind": kind,
                     "checkpoint_sha256": checkpoint_hashes, "runtime_spec": {
@@ -538,7 +550,7 @@ class CapabilityLibrary:
 
     def list_summaries(self):
         return [{key: row.get(key) for key in ("tool_id", "name", "version", "description",
-            "status", "runtime_spec", "runtime_environment", "dependencies")}
+            "status", "consequence", "provenance", "runtime_spec", "runtime_environment", "dependencies")}
             for row in self.list_all()]
 
     def search(self, query: str, limit: int = 8, statuses: set[str] | None = None):

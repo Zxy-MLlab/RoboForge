@@ -160,13 +160,20 @@ class LiberoDeployment:
         if kind not in {"physical_trial", "diagnostic"}:
             raise LiberoDeploymentError("unsupported execution kind")
         self._execution_index += 1
+        self.execution_kind = kind
         self.trace = []
         self.video = []
         self.references = {}
+        self.verified_attachments = set()
         self.last_verify = False
         self._outcome_report = None
         self._outcome_after = None
         self._execution_sensor_report = None
+        self._execution_artifacts = {}
+        self._controller_artifacts = {}
+        self._controller_artifact_paths = {}
+        self.controller_control_steps = 0
+        self.trial_horizon_exhausted = False
         self._controller_execution_sealed = False
         self._outcome_before = self._capture_outcome_rgb("before") if kind == "physical_trial" else None
         self._evaluator_calls = 0
@@ -262,6 +269,7 @@ class LiberoDeployment:
             version = capability_id.rpartition(":")[2] or None
             result[capability_id] = {"capability_id": capability_id,
                 "version": version,
+                "consequence": str(contract.get("consequence", "UNKNOWN")).upper(),
                 "contract_sha256": hashlib.sha256(encoded.encode()).hexdigest()}
         return result
 
@@ -304,6 +312,7 @@ class LiberoDeployment:
                               "description": manual["purpose"],
                               "input_schema": dict(contract.get("input_schema") or {}),
                               "output_schema": dict(contract.get("output_schema") or {}),
+                              "consequence": str(contract.get("consequence", "UNKNOWN")).upper(),
                               "manual": manual},
                 "source": None}
 
@@ -772,7 +781,7 @@ class LiberoDeployment:
         if self._execution_sensor_report is not None:
             return dict(self._execution_sensor_report)
         independent=True
-        if self.outcome_verifier is not None:
+        if getattr(self, "execution_kind", "physical_trial") == "physical_trial" and self.outcome_verifier is not None:
             if self._outcome_report is None:
                 self._outcome_after=self._capture_outcome_rgb("after")
                 try:
