@@ -510,10 +510,8 @@ class LiberoDeployment:
                 command=np.zeros(7);command[:3]=np.clip(error*gain,-1,1);command[6]=gripper;self._sim_step(command)
             reached=reached or np.linalg.norm(target-np.asarray(self.obs["robot0_eef_pos"],float))<=tolerance
         elif kind=="move_to_pose":
-            # A pose may refer to a Tool-issued live pose, or combine a live
-            # point reference with an explicitly supplied orientation.  Raw
-            # world coordinates are deliberately not accepted here: every
-            # translational target must retain sensor/Tool provenance.
+            # A pose may use a live Tool reference or an explicit numeric
+            # metric target computed from public Controller information.
             ref=str(action.get("pose_ref") or action.get("target_ref") or "")
             if ref:
                 if ref not in self.references:

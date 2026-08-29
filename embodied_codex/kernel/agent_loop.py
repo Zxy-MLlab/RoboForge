@@ -27,12 +27,14 @@ class LoopBudget:
     max_steps: int = 60; max_executions: int = 20; timeout_seconds: float = 3600
     max_trials: int | None = None
     started: float = field(default_factory=time.monotonic); steps: int = 0; executions: int = 0
-    elapsed_before: float = 0.0
+    elapsed_before: float = 0.0; trials_before: int = 0
     def elapsed(self):
         return self.elapsed_before + time.monotonic() - self.started
     def exhausted(self):
-        execution_limit = self.max_trials if self.max_trials is not None else self.max_executions
-        return (self.steps >= self.max_steps or self.executions >= execution_limit
+        trial_limit_reached = ((self.trials_before + self.executions) >= self.max_trials
+                               if self.max_trials is not None
+                               else self.executions >= self.max_executions)
+        return (self.steps >= self.max_steps or trial_limit_reached
                 or self.elapsed() >= self.timeout_seconds)
 
 
@@ -109,6 +111,8 @@ class AgentLoop:
                 cumulative = dict(checkpoint.get("cumulative") or {})
                 self.cumulative_steps = int(cumulative.get("steps", checkpoint.get("steps", 0)))
                 self.cumulative_executions = int(cumulative.get("executions", checkpoint.get("executions", 0)))
+                if self.budget.max_trials is not None:
+                    self.budget.trials_before = self.cumulative_executions
                 self.cumulative_elapsed = float(cumulative.get("elapsed_seconds",
                     checkpoint.get("elapsed_seconds", 0.0)))
                 self.trial_index = int(checkpoint.get("trial_index", self.cumulative_executions))
@@ -362,6 +366,33 @@ class AgentLoop:
         except OSError:
             token = hashlib.sha256(str(value).encode()).hexdigest()[:24]
             return f"artifact://agent/unavailable/{token}"
+
+    def _register_context_artifacts(self, value: Any) -> None:
+        """Register only content-addressed context files created by Core."""
+        handles = []
+        def visit(item):
+            if isinstance(item, Mapping):
+                for nested in item.values(): visit(nested)
+            elif isinstance(item, list):
+                for nested in item: visit(nested)
+            elif isinstance(item, str) and item.startswith("run://artifacts/context/"):
+                handles.append(item)
+        visit(value)
+        expected_parent = (self.root / "artifacts" / "context").resolve()
+        for handle in set(handles):
+            relative = Path(handle.removeprefix("run://"))
+            candidate = (self.root / relative).resolve()
+            if (candidate.parent != expected_parent or candidate.suffix != ".json"
+                    or not re.fullmatch(r"[0-9a-f]{64}", candidate.stem)
+                    or not candidate.is_file()):
+                raise ProtocolError("context artifact path is invalid")
+            encoded = candidate.read_text().removesuffix("\n")
+            if hashlib.sha256(encoded.encode()).hexdigest() != candidate.stem:
+                raise ProtocolError("context artifact content hash mismatch")
+            self._artifact_handles[handle] = candidate
+            self._artifact_handle_digests[handle] = _file_sha256(candidate)
+        if handles:
+            self._persist_artifact_manifest()
 
     def _artifact_path(self, uri: str) -> Path:
         if not str(uri).startswith("run://"):
@@ -822,9 +853,14 @@ class AgentLoop:
             ref = str(ref)
             if not (ref.startswith("evidence://execution-") or ref.startswith("run://")):
                 raise ProtocolError("progress evidence_refs must be run/evidence references")
-            if ref.startswith("evidence://execution-"):
-                try: self._execution_by_ref(ref)
-                except Exception as exc: raise ProtocolError("progress evidence reference is invalid") from exc
+            try:
+                self._execution_by_ref(ref)
+            except Exception as execution_error:
+                path = self._artifact_handles.get(ref)
+                digest = self._artifact_handle_digests.get(ref)
+                if (path is None or not path.is_file() or not digest
+                        or _file_sha256(path) != digest):
+                    raise ProtocolError("progress evidence reference is invalid") from execution_error
             valid.append(ref)
         return valid
 
@@ -837,11 +873,13 @@ class AgentLoop:
 
     def _record_progress(self, summary, status, evidence_refs, controller_version_id=None,
                          notes=None, related_progress_ids=None):
-        if controller_version_id is not None: self._version(controller_version_id)
+        version = self._version(controller_version_id) if controller_version_id is not None else None
         refs = self._validate_progress_refs(evidence_refs)
         record = {"progress_id": f"progress-{time.time_ns()}", "summary": str(summary),
                   "status": str(status), "evidence_refs": refs,
                   "controller_version_id": controller_version_id,
+                  "controller_sha256": (version.get("controller_sha256")
+                                        if version is not None else None),
                   "trial_index": self.trial_index, "notes": notes,
                   "related_progress_ids": self._validate_related_progress(
                       related_progress_ids)}
@@ -1546,6 +1584,7 @@ class AgentLoop:
                                              state=public_state)
         context = self.context_window.bound_context(
             context, artifact_root=self.root / "artifacts")
+        self._register_context_artifacts(context)
         if not self.messages:
             self.messages = [{"role": "system", "content": context["system"]},
                              {"role": "user", "content": json.dumps(context, default=str)}]

@@ -306,6 +306,17 @@ def test_explicit_trial_budget_is_independent_of_legacy_execution_limit():
     assert budget.exhausted() is True
 
 
+def test_max_trials_means_cumulative_physical_trials_across_resume():
+    from embodied_codex.kernel.agent_loop import LoopBudget
+
+    budget = LoopBudget(max_steps=60, max_executions=20, max_trials=12,
+                        trials_before=8)
+    budget.executions = 3
+    assert budget.exhausted() is False
+    budget.executions = 4
+    assert budget.exhausted() is True
+
+
 def test_libero_horizon_exhaustion_is_trial_local():
     import numpy as np
     from embodied_codex.deployments.libero import LiberoDeployment, LiberoDeploymentError

@@ -66,3 +66,11 @@ def test_action_receipt_records_target_source():
     result = _deployment()._act({"type": "move_to_point", "frame": "world",
                                  "position_m": [0.1, 0.2, 0.3]})
     assert result["target_source"] == "controller_numeric"
+
+
+def test_previous_trial_reference_is_invalid_after_reset():
+    deployment = _deployment()
+    deployment._retired_references = {"point-old"}
+    with pytest.raises(LiberoDeploymentError,
+                       match="reference belongs to a previous environment generation"):
+        deployment._act({"type": "move_to_point", "target_ref": "point-old"})

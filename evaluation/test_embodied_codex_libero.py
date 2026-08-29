@@ -22,11 +22,17 @@ def test_libero_sdk_index_exposes_machine_action_and_verifier_contracts():
     index = _sdk_index(["seed:v001"], ["visual_attachment"], {
         "seed:v001": {"input_schema": {"type": "object"},
                        "output_schema": {"type": "object"}}})
-    assert index["action_contracts"]["move_to_point"]["required"] == ["type", "target_ref"]
+    point = index["action_contracts"]["move_to_point"]
+    assert point["required"] == ["type"]
+    assert point["any_of"] == [
+        {"required": ["target_ref"]}, {"required": ["frame", "position_m"]}]
     assert index["action_contracts"]["osc_delta"]["required"] == ["type", "translation", "rotation"]
     assert index["verifier_contracts"]["visual_attachment"]["required"] == [
         "frame", "object_query", "source_ref"]
     assert index["seed_tools"] == ["seed:v001"]
+    assert index["seed_tool_index"] == [{
+        "id": "seed:v001", "description": "Adapter-native capability.",
+        "purpose": "Adapter-native capability."}]
     assert index["seed_tool_contracts"]["seed:v001"]["input"] == {
         "type": "object", "required": [], "fields": []}
 

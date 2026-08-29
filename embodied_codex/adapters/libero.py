@@ -48,14 +48,19 @@ def _sdk_index(capabilities, verifiers, contracts=None):
                 "fields": sorted(str(key) for key in properties)}
 
     def action_contract(name, contract):
-        result = {key: value for key, value in contract.items()
-                  if key in {"required", "any_of", "enum", "optional", "field_semantics",
-                             "rule", "example"}}
-        if name == "move_to_point":
-            # Preserve the v1 index marker while runtime validation accepts
-            # the numeric frame/position alternative.
-            result["required"] = ["type", "target_ref"]
-        return result
+        return {key: value for key, value in contract.items()
+                if key in {"required", "any_of", "enum", "optional", "field_semantics",
+                           "rule", "example"}}
+
+    purposes = {
+        "libero.rgbd_perception:v001":
+            "Detect language-named objects from public calibrated RGB-D observations.",
+        "libero.grasp_proposals:v001":
+            "Generate grasp candidates from a public RGB-D frame and detection.",
+    }
+    def tool_index(capability_id):
+        purpose = purposes.get(str(capability_id), "Adapter-native capability.")
+        return {"id": str(capability_id), "description": purpose, "purpose": purpose}
 
     return {
         "protocol": "embodied-codex-libero-robot-sdk-v1",
@@ -76,6 +81,7 @@ def _sdk_index(capabilities, verifiers, contracts=None):
             for name, contract in dict(contracts or {}).items()
         },
         "seed_tools": sorted(capabilities),
+        "seed_tool_index": [tool_index(name) for name in sorted(capabilities)],
         "verifiers": sorted(verifiers),
     }
 

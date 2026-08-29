@@ -189,6 +189,23 @@ def test_execution_digest_is_compact_public_rpc_facts_only():
                    ("reward", "done", "check_success", "hidden_evaluator"))
 
 
+def test_full_public_verifier_facts_reach_digest_without_core_whitelist():
+    execution = {"completed": True, "rpc_events": [{
+        "method": "verify", "arguments": {"verifier": "public_sensor"},
+        "result": {"verified": False, "adapter_declared_metric": 0.125,
+                   "nested_facts": {"samples": [1, 2, 3]},
+                   "reward": 99, "hidden_evaluator": True},
+    }]}
+
+    digest = build_execution_digest(execution)
+
+    assert digest["verifications"] == [{
+        "verifier": "public_sensor", "verified": False,
+        "adapter_declared_metric": 0.125,
+        "nested_facts": {"samples": [1, 2, 3]},
+    }]
+
+
 def test_agent_evidence_legacy_positional_reference_is_preserved():
     evidence = AgentEvidence.from_execution(
         {"completed": True, "error": None, "rpc_events": []}, {}, "evidence://legacy")
@@ -231,6 +248,82 @@ def test_progress_can_link_authentic_related_records(tmp_path):
     with pytest.raises(ProtocolError, match="related progress record is unknown"):
         loop._record_progress("invalid", "failed", [],
                               related_progress_ids=["progress-missing"])
+
+
+def test_progress_requires_valid_evidence_ref_and_links_controller_version(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return {}\n")
+    evidence = loop._run_controller()
+    version = loop.controller_versions[-1]
+
+    with pytest.raises(ProtocolError, match="evidence reference is invalid"):
+        loop._record_progress("fabricated", "uncertain",
+                              ["run://evidence/missing.json"])
+
+    record = loop._record_progress(
+        "model-authored observation", "working",
+        [evidence["agent_evidence"]["evidence_ref"]], version["version_id"])
+    assert record["controller_version_id"] == version["version_id"]
+    assert record["controller_sha256"] == version["controller_sha256"]
+
+
+def test_progress_survives_context_compaction(tmp_path):
+    window = ContextWindowManager(budgets=ResourceBudgets(
+        max_state_chars=256, max_context_chars=100_000))
+    loop = _loop(tmp_path, object(), resume=False, context_window=window)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return {}\n")
+    evidence = loop._run_controller()
+    progress = loop._record_progress(
+        "model-authored " * 200, "working",
+        [evidence["agent_evidence"]["evidence_ref"]],
+        loop.controller_versions[-1]["version_id"])
+
+    messages = loop._messages("task")
+    context = json.loads(messages[1]["content"])
+    state = context["state"]
+    assert state["truncated"] is True
+    artifact = loop._view_artifact(state["artifact_uri"])
+    assert progress["progress_id"] in artifact["content"]
+    assert "model-authored" in artifact["content"]
+
+
+def test_progress_survives_checkpoint_resume(tmp_path):
+    adapter = FakeAdapter("progress resume", tmp_path / "adapter")
+    first = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    first.workspace.write_file("controller.py", "def run(robot):\n    return {}\n")
+    evidence = first._run_controller()
+    progress = first._record_progress(
+        "persistent model claim", "uncertain",
+        [evidence["agent_evidence"]["evidence_ref"]],
+        first.controller_versions[-1]["version_id"])
+    first._checkpoint()
+
+    resumed = _loop(tmp_path, object(), adapter=adapter, resume=True)
+    assert resumed.progress_ledger == [progress]
+    assert resumed.controller_versions == first.controller_versions
+    context = json.loads(resumed._messages("progress resume")[1]["content"])
+    assert context["state"]["task_progress"] == [progress]
+
+
+def test_controller_versions_are_inspectable_comparable_and_restorable(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    first_source = "def run(robot):\n    return {'version': 1}\n"
+    second_source = "def run(robot):\n    return {'version': 2}\n"
+    loop.workspace.write_file("controller.py", first_source)
+    loop._run_controller()
+    first = loop.controller_versions[-1]
+    loop.workspace.write_file("controller.py", second_source)
+    loop._run_controller()
+    second = loop.controller_versions[-1]
+
+    assert loop._inspect_controller_version(first["version_id"])["source"] == first_source
+    comparison = loop._compare_controller_versions(
+        first["version_id"], second["version_id"])
+    assert comparison["sha256_equal"] is False
+    assert comparison["source_changed"] is True
+    assert "source" not in comparison
+    loop._restore_controller_version(first["version_id"])
+    assert loop.workspace.controller.read_text() == first_source
 
 
 def test_campaign_run_controller_is_episodic_and_preserves_learning(tmp_path):
