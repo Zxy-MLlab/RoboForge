@@ -151,9 +151,14 @@ class LiberoDeployment:
         return self.project_rpc_output("observe",arguments,self.dispatch("observe",arguments))
 
     def begin_controller_execution(self):
-        """Start an execution-scoped trace and outcome collection."""
+        return self.begin_execution("physical_trial")
+
+    def begin_execution(self, kind="physical_trial"):
+        """Start fresh execution-local state for either execution kind."""
         if self.closed:
             raise LiberoDeploymentError("deployment closed")
+        if kind not in {"physical_trial", "diagnostic"}:
+            raise LiberoDeploymentError("unsupported execution kind")
         self._execution_index += 1
         self.trace = []
         self.video = []
@@ -163,7 +168,7 @@ class LiberoDeployment:
         self._outcome_after = None
         self._execution_sensor_report = None
         self._controller_execution_sealed = False
-        self._outcome_before = self._capture_outcome_rgb("before")
+        self._outcome_before = self._capture_outcome_rgb("before") if kind == "physical_trial" else None
         self._evaluator_calls = 0
         self.controller_control_steps = 0
         self.trial_horizon_exhausted = False
@@ -227,6 +232,8 @@ class LiberoDeployment:
     def register_capability(self,tool_id,function,contract):
         if tool_id in self.capabilities: raise LiberoDeploymentError("duplicate Tool")
         value={key:dict(contract.get(key) or {}) for key in ("input_schema","output_schema")}
+        if "consequence" in contract:
+            value["consequence"] = str(contract["consequence"]).upper()
         try:
             for schema in value.values():Draft202012Validator.check_schema(schema)
         except Exception as exc:
@@ -236,11 +243,16 @@ class LiberoDeployment:
 
     def capability_consequence(self, tool_id):
         contract = self.capability_contracts.get(str(tool_id), {})
-        return str(contract.get("consequence", "READ_ONLY")).upper()
+        return str(contract.get("consequence", "UNKNOWN")).upper()
 
     def native_capability_index(self):
-        return [{**dict(item), "source": "native"}
-                for item in self.native_capability_manifest().values()]
+        rows = []
+        for item in self.native_capability_manifest().values():
+            detail = self.inspect_native_capability(item["capability_id"])
+            manifest = detail.get("manifest", {})
+            rows.append({**dict(item), "purpose": manifest.get("description", ""),
+                         "description": manifest.get("description", ""), "source": "native"})
+        return rows
 
     def native_capability_manifest(self):
         result = {}

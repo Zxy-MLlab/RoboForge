@@ -167,7 +167,8 @@ class ControllerRuntime:
                                         raise ControllerRuntimeError("diagnostic execution forbids physical act")
                                     if method == "use":
                                         checker = getattr(deployment, "capability_consequence", None)
-                                        if callable(checker) and checker(str(arguments.get("tool_id") or "")) not in {None, "READ_ONLY"}:
+                                        consequence = checker(str(arguments.get("tool_id") or "")) if callable(checker) else None
+                                        if not isinstance(consequence, str) or consequence.upper() != "READ_ONLY":
                                             raise ControllerRuntimeError("diagnostic execution forbids mutating capability")
                                 event = {"method": method, "arguments": arguments}
                                 capture_state = getattr(deployment, "canonical_embodied_state", None)

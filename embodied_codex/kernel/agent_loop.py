@@ -1489,9 +1489,13 @@ class AgentLoop:
         self._artifact_scope = execution_key
         self.budget.executions += 1
         self.cumulative_executions += 1
-        begin = getattr(self.adapter, "begin_controller_execution", None)
+        begin = getattr(self.adapter, "begin_execution", None)
         if callable(begin):
-            begin()
+            begin("physical_trial")
+        else:
+            begin = getattr(self.adapter, "begin_controller_execution", None)
+            if callable(begin):
+                begin()
         result = self.runtime.execute(self.workspace.controller, self.adapter,
                                       execution_kind="physical_trial")
         self.controller_control_steps = int(getattr(self.adapter, "controller_control_steps",
@@ -1637,14 +1641,29 @@ class AgentLoop:
         if self.budget.diagnostics_exhausted():
             raise ProtocolError("diagnostic budget exhausted")
         self.budget.diagnostics += 1
+        begin = getattr(self.adapter, "begin_execution", None)
+        if callable(begin):
+            begin("diagnostic")
+        self._artifact_scope = f"diagnostic-{self.budget.diagnostics:06d}"
         result = self.runtime.execute(self.workspace.controller, self.adapter,
                                       execution_kind="diagnostic")
+        transformed_execution = self._register_artifacts(result)
         report = self.adapter.sensor_report(result)
-        evidence = {"execution": result, "sensor_report": report,
+        report = self._register_artifacts(report)
+        public_provider = getattr(self.adapter, "agent_evidence", None)
+        public_report = public_provider(result, report) if callable(public_provider) else {}
+        public_report = self._register_artifacts(public_report)
+        digest = build_execution_digest(transformed_execution,
+                                        controller_sha256=result.get("program_sha256"), diagnostics=public_report)
+        agent_evidence = AgentEvidence.from_execution(
+            transformed_execution, public_report, digest=digest,
+            evidence_ref=f"evidence://diagnostic-{self.budget.diagnostics:06d}").as_dict()
+        evidence = {"execution": transformed_execution, "sensor_report": report,
                     "execution_kind": "diagnostic",
                     "controller_sha256": result.get("program_sha256"),
                     "environment_identity": self._execution_identity(),
-                    "diagnostic_index": self.budget.diagnostics}
+                    "diagnostic_index": self.budget.diagnostics,
+                    "agent_evidence": agent_evidence}
         evidence_dir = self.root / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         evidence_path = evidence_dir / f"diagnostic-{self.budget.diagnostics:06d}-{result['program_sha256'][:12]}.json"
@@ -1661,8 +1680,10 @@ class AgentLoop:
             temporary.unlink(missing_ok=True)
         evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
         evidence["artifact_sha256"] = _file_sha256(evidence_path)
+        self._artifact_scope = None
         self.event_store.commit("execution", {"execution_kind": "diagnostic",
                                                 "artifact_uri": evidence["artifact_uri"],
+                                                "artifact_sha256": evidence["artifact_sha256"],
                                                 "summary": {"diagnostic_index": self.budget.diagnostics}})
         return evidence
 

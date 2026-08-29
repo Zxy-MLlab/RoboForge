@@ -114,6 +114,14 @@ class CampaignAdapter:
             return begin()
         return None
 
+    def begin_execution(self, kind="physical_trial"):
+        begin = getattr(self.active, "begin_execution", None)
+        if callable(begin):
+            return begin(kind)
+        if kind == "physical_trial":
+            return self.begin_controller_execution()
+        return None
+
     def execution_identity(self):
         return self.active.execution_identity()
 

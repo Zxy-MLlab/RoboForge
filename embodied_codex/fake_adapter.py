@@ -90,7 +90,10 @@ class FakeAdapter:
         self.contracts[str(tool_id)] = dict(contract)
 
     def capability_consequence(self, tool_id):
-        return str(self.contracts.get(str(tool_id), {}).get("consequence", "READ_ONLY")).upper()
+        return str(self.contracts.get(str(tool_id), {}).get("consequence", "UNKNOWN")).upper()
+
+    def begin_execution(self, kind="physical_trial"):
+        self._diagnostic_state = {"kind": kind, "frame": self.frame, "verified": False}
 
     def native_capability_index(self):
         return []

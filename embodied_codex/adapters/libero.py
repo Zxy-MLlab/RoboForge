@@ -363,6 +363,8 @@ def create(*, task: str, state: int = 0, root: str | Path,
                     "libero.grasp_proposals:v001": grasp.infer}
     contracts = {"libero.rgbd_perception:v001": _perception_contract(),
                  "libero.grasp_proposals:v001": _grasp_contract()}
+    for contract in contracts.values():
+        contract["consequence"] = "READ_ONLY"
     deployment = LiberoDeployment(episode=episode, artifact_dir=Path(root) / "adapter",
         capabilities=capabilities, capability_contracts=contracts, verifiers=verifiers,
         outcome_verifier=outcome)
