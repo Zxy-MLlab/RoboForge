@@ -33,12 +33,19 @@ clone_at() {
 mkdir -p "$vendor_root"
 "$python_bin" -m pip install -e "$repo_root[libero]"
 
+clone_at https://github.com/Lifelong-Robot-Learning/LIBERO.git \
+    8f1084e3132a39270c3a13ebe37270a43ece2a01 "$vendor_root/libero"
 clone_at https://github.com/IDEA-Research/GroundingDINO.git \
     856dde20aee659246248e20734ef9ba5214f5e44 "$vendor_root/GroundingDINO"
 clone_at https://github.com/facebookresearch/segment-anything.git \
     dca509fe793f601edb92606367a655c15ac00fdf "$vendor_root/segment-anything"
 clone_at https://github.com/graspnet/graspnet-baseline.git \
     280c215129f759ed8649cb4e89fc5dfee55f4f80 "$vendor_root/graspnet-baseline"
+
+# LIBERO's namespace layout is omitted by both modern editable mappings and its
+# regular wheel. Setuptools' compat mode adds the pinned source root to sys.path.
+"$python_bin" -m pip install --no-deps --force-reinstall -e "$vendor_root/libero" \
+    --config-settings editable_mode=compat
 
 groundingdino_patch="$repo_root/scripts/patches/groundingdino-pytorch2.patch"
 if git -C "$vendor_root/GroundingDINO" apply --check "$groundingdino_patch"; then

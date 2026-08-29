@@ -58,6 +58,9 @@ def test_libero_vendor_configuration_is_portable_and_environment_overrides(monke
 
 def test_libero_installer_builds_torch_extensions_in_host_environment():
     installer = (Path(__file__).parents[1] / "scripts/install_libero.sh").read_text()
+    assert "Lifelong-Robot-Learning/LIBERO.git" in installer
+    assert 'pip install --no-deps --force-reinstall -e "$vendor_root/libero"' in installer
+    assert "--config-settings editable_mode=compat" in installer
     for relative in ("GroundingDINO", "graspnet-baseline/knn",
                      "graspnet-baseline/pointnet2"):
         assert (f'pip install --no-build-isolation -e "$vendor_root/{relative}"'
