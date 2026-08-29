@@ -8,6 +8,12 @@ config_home=${XDG_CONFIG_HOME:-"${HOME:?HOME is required}/.config"}
 vendor_root=${ROBOFORGE_VENDOR_ROOT:-"$data_home/roboforge/vendor"}
 vendor_config=${ROBOFORGE_LIBERO_VENDOR_CONFIG:-"$config_home/roboforge/libero_vendor.json"}
 
+"$python_bin" - <<'PY'
+import sys
+if sys.version_info >= (3, 12):
+    raise SystemExit("full LIBERO deployment requires Python 3.10 or 3.11")
+PY
+
 clone_at() {
     local url=$1
     local revision=$2
@@ -33,6 +39,14 @@ clone_at https://github.com/facebookresearch/segment-anything.git \
     dca509fe793f601edb92606367a655c15ac00fdf "$vendor_root/segment-anything"
 clone_at https://github.com/graspnet/graspnet-baseline.git \
     280c215129f759ed8649cb4e89fc5dfee55f4f80 "$vendor_root/graspnet-baseline"
+
+groundingdino_patch="$repo_root/scripts/patches/groundingdino-pytorch2.patch"
+if git -C "$vendor_root/GroundingDINO" apply --check "$groundingdino_patch"; then
+    git -C "$vendor_root/GroundingDINO" apply "$groundingdino_patch"
+elif ! git -C "$vendor_root/GroundingDINO" apply --reverse --check "$groundingdino_patch"; then
+    echo "GroundingDINO compatibility patch does not apply to the pinned revision" >&2
+    exit 2
+fi
 
 "$python_bin" -m pip install --no-build-isolation -e "$vendor_root/GroundingDINO"
 "$python_bin" -m pip install -e "$vendor_root/segment-anything"

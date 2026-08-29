@@ -60,6 +60,9 @@ roboforge run --adapter libero --task 0 --profile autonomous \
   --run-dir runs/libero-task-0 --asset-root assets/shared
 ```
 
+完整 LIBERO deployment 使用 Python 3.10/3.11，并固定兼容的 robosuite 1.4.1 与
+MuJoCo 2.3.7。Kernel 本身仍支持项目声明的其他 Python 版本。
+
 上述 LIBERO run 需要先设置 `OPENAI_API_KEY` 或 `APEX_API_KEY`；没有模型凭据时 doctor
 会明确报告 `model` 不可用并返回非零状态。
 
