@@ -319,6 +319,28 @@ def test_libero_horizon_exhaustion_is_trial_local():
     assert deployment.trial_horizon_exhausted is True
 
 
+def test_native_tool_inspection_includes_complete_manual_and_nested_schema():
+    from embodied_codex.deployments.libero import LiberoDeployment
+
+    deployment = LiberoDeployment.__new__(LiberoDeployment)
+    tool_id = "libero.rgbd_perception:v001"
+    deployment._native_capability_ids = frozenset({tool_id})
+    deployment.capability_contracts = {tool_id: {
+        "input_schema": {"type": "object", "properties": {
+            "frame": {"type": "object", "properties": {
+                "cameras": {"type": "object"}}}}},
+        "output_schema": {"type": "object", "properties": {
+            "detections": {"type": "object"}}},
+    }}
+    detail = deployment.inspect_native_capability(tool_id)
+    manifest = detail["manifest"]
+    assert manifest["input_schema"]["properties"]["frame"]["properties"]["cameras"]
+    assert manifest["output_schema"]["properties"]["detections"]
+    assert {"purpose", "examples", "failure_modes", "limitations", "provenance"} <= set(
+        manifest["manual"])
+    assert detail["source"] is None
+
+
 def test_libero_hidden_evaluator_reads_env_success_only_after_seal():
     from embodied_codex.deployments.libero import LiberoDeployment, LiberoDeploymentError
     deployment = LiberoDeployment.__new__(LiberoDeployment)

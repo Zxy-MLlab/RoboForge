@@ -212,6 +212,25 @@ def test_run_controller_agent_evidence_contains_execution_digest(tmp_path):
     assert "state_before" in action_event and "state_after" in action_event
     assert action_event["state_before"]["robot"]["proprioception"]["value"] == 0
     assert action_event["state_after"]["robot"]["proprioception"]["value"] == 0
+    version = loop.controller_versions[-1]
+    assert version["evidence_ref"] == evidence["agent_evidence"]["evidence_ref"]
+    assert version["created_unix"] > 0
+
+
+def test_progress_can_link_authentic_related_records(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "def run(robot):\n    return {}\n")
+    evidence = loop._run_controller()
+    first = loop._record_progress("observed behavior", "uncertain",
+        [evidence["agent_evidence"]["evidence_ref"]],
+        loop.controller_versions[-1]["version_id"])
+    second = loop._record_progress("follow-up", "working",
+        [evidence["agent_evidence"]["evidence_ref"]],
+        related_progress_ids=[first["progress_id"]])
+    assert second["related_progress_ids"] == [first["progress_id"]]
+    with pytest.raises(ProtocolError, match="related progress record is unknown"):
+        loop._record_progress("invalid", "failed", [],
+                              related_progress_ids=["progress-missing"])
 
 
 def test_execution_artifact_handles_resolve_to_immutable_scoped_snapshots(tmp_path):

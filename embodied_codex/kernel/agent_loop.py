@@ -218,7 +218,8 @@ class AgentLoop:
         record = {"version_id": version_id, "controller_sha256": controller_sha,
                   "path": f"run://controller_versions/{path.name}",
                   "trial_index": trial_index, "environment_generation":
-                  self._execution_identity().get("environment_generation")}
+                  self._execution_identity().get("environment_generation"),
+                  "created_unix": time.time(), "evidence_ref": None}
         self.controller_versions = [x for x in self.controller_versions if x.get("version_id") != version_id]
         self.controller_versions.append(record); self._persist_learning_state()
         return record
@@ -730,13 +731,17 @@ class AgentLoop:
                          "enum": ["working", "failed", "uncertain", "superseded"]},
                          "evidence_refs": {"type": "array", "items": string, "maxItems": 16},
                          "controller_version_id": {"type": ["string", "null"]},
-                         "notes": {"type": ["string", "null"]}},
+                         "notes": {"type": ["string", "null"]},
+                         "related_progress_ids": {"type": "array", "items": string,
+                                                  "maxItems": 16}},
                          ["summary", "status", "evidence_refs"]), self._record_progress)
         registry.add("update_progress", "Update one model-authored progress record.",
                      self._schema({"progress_id": string, "summary": string,
                          "status": {"type": "string", "enum": ["working", "failed", "uncertain", "superseded"]},
                          "evidence_refs": {"type": "array", "items": string, "maxItems": 16},
-                         "notes": {"type": ["string", "null"]}},
+                         "notes": {"type": ["string", "null"]},
+                         "related_progress_ids": {"type": "array", "items": string,
+                                                  "maxItems": 16}},
                          ["progress_id", "summary", "status", "evidence_refs"]), self._update_progress)
         registry.add("list_progress", "List bounded model-authored task progress.",
                      self._schema(), lambda: {"progress": self.progress_ledger[-32:]})
@@ -823,20 +828,35 @@ class AgentLoop:
             valid.append(ref)
         return valid
 
-    def _record_progress(self, summary, status, evidence_refs, controller_version_id=None, notes=None):
+    def _validate_related_progress(self, progress_ids):
+        known = {str(item.get("progress_id")) for item in self.progress_ledger}
+        values = [str(item) for item in (progress_ids or [])]
+        if any(item not in known for item in values):
+            raise ProtocolError("related progress record is unknown")
+        return values
+
+    def _record_progress(self, summary, status, evidence_refs, controller_version_id=None,
+                         notes=None, related_progress_ids=None):
         if controller_version_id is not None: self._version(controller_version_id)
         refs = self._validate_progress_refs(evidence_refs)
         record = {"progress_id": f"progress-{time.time_ns()}", "summary": str(summary),
                   "status": str(status), "evidence_refs": refs,
                   "controller_version_id": controller_version_id,
-                  "trial_index": self.trial_index, "notes": notes}
+                  "trial_index": self.trial_index, "notes": notes,
+                  "related_progress_ids": self._validate_related_progress(
+                      related_progress_ids)}
         self.progress_ledger.append(record); self._persist_learning_state(); return record
 
-    def _update_progress(self, progress_id, summary, status, evidence_refs, notes=None):
+    def _update_progress(self, progress_id, summary, status, evidence_refs, notes=None,
+                         related_progress_ids=None):
         refs = self._validate_progress_refs(evidence_refs)
         for record in self.progress_ledger:
             if record.get("progress_id") == str(progress_id):
-                record.update(summary=str(summary), status=str(status), evidence_refs=refs, notes=notes)
+                related = (record.get("related_progress_ids") or []
+                           if related_progress_ids is None
+                           else self._validate_related_progress(related_progress_ids))
+                record.update(summary=str(summary), status=str(status), evidence_refs=refs,
+                              notes=notes, related_progress_ids=related)
                 self._persist_learning_state(); return dict(record)
         raise ProtocolError("unknown progress record")
 
@@ -1413,6 +1433,8 @@ class AgentLoop:
             if not any(key in public_report for key in ("rgb_path", "image_uri")):
                 public_report["rgb_path"] = sorted(set(visible_artifacts))[0]
         evidence_ref = f"evidence://execution-{self.cumulative_executions:06d}"
+        version["evidence_ref"] = evidence_ref
+        self._persist_learning_state()
         digest = build_execution_digest(transformed_execution,
                                         controller_sha256=controller_sha,
                                         diagnostics=public_report)

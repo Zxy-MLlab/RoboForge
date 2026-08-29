@@ -247,15 +247,38 @@ class LiberoDeployment:
         contract = self.capability_contracts.get(capability_id)
         if not isinstance(contract, Mapping):
             raise LiberoDeploymentError("native capability contract is unavailable")
+        manuals = {
+            "libero.rgbd_perception:v001": {
+                "purpose": "Detect language-named objects from public calibrated RGB-D observations.",
+                "examples": [{"frame": "<public observation>", "queries": ["<object description>"]}],
+                "failure_modes": ["contract_error", "no_detection", "ambiguous_detection",
+                                  "sensor_failure"],
+                "limitations": ["Results depend on visible RGB-D evidence and model confidence.",
+                                "No simulator object state is available."],
+            },
+            "libero.grasp_proposals:v001": {
+                "purpose": "Generate grasp candidates from a public RGB-D frame and detection.",
+                "examples": [{"frame": "<public observation>",
+                              "detection": "<perception detection>"}],
+                "failure_modes": ["contract_error", "no_grasp_candidate", "sensor_failure"],
+                "limitations": ["Candidates are proposals, not task-success guarantees.",
+                                "The capability is optional for canonical robot control."],
+            },
+        }
+        manual = dict(manuals.get(capability_id) or {
+            "purpose": "Adapter-native embodied capability.", "examples": [],
+            "failure_modes": ["contract_error", "sensor_failure"],
+            "limitations": ["Behavior is bounded by the published input and output schemas."],
+        })
+        manual.update({"summary": "Callable through robot.use after explicit inspection.",
+                       "provenance": "trusted Adapter implementation"})
         return {"manifest": {"tool_id": capability_id,
                               "capability_id": capability_id,
                               "version": capability_id.rpartition(":")[2] or None,
-                              "description": "Adapter-native embodied capability",
+                              "description": manual["purpose"],
                               "input_schema": dict(contract.get("input_schema") or {}),
                               "output_schema": dict(contract.get("output_schema") or {}),
-                              "manual": {"summary": "Adapter-native capability; callable through robot.use.",
-                                          "failure_modes": ["contract_error", "sensor_failure"],
-                                          "provenance": "trusted Adapter implementation"}},
+                              "manual": manual},
                 "source": None}
 
     def register_controller_artifact(self, path: str | Path) -> str:
