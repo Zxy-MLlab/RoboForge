@@ -279,6 +279,9 @@ def test_campaign_preserves_episodic_trial_and_control_step_contract():
         instruction = "task"
         sdk_index = {}
 
+        def inspect_native_capability(self, capability_id):
+            return {"asset_id": capability_id, "manual": "complete"}
+
         def reset_case(self):
             self.step = 3
 
@@ -289,6 +292,8 @@ def test_campaign_preserves_episodic_trial_and_control_step_contract():
     assert campaign.trial_horizon_exhausted is False
     campaign.reset_case()
     assert campaign.step == 3
+    assert campaign.inspect_native_capability("native:v1") == {
+        "asset_id": "native:v1", "manual": "complete"}
 
 
 def test_libero_horizon_exhaustion_is_trial_local():

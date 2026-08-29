@@ -152,6 +152,12 @@ class CampaignAdapter:
             raise RuntimeError("Campaign cases expose different native capability contracts")
         return manifests[0]
 
+    def inspect_native_capability(self, capability_id: str):
+        provider = getattr(self.active, "inspect_native_capability", None)
+        if not callable(provider):
+            raise KeyError(capability_id)
+        return provider(str(capability_id))
+
     def resolve_controller_artifact(self, handle: str):
         resolver = getattr(self.active, "resolve_controller_artifact", None)
         if not callable(resolver):
