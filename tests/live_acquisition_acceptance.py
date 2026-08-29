@@ -36,17 +36,27 @@ class LiveAcquisitionModel:
         self.turn += 1
         source = "source/RoboForge-main"
         calls = {
-            1: ("search_web", {"query": "robot perception python github", "limit": 3}),
-            2: ("fetch_web_page", {"url": "https://github.com/Zxy-MLlab/RoboForge",
+            1: ("list_tool_groups", {}),
+            2: ("activate_tool_group", {"group": "web_acquisition"}),
+            3: ("activate_tool_group", {"group": "asset_authoring"}),
+            4: ("search_web", {"query": "robot perception python github", "limit": 3}),
+            5: ("fetch_web_page", {"url": "https://github.com/Zxy-MLlab/RoboForge",
                                    "max_chars": 2000}),
-            3: ("download_public_asset", {
+            6: ("record_decision", {
+                "goal": "Acquire and validate a public ranking capability, then use it in a Controller.",
+                "evidence_refs": [],
+                "hypothesis": "The public source contains a reusable deterministic ranking implementation.",
+                "decision": "Download, inspect, package, test, and execute the acquired capability.",
+                "expected_effect": "The Controller selects value 1 and receives a successful sensor receipt.",
+                "uncertainty": "Network availability and upstream archive contents may change."}),
+            7: ("download_public_asset", {
                 "url": "https://github.com/Zxy-MLlab/RoboForge/archive/refs/heads/main.zip",
                 "filename": "downloads/roboforge.zip"}),
-            4: ("unpack_public_asset", {"path": "downloads/roboforge.zip",
+            8: ("unpack_public_asset", {"path": "downloads/roboforge.zip",
                                         "destination": "source"}),
-            5: ("read_file", {"path": f"{source}/embodied_codex/retrieval.py",
+            9: ("read_file", {"path": f"{source}/embodied_codex/retrieval.py",
                               "start_line": 1, "end_line": 120}),
-            6: ("write_file", {"path": f"{source}/acquired_tool.py", "content":
+            10: ("write_file", {"path": f"{source}/acquired_tool.py", "content":
                 "import os\n"
                 "import sys\n"
                 "sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'embodied_codex'))\n"
@@ -57,9 +67,9 @@ class LiveAcquisitionModel:
                 "    best=rank_records(payload['query'],rows,text_fields=('text',),"
                 "id_field='id',limit=1)[0]\n"
                 "    return {'value':best['value']}\n"}),
-            7: ("build_capability", {"directory": source, "argv": [sys.executable,
+            11: ("build_capability", {"directory": source, "argv": [sys.executable,
                 "-m", "compileall", "-q", "embodied_codex/retrieval.py", "acquired_tool.py"]}),
-            8: ("register_capability_package", {"name": "live_acquired_ranker",
+            12: ("register_capability_package", {"name": "live_acquired_ranker",
                 "bundle_path": source,
                 "description": "Publicly downloaded ranking algorithm used as target selector",
                 "input_schema": {"type": "object", "properties": {"query": {"type": "string"}},
@@ -69,16 +79,16 @@ class LiveAcquisitionModel:
                 "package_spec": {"kind": "algorithm", "entrypoint": "acquired_tool.py",
                     "accelerator": "cpu", "runtime_requirements": []},
                 "source_urls": ["https://github.com/Zxy-MLlab/RoboForge"]}),
-            9: ("test_tool", {"tool_id": "live_acquired_ranker:v001",
+            13: ("test_tool", {"tool_id": "live_acquired_ranker:v001",
                 "cases": [{"input": {"query": "set target"}, "expected": {"value": 1}}]}),
-            10: ("write_file", {"path": "controller.py", "content":
+            14: ("write_file", {"path": "controller.py", "content":
                 "def run(robot):\n"
                 "    receipt=robot.use('live_acquired_ranker:v001',{'query':'set target'})\n"
                 "    result=receipt['result']\n"
                 "    robot.act({'type':'set_value','value':result['value']})\n"
                 "    return robot.verify('target',{})\n"}),
-            11: ("run_controller", {}),
-            12: ("finish", {"summary": "live acquired capability verified"}),
+            15: ("run_controller", {}),
+            16: ("finish", {"summary": "live acquired capability verified"}),
         }
         name, arguments = calls[self.turn]
         return _call(self.turn, name, arguments)
@@ -98,14 +108,15 @@ def main():
         context_builder=ContextBuilder(adapter_index=adapter.sdk_index,
             asset_registry=manager, workspace=workspace), capability_manager=manager,
         runtime=ControllerRuntime(timeout_seconds=30), event_store=EventStore(root / "run"),
-        root=root / "run", budget=LoopBudget(max_steps=14, max_executions=3), resume=False)
+        root=root / "run", budget=LoopBudget(max_steps=18, max_executions=3), resume=False)
     try:
         result = loop.run(adapter.instruction)
     finally:
         adapter.close()
     events = EventStore(root / "run").events()
     invoked = [row["payload"]["name"] for row in events if row["kind"] == "tool_result"]
-    expected = ["search_web", "fetch_web_page", "download_public_asset",
+    expected = ["list_tool_groups", "activate_tool_group", "activate_tool_group",
+        "search_web", "fetch_web_page", "record_decision", "download_public_asset",
         "unpack_public_asset", "read_file", "write_file", "build_capability",
         "register_capability_package", "test_tool", "write_file", "run_controller", "finish"]
     if invoked != expected or result.get("finished") is not True:
