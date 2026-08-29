@@ -70,8 +70,9 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                         "max_steps":"1..100","gripper":"-1 open, +1 close",
                         "frame":"explicit Adapter-supported coordinate frame",
                         "position_m":"metric XYZ in frame"},
-            "example":{"type":"move_to_point","target_ref":"<point_ref>",
-                       "offset":[0,0,0.10],"gripper":-1}},
+            "rule":"Reference-based and numeric canonical control are both first-class. Tools are optional; a Controller may compute metric coordinates from legitimate public observations.",
+            "examples":[{"type":"move_to_point","target_ref":"<point_ref>","offset":[0,0,0.10],"gripper":-1},
+                       {"type":"move_to_point","frame":"world","position_m":[0.4,-0.1,0.2],"gripper":-1}]},
         "move_to_pose":{
             "required":["type"],
             "any_of":[
@@ -90,11 +91,11 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                         "max_steps":"1..180","gripper":"-1 open, +1 close",
                         "frame":"explicit Adapter-supported coordinate frame",
                         "position_m":"metric XYZ in frame"},
-            "rule":("Use pose_ref for a Tool-issued metric pose. To keep metric position and "
-                    "orientation provenance separate, use target_ref from metric perception "
-                    "together with an explicit quaternion_xyzw or rotation_matrix."),
-            "example":{"type":"move_to_pose","pose_ref":"<pose_ref>",
-                       "offset":[0,0,0],"gripper":-1}},
+                    "rule":("Reference-based and numeric canonical control are both first-class. "
+                    "Tools are optional; a Controller may compute metric coordinates from "
+                    "legitimate public observations."),
+            "examples":[{"type":"move_to_pose","pose_ref":"<pose_ref>","offset":[0,0,0],"gripper":-1},
+                       {"type":"move_to_pose","frame":"world","position_m":[0.4,-0.1,0.2],"quaternion_xyzw":[0,0,0,1],"gripper":-1}]},
         "osc_delta":{
             "required":["type","translation","rotation"],
             "field_semantics":{

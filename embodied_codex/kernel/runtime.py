@@ -104,7 +104,10 @@ class ControllerRuntime:
     def _safe_environment():
         return {"LANG": os.environ.get("LANG", "C.UTF-8"), "PYTHONNOUSERSITE": "1"}
 
-    def execute(self, program_path: str | Path, deployment: RobotDeployment) -> dict[str, Any]:
+    def execute(self, program_path: str | Path, deployment: RobotDeployment, *,
+                execution_kind: str = "physical_trial") -> dict[str, Any]:
+        if execution_kind not in {"physical_trial", "diagnostic"}:
+            raise ValueError("unsupported execution kind")
         path = Path(program_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -159,6 +162,13 @@ class ControllerRuntime:
                                 if len(events) >= self.max_rpc_calls:
                                     raise ControllerRuntimeError("RPC budget exceeded")
                                 arguments = _rpc_arguments(method, message.get("arguments") or {})
+                                if execution_kind == "diagnostic":
+                                    if method == "act":
+                                        raise ControllerRuntimeError("diagnostic execution forbids physical act")
+                                    if method == "use":
+                                        checker = getattr(deployment, "capability_consequence", None)
+                                        if callable(checker) and checker(str(arguments.get("tool_id") or "")) not in {None, "READ_ONLY"}:
+                                            raise ControllerRuntimeError("diagnostic execution forbids mutating capability")
                                 event = {"method": method, "arguments": arguments}
                                 capture_state = getattr(deployment, "canonical_embodied_state", None)
                                 state_before = capture_state() if method == "act" and callable(capture_state) else None
@@ -223,6 +233,7 @@ class ControllerRuntime:
         verified = any(event["method"] == "verify" and isinstance(event.get("result"), Mapping)
                        and event["result"].get("verified") is True for event in events)
         return {"completed": completed, "program_sha256": digest, "result": result,
+                "execution_kind": execution_kind,
                 "error": error, "rpc_events": events, "sensor_verification_observed": verified,
                 "stderr": stderr[-2000:],
                 "runtime_isolation": f"{self.sandbox.name}-controller-v1",

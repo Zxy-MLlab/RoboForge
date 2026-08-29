@@ -158,6 +158,14 @@ class CampaignAdapter:
             raise KeyError(capability_id)
         return provider(str(capability_id))
 
+    def native_capability_index(self):
+        provider = getattr(self.active, "native_capability_index", None)
+        return list(provider() or []) if callable(provider) else []
+
+    def capability_consequence(self, tool_id):
+        provider = getattr(self.active, "capability_consequence", None)
+        return provider(tool_id) if callable(provider) else None
+
     def resolve_controller_artifact(self, handle: str):
         resolver = getattr(self.active, "resolve_controller_artifact", None)
         if not callable(resolver):

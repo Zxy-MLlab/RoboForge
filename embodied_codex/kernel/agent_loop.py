@@ -26,7 +26,8 @@ from .tools import CONSEQUENCE_LEVELS, ToolRegistry
 class LoopBudget:
     max_steps: int = 60; max_executions: int = 20; timeout_seconds: float = 3600
     max_trials: int | None = None
-    started: float = field(default_factory=time.monotonic); steps: int = 0; executions: int = 0
+    max_diagnostics: int = 8
+    started: float = field(default_factory=time.monotonic); steps: int = 0; executions: int = 0; diagnostics: int = 0
     elapsed_before: float = 0.0; trials_before: int = 0
     def elapsed(self):
         return self.elapsed_before + time.monotonic() - self.started
@@ -36,6 +37,9 @@ class LoopBudget:
                                else self.executions >= self.max_executions)
         return (self.steps >= self.max_steps or trial_limit_reached
                 or self.elapsed() >= self.timeout_seconds)
+
+    def diagnostics_exhausted(self):
+        return self.diagnostics >= self.max_diagnostics or self.elapsed() >= self.timeout_seconds
 
 
 class ProtocolError(RuntimeError): pass
@@ -80,6 +84,9 @@ class AgentLoop:
         self.trial_index = 0
         self.trial_control_steps = 0
         self.cumulative_control_steps = 0
+        self.warmup_control_steps = 0
+        self.controller_control_steps = 0
+        self.cumulative_controller_control_steps = 0
         self.controller_versions: list[dict[str, Any]] = []
         self.progress_ledger: list[dict[str, Any]] = []
         self._load_learning_state()
@@ -117,6 +124,9 @@ class AgentLoop:
                     checkpoint.get("elapsed_seconds", 0.0)))
                 self.trial_index = int(checkpoint.get("trial_index", self.cumulative_executions))
                 self.cumulative_control_steps = int(checkpoint.get("cumulative_control_steps", 0))
+                self.cumulative_controller_control_steps = int(
+                    checkpoint.get("cumulative_controller_control_steps", self.cumulative_control_steps))
+                self.budget.diagnostics = int(checkpoint.get("diagnostics", 0) or 0)
                 self.session_index = int((checkpoint.get("session") or {}).get("index", 1)) + 1
                 self.checkpoint_task = checkpoint.get("task")
                 self.latest_evidence = self._load_evidence_reference(
@@ -207,18 +217,45 @@ class AgentLoop:
             pass
 
     def _persist_learning_state(self):
+        def atomic_json(target, value):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}-{time.time_ns()}")
+            try:
+                with temporary.open("wb") as stream:
+                    stream.write((json.dumps(value, indent=2, sort_keys=True) + "\n").encode())
+                    stream.flush(); os.fsync(stream.fileno())
+                os.replace(temporary, target)
+                descriptor = os.open(target.parent, os.O_RDONLY)
+                try: os.fsync(descriptor)
+                finally: os.close(descriptor)
+            finally:
+                temporary.unlink(missing_ok=True)
         directory = self.root / "controller_versions"; directory.mkdir(parents=True, exist_ok=True)
-        (directory / "index.json").write_text(json.dumps(self.controller_versions[-128:], indent=2, sort_keys=True) + "\n")
+        atomic_json(directory / "index.json", self.controller_versions[-128:])
         directory = self.root / "progress"; directory.mkdir(parents=True, exist_ok=True)
-        (directory / "ledger.json").write_text(json.dumps(self.progress_ledger[-128:], indent=2, sort_keys=True) + "\n")
+        atomic_json(directory / "ledger.json", self.progress_ledger[-128:])
 
     def _snapshot_controller(self, trial_index: int, controller_sha: str) -> dict[str, Any]:
         source = self.workspace.controller.read_text()
         version_id = f"controller-v{trial_index:04d}-{controller_sha[:12]}"
         path = self.root / "controller_versions" / f"{version_id}.py"
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text(source)
+        if path.exists():
+            if _file_sha256(path) != controller_sha:
+                raise ProtocolError("immutable Controller snapshot checksum mismatch")
+        else:
+            temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
+            try:
+                with temporary.open("w") as stream:
+                    stream.write(source); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temporary, path)
+                descriptor = os.open(path.parent, os.O_RDONLY)
+                try: os.fsync(descriptor)
+                finally: os.close(descriptor)
+            finally:
+                temporary.unlink(missing_ok=True)
+            if _file_sha256(path) != controller_sha:
+                raise ProtocolError("Controller snapshot checksum verification failed")
         record = {"version_id": version_id, "controller_sha256": controller_sha,
                   "path": f"run://controller_versions/{path.name}",
                   "trial_index": trial_index, "environment_generation":
@@ -426,7 +463,9 @@ class AgentLoop:
                        "original_chars": len(encoded_summary),
                        "sha256": hashlib.sha256(encoded_summary.encode()).hexdigest(),
                        "preview": encoded_summary[:8000]}
-        return HarnessMetadata.from_evidence(evidence).as_reference(summary=summary)
+        reference = HarnessMetadata.from_evidence(evidence).as_reference(summary=summary)
+        reference["execution_kind"] = evidence.get("execution_kind", "physical_trial")
+        return reference
 
     def _agent_evidence(self, evidence: Mapping[str, Any]) -> dict[str, Any]:
         value = evidence.get("agent_evidence")
@@ -726,6 +765,8 @@ class AgentLoop:
         registry.add("run_controller", "Execute the current controller once and return sensor evidence.",
                      self._schema(), lambda: self._agent_evidence(self._run_controller()),
                      consequence="PHYSICAL_INTERVENTION")
+        registry.add("run_diagnostic", "Run a bounded read-only diagnostic Controller without consuming a physical trial.",
+                     self._schema(), lambda: self._agent_evidence(self._run_diagnostic()))
         registry.add("record_decision",
                      "Record the model's concise externally stated decision context.",
                      self._schema({"decision_id": {"type": ["string", "null"]},
@@ -817,7 +858,9 @@ class AgentLoop:
                            or f"evidence://execution-{len(refs)+1:06d}")
                 except ProtocolError:
                     continue
-                refs.append({"evidence_ref": ref, "summary": payload.get("summary") or {}})
+                refs.append({"evidence_ref": ref,
+                             "execution_kind": payload.get("execution_kind", "physical_trial"),
+                             "summary": payload.get("summary") or {}})
         return {"executions": refs[-64:]}
 
     def _version(self, version_id):
@@ -883,7 +926,10 @@ class AgentLoop:
                   "trial_index": self.trial_index, "notes": notes,
                   "related_progress_ids": self._validate_related_progress(
                       related_progress_ids)}
-        self.progress_ledger.append(record); self._persist_learning_state(); return record
+        self.progress_ledger.append(record); self._persist_learning_state()
+        self.event_store.commit("progress_recorded", {"progress_id": record["progress_id"],
+                                                        "status": record["status"]})
+        return record
 
     def _update_progress(self, progress_id, summary, status, evidence_refs, notes=None,
                          related_progress_ids=None):
@@ -895,7 +941,10 @@ class AgentLoop:
                            else self._validate_related_progress(related_progress_ids))
                 record.update(summary=str(summary), status=str(status), evidence_refs=refs,
                               notes=notes, related_progress_ids=related)
-                self._persist_learning_state(); return dict(record)
+                self._persist_learning_state()
+                self.event_store.commit("progress_updated", {"progress_id": record["progress_id"],
+                                                               "status": record["status"]})
+                return dict(record)
         raise ProtocolError("unknown progress record")
 
     def _inspect_execution(self, evidence_ref: str | None = None):
@@ -1443,9 +1492,14 @@ class AgentLoop:
         begin = getattr(self.adapter, "begin_controller_execution", None)
         if callable(begin):
             begin()
-        result = self.runtime.execute(self.workspace.controller, self.adapter)
-        self.trial_control_steps = int(getattr(self.adapter, "step", 0) or 0)
-        self.cumulative_control_steps += self.trial_control_steps
+        result = self.runtime.execute(self.workspace.controller, self.adapter,
+                                      execution_kind="physical_trial")
+        self.controller_control_steps = int(getattr(self.adapter, "controller_control_steps",
+                                                     getattr(self.adapter, "step", 0)) or 0)
+        self.warmup_control_steps = int(getattr(self.adapter, "warmup_control_steps", 0) or 0)
+        self.trial_control_steps = self.controller_control_steps
+        self.cumulative_controller_control_steps += self.controller_control_steps
+        self.cumulative_control_steps = self.cumulative_controller_control_steps
         self._register_artifacts(result)
         report = self.adapter.sensor_report(result)
         public_provider = getattr(self.adapter, "agent_evidence", None)
@@ -1480,6 +1534,11 @@ class AgentLoop:
             transformed_execution, public_report, digest=digest,
             evidence_ref=evidence_ref).as_dict()
         agent_evidence["trial"] = {"trial_index": self.trial_index,
+                                   "execution_kind": "physical_trial",
+                                   "warmup_control_steps": self.warmup_control_steps,
+                                   "controller_control_steps": self.controller_control_steps,
+                                   "total_trial_control_steps": self.warmup_control_steps + self.controller_control_steps,
+                                   "cumulative_controller_control_steps": self.cumulative_controller_control_steps,
                                    "trial_control_steps": self.trial_control_steps,
                                    "cumulative_control_steps": self.cumulative_control_steps,
                                    "trial_horizon_exhausted": bool(getattr(
@@ -1502,6 +1561,7 @@ class AgentLoop:
                 or not isinstance(receipt.get("verified"), bool)):
             raise ProtocolError("Adapter verification receipt is not bound to this execution")
         evidence = {"execution": result, "sensor_report": report, "controller_sha256": controller_sha,
+                    "execution_kind": "physical_trial",
                     "execution_key": execution_key,
                     "environment_identity": identity,
                     "verification_receipt": receipt,
@@ -1511,6 +1571,10 @@ class AgentLoop:
                     "decision_id": decision_id,
                     "trial_index": self.trial_index,
                     "trial_control_steps": self.trial_control_steps,
+                    "warmup_control_steps": self.warmup_control_steps,
+                    "controller_control_steps": self.controller_control_steps,
+                    "total_trial_control_steps": self.warmup_control_steps + self.controller_control_steps,
+                    "cumulative_controller_control_steps": self.cumulative_controller_control_steps,
                     "cumulative_control_steps": self.cumulative_control_steps,
                     "trial_horizon_exhausted": bool(getattr(
                         self.adapter, "trial_horizon_exhausted", False)),
@@ -1564,6 +1628,42 @@ class AgentLoop:
         self.state["pending_execution"] = None
         self.state["completed_execution"] = {"execution_key": execution_key,
                                               "call_id": call_id}
+        return evidence
+
+    def _run_diagnostic(self):
+        """Execute read-only Controller code under an independent finite budget."""
+        if self.runtime is None:
+            raise RuntimeError("controller runtime is not configured")
+        if self.budget.diagnostics_exhausted():
+            raise ProtocolError("diagnostic budget exhausted")
+        self.budget.diagnostics += 1
+        result = self.runtime.execute(self.workspace.controller, self.adapter,
+                                      execution_kind="diagnostic")
+        report = self.adapter.sensor_report(result)
+        evidence = {"execution": result, "sensor_report": report,
+                    "execution_kind": "diagnostic",
+                    "controller_sha256": result.get("program_sha256"),
+                    "environment_identity": self._execution_identity(),
+                    "diagnostic_index": self.budget.diagnostics}
+        evidence_dir = self.root / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = evidence_dir / f"diagnostic-{self.budget.diagnostics:06d}-{result['program_sha256'][:12]}.json"
+        temporary = evidence_path.with_suffix(".tmp")
+        try:
+            with temporary.open("w") as stream:
+                stream.write(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n")
+                stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, evidence_path)
+            descriptor = os.open(evidence_dir, os.O_RDONLY)
+            try: os.fsync(descriptor)
+            finally: os.close(descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
+        evidence["artifact_uri"] = f"run://evidence/{evidence_path.name}"
+        evidence["artifact_sha256"] = _file_sha256(evidence_path)
+        self.event_store.commit("execution", {"execution_kind": "diagnostic",
+                                                "artifact_uri": evidence["artifact_uri"],
+                                                "summary": {"diagnostic_index": self.budget.diagnostics}})
         return evidence
 
     def _messages(self, task: str):
@@ -1772,6 +1872,8 @@ class AgentLoop:
                               + self.budget.elapsed()},
             "trial_index": self.trial_index,
             "cumulative_control_steps": self.cumulative_control_steps,
+            "cumulative_controller_control_steps": self.cumulative_controller_control_steps,
+            "diagnostics": self.budget.diagnostics,
             "controller_versions": self.controller_versions[-128:],
             "progress_ledger": self.progress_ledger[-128:],
             "latest_evidence": (self._evidence_reference(self.latest_evidence)

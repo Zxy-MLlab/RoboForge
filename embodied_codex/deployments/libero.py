@@ -112,7 +112,8 @@ class LiberoDeployment:
                 raise LiberoDeploymentError(f"invalid deployment Tool contract {tool_id}: {exc}") from exc
         self.verifiers=dict(verifiers or {});self.references={};self._retired_references=set();self.trace=[];self.video=[]
         self.verified_attachments=set()
-        self.step=0;self.frame=0;self.closed=False;self.last_verify=False
+        self.step=0;self.warmup_control_steps=0;self.controller_control_steps=0
+        self.closed=False;self.last_verify=False
         self.environment_generation=""
         self._controller_execution_sealed=False;self._evaluator_calls=0
         self.outcome_verifier=outcome_verifier;self._outcome_report=None
@@ -164,6 +165,8 @@ class LiberoDeployment:
         self._controller_execution_sealed = False
         self._outcome_before = self._capture_outcome_rgb("before")
         self._evaluator_calls = 0
+        self.controller_control_steps = 0
+        self.trial_horizon_exhausted = False
 
     def _finalize_execution_artifacts(self):
         directory = self.artifact_dir / "executions" / f"execution-{self._execution_index:06d}"
@@ -193,7 +196,8 @@ class LiberoDeployment:
         self.obs = self.env.reset()
         self.obs = self.env.set_init_state(self._init_states[self.episode.initial_state_index])
         self.environment_generation = uuid.uuid4().hex
-        self.step = 0; self.frame = 0; self.trace = []; self.video = []
+        self.step = 0; self.warmup_control_steps = 0; self.controller_control_steps = 0
+        self.frame = 0; self.trace = []; self.video = []
         self.trial_horizon_exhausted = False
         self.references = {}; self.last_verify = False
         self.verified_attachments = set()
@@ -203,8 +207,10 @@ class LiberoDeployment:
         self._controller_artifacts = {}
         self._controller_artifact_paths = {}
         if self._warmup_steps:
+            self._in_warmup = True
             for _ in range(self._warmup_steps):
                 self._sim_step(np.r_[np.zeros(6),-1.0])
+            self._in_warmup = False
             self.trace.append({"event":"adapter_warmup","steps":self._warmup_steps,
                                "controller_visible":True})
         self._outcome_before = None
@@ -227,6 +233,14 @@ class LiberoDeployment:
             raise LiberoDeploymentError(f"invalid dynamic Tool contract {tool_id}: {exc}") from exc
         self.capabilities[str(tool_id)]=function
         self.capability_contracts[str(tool_id)]=value
+
+    def capability_consequence(self, tool_id):
+        contract = self.capability_contracts.get(str(tool_id), {})
+        return str(contract.get("consequence", "READ_ONLY")).upper()
+
+    def native_capability_index(self):
+        return [{**dict(item), "source": "native"}
+                for item in self.native_capability_manifest().values()]
 
     def native_capability_manifest(self):
         result = {}
@@ -451,11 +465,16 @@ class LiberoDeployment:
         self.trace.append({"event":"observe","frame_id":frame_id,"step":self.step});return report
 
     def _sim_step(self,action):
-        if self.step>=self.episode.horizon:
+        controller_steps = int(getattr(self, "controller_control_steps", self.step) or 0)
+        if not getattr(self, "_in_warmup", False) and controller_steps >= self.episode.horizon:
             self.trial_horizon_exhausted = True
             raise LiberoDeploymentError("action horizon exhausted")
         obs,_reward,_done,_info=self.env.step(np.clip(action,-1,1).tolist())
         self.obs=obs;self.step+=1
+        if getattr(self, "_in_warmup", False):
+            self.warmup_control_steps += 1
+        else:
+            self.controller_control_steps += 1
         if self.step%3==0:self.video.append(np.ascontiguousarray(self.obs["agentview_image"][::-1]))
 
     def _capture_outcome_rgb(self, name):

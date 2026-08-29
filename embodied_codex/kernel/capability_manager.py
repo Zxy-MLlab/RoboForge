@@ -61,10 +61,23 @@ class CapabilityManager:
         for name, library in (("tools", self.tool_library), ("skills", self.skill_library),
                               ("experiences", self.experience_library)):
             if library is not None:
-                result[name] = library.search(query, limit=limit, statuses=statuses)
+                rows = library.search(query, limit=limit, statuses=statuses)
+                source = "shared" if name == "tools" else name.rstrip("s")
+                result[name] = [{**dict(row), "source": source} for row in rows]
         if include_gaps and self.gap_library is not None:
             result["gaps"] = self.gap_library.search(query, limit=limit,
                                                       statuses={"observed", "open"})
+        native = getattr(self.adapter, "native_capability_index", None)
+        if callable(native):
+            rows = []
+            query_terms = str(query).lower().split()
+            for row in native() or []:
+                item = dict(row)
+                haystack = " ".join(str(item.get(key, "")) for key in
+                                    ("capability_id", "purpose", "description", "keywords", "tags")).lower()
+                if not query_terms or all(term in haystack for term in query_terms):
+                    item["source"] = "native"; rows.append(item)
+            result["native"] = rows[:limit]
         return result
 
     def inspect(self, asset_id: str):

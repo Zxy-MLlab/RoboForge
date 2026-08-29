@@ -50,7 +50,7 @@ def _sdk_index(capabilities, verifiers, contracts=None):
     def action_contract(name, contract):
         return {key: value for key, value in contract.items()
                 if key in {"required", "any_of", "enum", "optional", "field_semantics",
-                           "rule", "example"}}
+                           "rule", "example", "examples"}}
 
     purposes = {
         "libero.rgbd_perception:v001":

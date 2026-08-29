@@ -89,6 +89,12 @@ class FakeAdapter:
         self.capabilities[str(tool_id)] = function
         self.contracts[str(tool_id)] = dict(contract)
 
+    def capability_consequence(self, tool_id):
+        return str(self.contracts.get(str(tool_id), {}).get("consequence", "READ_ONLY")).upper()
+
+    def native_capability_index(self):
+        return []
+
     def dispatch(self, method, arguments):
         if self.closed:
             raise RuntimeError("Adapter is closed")
