@@ -582,6 +582,25 @@ def test_decision_record_is_external_structured_context_and_links_execution(tmp_
     assert str(tmp_path) not in encoded
 
 
+def test_inspect_later_execution_ignores_non_evidence_decision_links(tmp_path):
+    adapter = FakeAdapter("set marker", tmp_path / "adapter")
+    loop = _loop(tmp_path, object(), adapter=adapter, resume=False)
+    loop.workspace.write_file("controller.py", "def run(robot):\n"
+                              "    robot.act({'type':'set_value','value':1})\n"
+                              "    return robot.verify('target', {})\n")
+
+    for index in (1, 2):
+        loop._active_tool_call_id = f"decision-{index}"
+        loop._record_decision(goal="set marker", evidence_refs=[], hypothesis="h",
+                              decision="execute", expected_effect="observe result",
+                              uncertainty="u")
+        loop._active_tool_call_id = None
+        loop._run_controller()
+
+    inspected = loop._inspect_execution("evidence://execution-000002")
+    assert inspected["evidence_ref"] == "evidence://execution-000002"
+
+
 def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):
     adapter = FakeAdapter("set marker", tmp_path / "adapter")
     loop = _loop(tmp_path, object(), adapter=adapter, resume=False)

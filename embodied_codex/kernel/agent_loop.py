@@ -973,6 +973,8 @@ class AgentLoop:
     def _inspect_execution(self, evidence_ref: str | None = None):
         if evidence_ref:
             for row in self.event_store.events():
+                if row.get("kind") != "execution":
+                    continue
                 payload = row.get("payload") or {}
                 if payload.get("artifact_uri"):
                     evidence = self._load_evidence_reference(payload)

@@ -1,0 +1,8 @@
+{
+  "baseline_sha": "ce260a73eb35abff69a270be317395133508ae13",
+  "classification": "A",
+  "hypothesis": "authoritative execution-event filtering",
+  "primary_metric": "valid inspect_execution conversion",
+  "reproduction": "two generic FakeAdapter executions with intervening decision links",
+  "task_specific_logic": false
+}
