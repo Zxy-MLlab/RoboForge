@@ -5,7 +5,7 @@
   "classification": "H-candidate",
   "hypothesis": "authoritative guarded line-edit digest",
   "stage_1_deterministic_regression": {
-    "status": "not_started",
+    "status": "passed",
     "invariant": "A digest returned for an unchanged read range guards replacement successfully, while a changed range fails closed.",
     "required_boundaries": [
       "LF with final newline",
@@ -18,7 +18,7 @@
     ]
   },
   "stage_2_autonomous_comparison": {
-    "status": "not_started",
+    "status": "inconclusive",
     "adapter": "FakeAdapter",
     "provider": "apex",
     "model": "gpt-5.6-sol",
