@@ -1,15 +1,78 @@
 {
   "status": "not_started",
-  "baseline_sha": "012af7d602f9c8052b66e9f4313fc56fc8fed7a1",
+  "baseline_harness_sha": "fe9506f113356204caf688cd41ef728bcec244ac",
+  "protocol_parent_sha": "33113c5fc5b1415de8b5fe155490ccceac17436b",
   "classification": "H-candidate",
   "hypothesis": "authoritative guarded line-edit digest",
-  "primary_metric": "guarded replace_file_lines conversion rate",
-  "secondary_metrics": [
-    "WorkspaceError file-changed rate",
-    "model calls per validated Controller edit"
+  "stage_1_deterministic_regression": {
+    "status": "not_started",
+    "invariant": "A digest returned for an unchanged read range guards replacement successfully, while a changed range fails closed.",
+    "required_boundaries": [
+      "LF with final newline",
+      "last line without final newline",
+      "CRLF normalized consistently",
+      "change outside selected range",
+      "change inside selected range",
+      "empty and nonexistent file",
+      "model-visible schema relationship"
+    ]
+  },
+  "stage_2_autonomous_comparison": {
+    "status": "not_started",
+    "adapter": "FakeAdapter",
+    "provider": "apex",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "conditions": [
+      "baseline",
+      "candidate"
+    ],
+    "generic_task_variants": [
+      "narrow edit to an inspected existing Controller",
+      "multi-line edit to an inspected existing Controller"
+    ],
+    "replicates_per_variant_and_condition": 2,
+    "max_agent_steps": 12,
+    "max_physical_trials": 1,
+    "prompt_must_not_require_guard_use": true,
+    "frozen_variables": [
+      "model",
+      "reasoning effort",
+      "task variant",
+      "initial workspace",
+      "budgets",
+      "Tool availability"
+    ]
+  },
+  "primary_metrics": [
+    "successful guarded replacements / guarded replacement attempts",
+    "WorkspaceError file-changed results / replacement attempts"
   ],
-  "first_reproduction": "generic PersistentWorkspace only",
-  "embodied_validation": "not_started",
+  "secondary_metrics": [
+    "model calls per validated Controller edit",
+    "successful Controller edits / attempted Controller edits",
+    "unintended overwrite or guard-bypass count",
+    "serialized context characters added per read"
+  ],
+  "keep_gate": [
+    "baseline regression fails and candidate regression passes",
+    "changed selected ranges remain fail closed",
+    "no safety or atomicity invariant weakens",
+    "autonomous comparison shows natural guarded-edit conversion without higher protocol friction",
+    "no task-specific behavior is introduced"
+  ],
+  "revert_gate": [
+    "guard mismatch can overwrite changed selected text",
+    "benefit requires prompting the model to use the guard",
+    "the model-facing edit loop becomes more complex",
+    "autonomous runs show no usable conversion benefit",
+    "context cost is disproportionate to observed use"
+  ],
+  "stage_3_multitask_validation": {
+    "status": "not_started_pending_authorization",
+    "scope": "same frozen Harness comparison on more than one development task",
+    "task_success_is_primary_metric": false
+  },
   "cross_environment_validation": "pending",
   "task_specific_logic": false
 }

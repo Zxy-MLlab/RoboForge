@@ -20,3 +20,8 @@ Static audit further constrains the direction:
 - adding the result field must not change existing `content` or line-number
   semantics;
 - CRLF normalization is existing behavior and is not part of this hypothesis.
+
+Rejected alternatives are recorded in `alternatives.md`. In particular, the
+candidate must not remove or ignore the guard, substitute a stricter whole-file
+lock, require the model to compute a digest in another Tool turn, or introduce
+an opaque revision-token system.

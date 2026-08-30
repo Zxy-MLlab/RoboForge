@@ -14,6 +14,11 @@ Investigation only.
   changes remain fail closed; newline normalization must be shared.
 - Estimated context cost: approximately 81 serialized characters per read,
   648 characters across the eight reads in the four valid H0004 runs.
+- Experimental design: deterministic safety regression followed by an
+  unprompted autonomous FakeAdapter comparison; KEEP/REVERT gates are
+  preregistered in `experiment-protocol.json`.
+- Alternative analysis: removing/ignoring the guard, whole-file locking,
+  displayed-content hashing, and automatic retry were rejected before coding.
 - Production change: none.
 - New regression: none.
 - New embodied experiment: none.
