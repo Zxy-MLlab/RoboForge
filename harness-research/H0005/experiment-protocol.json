@@ -1,0 +1,15 @@
+{
+  "status": "not_started",
+  "baseline_sha": "012af7d602f9c8052b66e9f4313fc56fc8fed7a1",
+  "classification": "H-candidate",
+  "hypothesis": "authoritative guarded line-edit digest",
+  "primary_metric": "guarded replace_file_lines conversion rate",
+  "secondary_metrics": [
+    "WorkspaceError file-changed rate",
+    "model calls per validated Controller edit"
+  ],
+  "first_reproduction": "generic PersistentWorkspace only",
+  "embodied_validation": "not_started",
+  "cross_environment_validation": "pending",
+  "task_specific_logic": false
+}
