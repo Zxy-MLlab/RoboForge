@@ -792,7 +792,10 @@ class AgentLoop:
                      "Record the model's concise externally stated decision context.",
                      self._schema({"decision_id": {"type": ["string", "null"]},
                                    "goal": {"type": ["string", "null"]},
-                                   "evidence_refs": {"type": "array", "items": string,
+                                   "evidence_refs": {"type": "array", "items": {
+                                                      "type": "string", "minLength": 1,
+                                                      "pattern": "^(evidence|artifact|run)://",
+                                                      "description": "Opaque evidence, artifact, or run reference returned by Harness tools."},
                                                       "maxItems": 16},
                                    "hypothesis": {"type": ["string", "null"]},
                                    "decision": {"type": ["string", "null"]},

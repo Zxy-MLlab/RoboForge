@@ -628,6 +628,16 @@ def test_controller_execution_tools_declare_source_entrypoint(tmp_path):
         assert "def run(robot)" in description
 
 
+def test_decision_schema_declares_opaque_evidence_reference_formats(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    schema = next(item["function"] for item in loop.tools.schemas
+                  if item["function"]["name"] == "record_decision")
+    evidence_items = schema["parameters"]["properties"]["evidence_refs"]["items"]
+
+    assert evidence_items["pattern"] == "^(evidence|artifact|run)://"
+    assert "returned by" in evidence_items["description"]
+
+
 def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):
     adapter = FakeAdapter("set marker", tmp_path / "adapter")
     loop = _loop(tmp_path, object(), adapter=adapter, resume=False)
