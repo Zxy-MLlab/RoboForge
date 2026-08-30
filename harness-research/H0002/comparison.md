@@ -18,3 +18,8 @@ Two paired generic autonomous runs reduced observed missing-Decision rejection
 rate from 17.2% to 4.3%. Total errors also fell from 12 to 9, while physical
 trials increased from 1 to 2. The sample is small and stochastic, so this is
 evidence for reduced interaction friction, not a performance guarantee.
+
+The later cumulative two-task LIBERO comparison observed five such rejections
+on the frozen baseline and none on the Candidate. The Candidate still had
+model-authored Tool schema failures on Task 2, so the result is limited to the
+mechanical Decision prerequisite and does not imply better task solving.

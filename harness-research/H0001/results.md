@@ -12,3 +12,14 @@ passed after the one-guard fix.
 Cross-environment embodied validation remains pending because this is a narrow
 EventStore correctness fix and only LIBERO is deployed. The generic FakeAdapter
 reproduction demonstrates that the defect is independent of task semantics.
+
+## H0004 cumulative cross-task validation
+
+The cumulative baseline/candidate LIBERO comparison is preserved at
+`/root/autodl-tmp/harness-validation-H0004/comparison.md`. None of the four
+valid runs called `inspect_execution`, so this experiment supplies no direct
+embodied validation for H0001. It also exposes no contrary routing result.
+
+Decision: **KEEP** based on the independently reproduced A-class defect, exact
+generic regression, and unchanged digest/path validation. Cross-environment
+embodied validation remains pending.

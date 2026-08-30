@@ -25,3 +25,20 @@ Validation:
 - `git diff --check`: passed.
 
 Cross-environment validation remains pending.
+
+## H0004 cumulative cross-task validation
+
+On LIBERO Task 1, the frozen baseline attempted one diagnostic before creating
+the Controller and later consumed its physical trial with
+`controller must define run(robot)`. The cumulative Candidate committed two
+diagnostic evidence objects and then ran an action-bearing physical Controller
+for 158 Controller steps. This is a direct code-to-execution conversion result.
+
+Task 2 did not reproduce the same contrast: its baseline already used a valid
+entrypoint, while the Candidate did not attempt a diagnostic and its two
+physical Controllers stopped on model-authored capability input errors. Those
+errors are outside H0003's source/entrypoint contract and do not show an H0003
+regression.
+
+Decision: **KEEP**, with cross-task benefit still incomplete and
+cross-environment validation pending. No task-performance claim is made.

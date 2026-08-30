@@ -28,3 +28,14 @@ Validation:
 - full suite: 249 passed, 3 third-party deprecation warnings;
 - `python -m compileall -q embodied_codex evaluation`: passed;
 - `git diff --check`: passed.
+
+## H0004 cumulative cross-task validation
+
+Across the four valid controlled LIBERO runs, the frozen baseline produced five
+missing-Decision rejections in 44 Tool calls: three on Task 1 and two on Task 2.
+The cumulative Candidate produced zero in 36 Tool calls across the same two
+tasks. Overall ProtocolError results changed from 8/44 to 0/36.
+
+This supports the intended generic protocol-friction metric across more than
+one LIBERO task. It does not support a task-success claim. Decision: **KEEP**.
+Cross-environment validation remains pending.
