@@ -195,19 +195,24 @@ class PersistentWorkspace:
             return {"path": path, "exists": False, "content": "", "total_lines": 0}
         if target.stat().st_size > 16 * 1024 * 1024:
             raise WorkspaceError("large files require a specialized artifact viewer")
-        data = target.read_bytes()
         try:
-            text = data.decode("utf-8")
+            # Keep this text path identical to guarded replacement so the
+            # returned range digest is directly usable by that operation.
+            text = target.read_text()
         except UnicodeDecodeError as exc:
             raise WorkspaceError("binary files cannot be read as text; use view_sensor_artifact") from exc
         if "\0" in text:
             raise WorkspaceError("binary files cannot be read as text; use view_sensor_artifact")
+        lines_with_endings = text.splitlines(keepends=True)
         lines = text.splitlines()
         start = max(1, int(start_line))
         end = min(max(start, int(end_line)), start + 399, len(lines))
+        selected = "".join(lines_with_endings[start - 1:end]) if start <= end else ""
         return {"path": path, "exists": True, "start_line": start,
                 "end_line": end, "total_lines": len(lines),
                 "content": "\n".join(lines[start - 1:end]),
+                "range_sha256": hashlib.sha256(selected.encode()).hexdigest()
+                if selected else None,
                 "next_start_line": end + 1 if end < len(lines) else None}
 
     def read(self, relative: str, *, max_chars: int = 20_000) -> str:

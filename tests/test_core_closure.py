@@ -16,7 +16,7 @@ from embodied_codex.kernel.context_window import ContextWindowManager, ResourceB
 from embodied_codex.kernel.events import EventStore, EventStoreError
 from embodied_codex.kernel.evidence import AgentEvidence, build_execution_digest
 from embodied_codex.kernel.runtime import ControllerRuntime
-from embodied_codex.kernel.workspace import PersistentWorkspace
+from embodied_codex.kernel.workspace import PersistentWorkspace, WorkspaceError
 from embodied_codex.kernel.sandbox import UnsafeSandboxBackend
 from embodied_codex.kernel.tools import ToolRegistry
 
@@ -636,6 +636,77 @@ def test_decision_schema_declares_opaque_evidence_reference_formats(tmp_path):
 
     assert evidence_items["pattern"] == "^(evidence|artifact|run)://"
     assert "returned by" in evidence_items["description"]
+
+
+def test_read_range_digest_can_guard_atomic_line_replacement(tmp_path):
+    workspace = PersistentWorkspace(tmp_path / "run" / "workspace",
+                                    require_sandbox=False)
+    workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+
+    inspected = workspace.read_file("controller.py", 2, 2)
+    assert inspected["range_sha256"] == hashlib.sha256(b"beta\n").hexdigest()
+    workspace.replace_file_lines("controller.py", 2, 2, "BETA\n",
+                                 inspected["range_sha256"])
+    assert workspace.read("controller.py") == "alpha\nBETA\ngamma"
+
+
+def test_read_range_digest_preserves_stale_write_protection(tmp_path):
+    workspace = PersistentWorkspace(tmp_path / "run" / "workspace",
+                                    require_sandbox=False)
+    workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+    inspected = workspace.read_file("controller.py", 2, 2)
+
+    workspace.write_file("controller.py", "alpha\nchanged\ngamma\n")
+    with pytest.raises(WorkspaceError, match="file changed"):
+        workspace.replace_file_lines("controller.py", 2, 2, "BETA\n",
+                                     inspected["range_sha256"])
+
+
+def test_line_edit_schema_explains_read_range_digest_contract(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    schemas = {item["function"]["name"]: item["function"]
+               for item in loop.tools.schemas}
+    read_result = loop.workspace.read_file("missing.py", 1, 1)
+    assert "range_sha256" in read_result or not read_result["exists"]
+    description = schemas["replace_file_lines"]["description"]
+    assert "range_sha256" in description
+    assert "read_file" in description
+
+
+@pytest.mark.parametrize("initial", ["alpha\nbeta", "alpha\r\nbeta\r\n"])
+def test_read_range_digest_handles_line_endings(tmp_path, initial):
+    workspace = PersistentWorkspace(tmp_path / "run" / "workspace",
+                                    require_sandbox=False)
+    workspace.controller.write_bytes(initial.encode())
+    inspected = workspace.read_file("controller.py", 2, 2)
+    workspace.replace_file_lines("controller.py", 2, 2, "BETA\n",
+                                 inspected["range_sha256"])
+    assert workspace.controller.read_text() == "alpha\nBETA\n"
+
+
+def test_read_range_digest_allows_non_overlapping_change_but_rejects_overlap(tmp_path):
+    workspace = PersistentWorkspace(tmp_path / "run" / "workspace",
+                                    require_sandbox=False)
+    workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+    inspected = workspace.read_file("controller.py", 2, 2)
+
+    workspace.write_file("controller.py", "alpha\nbeta\nGAMMA\n")
+    workspace.replace_file_lines("controller.py", 2, 2, "BETA\n",
+                                 inspected["range_sha256"])
+    assert workspace.read("controller.py") == "alpha\nBETA\nGAMMA"
+
+    workspace.write_file("controller.py", "alpha\nchanged\nGAMMA\n")
+    with pytest.raises(WorkspaceError, match="file changed"):
+        workspace.replace_file_lines("controller.py", 2, 2, "BETA\n",
+                                     inspected["range_sha256"])
+
+
+def test_read_range_digest_is_absent_for_missing_file(tmp_path):
+    workspace = PersistentWorkspace(tmp_path / "run" / "workspace",
+                                    require_sandbox=False)
+    result = workspace.read_file("missing.py", 1, 1)
+    assert result == {"path": "missing.py", "exists": False, "content": "",
+                      "total_lines": 0}
 
 
 def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):

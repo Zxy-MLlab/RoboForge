@@ -686,13 +686,13 @@ class AgentLoop:
                      registry.deactivate)
         registry.add("list_files", "List files in the persistent workspace.", self._schema({"pattern": string}),
                      lambda pattern="**/*": ws.list_files(pattern))
-        registry.add("read_file", "Read a bounded line range from a workspace file.", self._schema(
+        registry.add("read_file", "Read a bounded line range from a workspace file. The result includes range_sha256; pass that exact value as expected_old_sha256 to replace_file_lines.", self._schema(
             {"path": string, "start_line": integer, "end_line": integer}, ["path"]),
             lambda path, start_line=1, end_line=400: ws.read_file(path, start_line, end_line))
         registry.add("write_file", "Atomically write one workspace file.", self._schema(
             {"path": string, "content": string}, ["path", "content"]), ws.write_file,
             consequence="WORKSPACE_MUTATION")
-        registry.add("replace_file_lines", "Atomically replace an inspected line range.", self._schema(
+        registry.add("replace_file_lines", "Atomically replace an inspected line range. expected_old_sha256 must be the range_sha256 from the most recent read_file of this exact line range.", self._schema(
             {"path": string, "start_line": integer, "end_line": integer, "new_content": string,
              "expected_old_sha256": string}, ["path", "start_line", "end_line", "new_content"]), ws.replace_file_lines,
             consequence="WORKSPACE_MUTATION")
