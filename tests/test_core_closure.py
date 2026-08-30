@@ -617,6 +617,17 @@ def test_consequential_tool_schema_declares_decision_prerequisite():
     assert "record_decision" not in schemas["inspect"]["description"]
 
 
+def test_controller_execution_tools_declare_source_entrypoint(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    schemas = {item["function"]["name"]: item["function"]
+               for item in loop.tools.schemas}
+
+    for name in ("run_controller", "run_diagnostic"):
+        description = schemas[name]["description"]
+        assert "controller.py" in description
+        assert "def run(robot)" in description
+
+
 def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):
     adapter = FakeAdapter("set marker", tmp_path / "adapter")
     loop = _loop(tmp_path, object(), adapter=adapter, resume=False)

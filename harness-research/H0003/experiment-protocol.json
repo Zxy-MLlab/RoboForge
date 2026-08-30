@@ -1,0 +1,12 @@
+{
+  "baseline_sha": "df1efb1",
+  "classification": "H",
+  "hypothesis": "model-visible Controller entrypoint contract",
+  "model": "gpt-5.6-sol",
+  "provider": "apex",
+  "task_family": "generic FakeAdapter public marker",
+  "max_steps": 12,
+  "max_physical_trials": 2,
+  "primary_metric": "completed diagnostic executions per attempt",
+  "task_specific_logic": false
+}

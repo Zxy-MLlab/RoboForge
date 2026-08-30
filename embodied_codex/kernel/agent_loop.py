@@ -783,10 +783,10 @@ class AgentLoop:
             ["name", "task", "failure_summary", "evidence_paths", "attempted_methods",
              "missing_capability", "blocked_reason", "next_steps"]), cap.record_gap,
             group="asset_authoring", consequence="ASSET_MUTATION")
-        registry.add("run_controller", "Execute the current controller once and return sensor evidence.",
+        registry.add("run_controller", "Execute workspace controller.py, which must define def run(robot), once and return sensor evidence.",
                      self._schema(), lambda: self._agent_evidence(self._run_controller()),
                      consequence="PHYSICAL_INTERVENTION")
-        registry.add("run_diagnostic", "Run a bounded read-only diagnostic Controller without consuming a physical trial.",
+        registry.add("run_diagnostic", "Run workspace controller.py, which must define def run(robot), as a bounded read-only diagnostic without consuming a physical trial.",
                      self._schema(), lambda: self._agent_evidence(self._run_diagnostic()))
         registry.add("record_decision",
                      "Record the model's concise externally stated decision context.",
