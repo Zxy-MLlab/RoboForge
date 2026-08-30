@@ -8,6 +8,12 @@ Investigation only.
   range despite no intervening mutation.
 - Generic temporary-workspace reproduction: confirmed public-content digest
   mismatch and unguarded success.
+- Static caller audit: no equivalent public range-digest mechanism exists and
+  no repository caller requires a closed `read_file` result shape.
+- Boundary audit: range-external changes remain mergeable; range-internal
+  changes remain fail closed; newline normalization must be shared.
+- Estimated context cost: approximately 81 serialized characters per read,
+  648 characters across the eight reads in the four valid H0004 runs.
 - Production change: none.
 - New regression: none.
 - New embodied experiment: none.
