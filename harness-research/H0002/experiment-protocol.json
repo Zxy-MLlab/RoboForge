@@ -1,0 +1,8 @@
+{
+  "baseline_sha": "9b2d1e35381ab385e2d6ab04a3221755a6d31429",
+  "classification": "H",
+  "hypothesis": "model-visible consequential-tool prerequisites",
+  "primary_metric": "decision prerequisite rejection rate",
+  "controlled_change": "description suffix derived from Tool consequence",
+  "task_specific_logic": false
+}

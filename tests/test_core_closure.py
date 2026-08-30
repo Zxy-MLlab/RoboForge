@@ -18,6 +18,7 @@ from embodied_codex.kernel.evidence import AgentEvidence, build_execution_digest
 from embodied_codex.kernel.runtime import ControllerRuntime
 from embodied_codex.kernel.workspace import PersistentWorkspace
 from embodied_codex.kernel.sandbox import UnsafeSandboxBackend
+from embodied_codex.kernel.tools import ToolRegistry
 
 
 def _call(name, arguments, identifier="call"):
@@ -599,6 +600,21 @@ def test_inspect_later_execution_ignores_non_evidence_decision_links(tmp_path):
 
     inspected = loop._inspect_execution("evidence://execution-000002")
     assert inspected["evidence_ref"] == "evidence://execution-000002"
+
+
+def test_consequential_tool_schema_declares_decision_prerequisite():
+    registry = ToolRegistry()
+    registry.add("mutate", "Mutate generic state.", {"type": "object"},
+                 lambda: None, consequence="WORKSPACE_MUTATION")
+    registry.add("inspect", "Inspect generic state.", {"type": "object"},
+                 lambda: None, consequence="READ_ONLY")
+
+    schemas = {item["function"]["name"]: item["function"]
+               for item in registry.schemas}
+    mutating_description = schemas["mutate"]["description"]
+    assert "WORKSPACE_MUTATION" in mutating_description
+    assert "record_decision" in mutating_description
+    assert "record_decision" not in schemas["inspect"]["description"]
 
 
 def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):

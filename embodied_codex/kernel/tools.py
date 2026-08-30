@@ -23,8 +23,12 @@ class KernelTool:
 
     @property
     def schema(self):
+        description = self.description
+        if self.consequence not in {"READ_ONLY", "VALIDATION"}:
+            description += (f" Consequence: {self.consequence}. Call record_decision "
+                            "before invoking this tool.")
         return {"type": "function", "function": {"name": self.name,
-                "description": self.description, "parameters": dict(self.parameters)}}
+                "description": description, "parameters": dict(self.parameters)}}
 
 
 class ToolRegistry:
