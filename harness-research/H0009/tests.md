@@ -14,3 +14,11 @@ Stage 1 generic regressions:
 Stage 2 autonomous FakeAdapter A/B measures false `finish` attempts, unchanged
 physical retries, calls before corrective edit, valid completion, and Tool
 errors.
+
+## Results so far
+
+- Baseline focused regression: `5 failed, 2 passed`; failures were the
+  preregistered missing public status, not fixture or protocol errors.
+- Candidate focused regression: `7 passed`.
+- Existing core/post-closure/correctness closure set: `73 passed`.
+- Autonomous A/B: not started.

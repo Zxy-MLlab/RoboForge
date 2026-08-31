@@ -95,6 +95,12 @@ class ContextBuilder:
             result["evidence_ref"] = value["evidence_ref"]
         if isinstance(value.get("decision_id"), str):
             result["decision_id"] = value["decision_id"]
+        physical_verification = value.get("physical_verification")
+        if (isinstance(physical_verification, Mapping)
+                and set(physical_verification) == {"verified"}
+                and isinstance(physical_verification.get("verified"), bool)):
+            result["physical_verification"] = {
+                "verified": physical_verification["verified"]}
         return result
 
     @staticmethod

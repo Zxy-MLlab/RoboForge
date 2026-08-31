@@ -1598,6 +1598,8 @@ class AgentLoop:
                 or receipt.get("environment_generation") != identity.get("environment_generation")
                 or not isinstance(receipt.get("verified"), bool)):
             raise ProtocolError("Adapter verification receipt is not bound to this execution")
+        agent_evidence["physical_verification"] = {
+            "verified": receipt["verified"]}
         evidence = {"execution": result, "sensor_report": report, "controller_sha256": controller_sha,
                     "execution_kind": "physical_trial",
                     "execution_key": execution_key,
