@@ -2,7 +2,9 @@
 
 ## Status
 
-Preregistered. No candidate Harness change is selected or implemented.
+Completed. No production Harness change was made. The forensic phase selected
+one candidate for separate generic reproduction: public physical-verification
+eligibility in AgentEvidence.
 
 ## Research question
 

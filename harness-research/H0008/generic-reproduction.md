@@ -1,7 +1,12 @@
 # Generic reproduction
 
-Not selected. H0008 begins with frozen real-LIBERO discovery.
+The completed forensic analysis selected one candidate for a separate H0009
+generic reproduction: public physical-verification eligibility in
+AgentEvidence. H0008 itself remains a no-change discovery iteration.
 
-If forensic analysis identifies one independently reproducible A/H candidate,
-its exact friction must first be reproduced with FakeAdapter before any Core
-change. C/D/B failures do not receive a generic Harness patch.
+The required FakeAdapter reproduction must create a physical trial where a
+Controller-local public verifier reports true but the Adapter's authentic
+physical receipt is false. Baseline AgentEvidence must demonstrate that the
+model cannot distinguish that state from completion-eligible evidence without
+calling `finish`. The candidate may expose only a public boolean; it must not
+expose receipt metadata or hidden evaluator state.

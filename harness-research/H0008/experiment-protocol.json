@@ -1,5 +1,5 @@
 {
-  "status": "preregistered_not_started",
+  "status": "completed",
   "phase": "frozen_real_discovery",
   "harness_sha": "d9bd7ce6f816bf2a9dcbae6b7608e7fa8a7c15fa",
   "production_change": false,
@@ -71,5 +71,11 @@
     "task success"
   ],
   "classification_vocabulary": ["A", "B", "C", "D", "H"],
-  "post_campaign_rule": "Select at most one generic A/H hypothesis. If none survives the stronger-model counterfactual, record that result and do not patch Core."
+  "post_campaign_rule": "Select at most one generic A/H hypothesis. If none survives the stronger-model counterfactual, record that result and do not patch Core.",
+  "result": {
+    "task_3": {"steps": 228, "physical_trials": 30, "completion_valid": false},
+    "task_4": {"steps": 373, "physical_trials": 30, "completion_valid": false},
+    "task_7": {"steps": 74, "physical_trials": 5, "completion_valid": true},
+    "selected_follow_up": "public physical-verification eligibility in AgentEvidence"
+  }
 }
