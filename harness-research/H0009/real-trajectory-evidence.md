@@ -14,3 +14,10 @@ after five trials.
 Source report:
 
 `/root/autodl-tmp/experiments/libero-real-20260831-h0008/forensic-analysis.md`
+
+The matched H0009 validation produced the following observable outcomes under
+the same task/state/budget protocol: task 3 exhausted 30 trials after 359
+calls; task 4 completed after 13 trials and 126 calls; task 7 exhausted 30
+trials after 466 calls. This confirms that the projection is safe and truthful
+but that its benefit is trajectory-dependent rather than a universal task
+solver improvement.

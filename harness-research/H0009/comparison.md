@@ -58,3 +58,22 @@ disconnects or operator interruption. They remain preserved and are excluded
 mechanically rather than overwritten. Raw runs and the fixed valid-run manifest
 are under `/root/autodl-tmp/harness-validation-H0009/`; aggregate metrics are in
 `ab-metrics.json`.
+
+## Matched real LIBERO validation
+
+H0009 used the same task order `[3, 4, 7]`, state `0`, model/provider,
+reasoning settings, capability snapshot, budgets, sandbox, and reset protocol as
+H0008. The candidate run used 951 model calls, 1,037 Tool calls, 101 failed
+Tool calls, 73 physical trials, and completed task 4 only. H0008 used 675, 718,
+63, 65, and also completed one task. Per-task comparison:
+
+| Task | H0008 steps/trials/result | H0009 steps/trials/result |
+|---:|---|---|
+| 3 | 228 / 30 / false | 359 / 30 / false |
+| 4 | 373 / 30 / false | 126 / 13 / true |
+| 7 | 74 / 5 / true | 466 / 30 / false |
+
+This is a mixed real-world result, not a general score improvement. The
+candidate's factual projection was mechanically correct in all 73 physical
+evidence objects and did not alter diagnostics or private completion gates.
+The campaign produced no evidence of a generic safety or provenance regression.

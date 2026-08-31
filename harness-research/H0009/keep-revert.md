@@ -24,3 +24,15 @@ completion decision for the model.
 KEEP here authorizes preregistration of matched real LIBERO validation. It does
 not make task success sufficient evidence and does not authorize changing the
 candidate during a frozen run.
+
+## Real-validation disposition
+
+The matched run preserved safety and evidence integrity, and task 4 supplied a
+clear positive trajectory (126 calls/13 trials/valid completion versus 373/30/
+false on H0008). However, the campaign aggregate did not satisfy a strict
+global friction-reduction gate: task 3 and task 7 both exhausted 30 trials,
+aggregate calls and Tool failures increased, and unchanged reruns fell only
+from 31 to 23 while total trials increased from 65 to 73. The candidate is
+therefore retained as a narrow factual-evidence improvement, but no further
+H0009 Core expansion or task-specific tuning is authorized. Any future use must
+report this mixed result rather than claim a general LIBERO improvement.
