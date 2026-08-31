@@ -19,7 +19,7 @@ from .context_window import ContextWindowManager
 from .evidence import AgentEvidence, HarnessMetadata, build_execution_digest
 from .events import EventStore
 from .recovery import load_checkpoint, save_checkpoint
-from .tools import CONSEQUENCE_LEVELS, DECISION_CONTEXT_SCHEMA, ToolRegistry
+from .tools import CONSEQUENCE_LEVELS, ToolRegistry
 
 
 @dataclass
@@ -803,7 +803,7 @@ class AgentLoop:
                                    "uncertainty": {"type": ["string", "null"]}},
                                   ["goal", "evidence_refs", "hypothesis", "decision",
                                    "expected_effect", "uncertainty"]),
-                     self._record_decision, model_visible=False)
+                     self._record_decision)
         registry.add("list_decisions", "List bounded structured decision records.",
                      self._schema(), self._list_decisions)
         registry.add("reset_case", "Create a fresh episode for the selected case when the Adapter supports it.",
@@ -1832,14 +1832,6 @@ class AgentLoop:
                     else:
                         self._active_tool_call_id = normalized["id"]
                         metadata = self.tools.metadata(name)
-                        decision_context = None
-                        if metadata.consequence not in {"READ_ONLY", "VALIDATION"}:
-                            decision_context = arguments.pop("decision_context", None)
-                        if decision_context is not None:
-                            from jsonschema import Draft202012Validator
-                            Draft202012Validator(DECISION_CONTEXT_SCHEMA).validate(
-                                decision_context)
-                            self._record_decision(**dict(decision_context))
                         active_id = getattr(self, "_active_operation_decision_id", None)
                         active_record = self._decision_records.get(active_id, {}) if active_id else {}
                         pending_id = getattr(self, "_pending_decision_id", None)
