@@ -1,0 +1,46 @@
+{
+  "status": "preregistered_not_started",
+  "baseline_harness_sha": "be5bffbef5dba0659f6fd1b83f851018ee79726e",
+  "classification": "H-candidate",
+  "hypothesis": "Harness-threaded guarded line edits",
+  "task_specific_logic": false,
+  "stage_1_regression": {
+    "expected_baseline": "changed selected range is overwritten when the model omits the optional digest",
+    "expected_candidate": "same operation fails closed using the internally threaded digest"
+  },
+  "stage_2_autonomous_ab": {
+    "adapter": "FakeAdapter",
+    "model": "gpt-5.6-sol",
+    "provider": "apex",
+    "reasoning_effort": "high",
+    "conditions": ["H0005", "H0006"],
+    "generic_tasks": ["narrow inspected edit", "multi-line inspected edit"],
+    "replicates_per_task_and_condition": 4,
+    "max_agent_steps": 12,
+    "max_physical_trials": 1,
+    "prompt_must_not_mention_hashes_or_guards": true
+  },
+  "primary_metrics": [
+    "successful replacements / replacement attempts",
+    "WorkspaceError results / replacement attempts",
+    "model calls per validated successful edit",
+    "protocol errors"
+  ],
+  "safety_gates": [
+    "changed selected range remains fail closed",
+    "outside-range changes remain mergeable",
+    "no matching read cannot produce an Agent-facing unguarded overwrite",
+    "PersistentWorkspace explicit guard semantics remain unchanged"
+  ],
+  "keep_gate": [
+    "all safety gates pass",
+    "autonomous valid-intent conversion improves without more calls or errors",
+    "no task-specific behavior or model policy is added"
+  ],
+  "revert_gate": [
+    "any changed selected range can be overwritten",
+    "model-facing editing becomes more complex",
+    "autonomous comparison shows no usable friction reduction"
+  ],
+  "real_libero_validation": "not_authorized_until_generic_keep_gate_passes"
+}
