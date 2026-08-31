@@ -20,7 +20,6 @@ from .evidence import AgentEvidence, HarnessMetadata, build_execution_digest
 from .events import EventStore
 from .recovery import load_checkpoint, save_checkpoint
 from .tools import CONSEQUENCE_LEVELS, ToolRegistry
-from .workspace import WorkspaceError
 
 
 @dataclass
@@ -619,27 +618,6 @@ class AgentLoop:
 
     def _build_tools(self):
         registry = ToolRegistry(); ws = self.workspace; cap = self.capability_manager
-        inspected_ranges: dict[tuple[str, int, int], str] = {}
-
-        def read_workspace_file(path: str, start_line: int = 1,
-                                end_line: int = 400):
-            result = ws.read_file(path, start_line, end_line)
-            digest = result.get("range_sha256")
-            if digest is not None:
-                inspected_ranges[(str(result["path"]), int(result["start_line"]),
-                                  int(result["end_line"]))] = str(digest)
-            return result
-
-        def replace_workspace_lines(path: str, start_line: int, end_line: int,
-                                    new_content: str):
-            key = (str(path), int(start_line), int(end_line))
-            digest = inspected_ranges.get(key)
-            if digest is None:
-                raise WorkspaceError(
-                    "read_file must inspect this exact line range before replacement")
-            return ws.replace_file_lines(path, start_line, end_line, new_content,
-                                         expected_old_sha256=digest)
-
         registry.declare_group("source_inspection",
             "Selective Tool implementation inspection after reading its manual and schema.")
         registry.declare_group("web_acquisition",
@@ -708,16 +686,15 @@ class AgentLoop:
                      registry.deactivate)
         registry.add("list_files", "List files in the persistent workspace.", self._schema({"pattern": string}),
                      lambda pattern="**/*": ws.list_files(pattern))
-        registry.add("read_file", "Read a bounded line range from a workspace file. Harness remembers the returned range for a later safe replace_file_lines call; do not compute or copy concurrency hashes.", self._schema(
+        registry.add("read_file", "Read a bounded line range from a workspace file. The result includes range_sha256; pass that exact value as expected_old_sha256 to replace_file_lines.", self._schema(
             {"path": string, "start_line": integer, "end_line": integer}, ["path"]),
-            read_workspace_file)
+            lambda path, start_line=1, end_line=400: ws.read_file(path, start_line, end_line))
         registry.add("write_file", "Atomically write one workspace file.", self._schema(
             {"path": string, "content": string}, ["path", "content"]), ws.write_file,
             consequence="WORKSPACE_MUTATION")
-        registry.add("replace_file_lines", "Atomically replace an exact line range previously inspected with read_file. Harness automatically applies the stored stale-write guard and fails closed if the range changed or was not read.", self._schema(
-            {"path": string, "start_line": integer, "end_line": integer,
-             "new_content": string}, ["path", "start_line", "end_line", "new_content"]),
-            replace_workspace_lines,
+        registry.add("replace_file_lines", "Atomically replace an inspected line range. expected_old_sha256 must be the range_sha256 from the most recent read_file of this exact line range.", self._schema(
+            {"path": string, "start_line": integer, "end_line": integer, "new_content": string,
+             "expected_old_sha256": string}, ["path", "start_line", "end_line", "new_content"]), ws.replace_file_lines,
             consequence="WORKSPACE_MUTATION")
         registry.add("run_command", "Run a bounded engineering/test command in the workspace.", self._schema(
             {"argv": {"type": "array", "items": string, "minItems": 1},
