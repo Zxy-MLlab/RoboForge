@@ -1,5 +1,5 @@
 {
-  "status": "generic_keep_passed_real_validation_not_started",
+  "status": "completed_mixed_real_validation",
   "baseline_sha": "2f6c899c83c88d18c3eeef70d3c5cc04fe1345c5",
   "classification": "H-candidate",
   "hypothesis": "Public physical-verification eligibility in AgentEvidence",
