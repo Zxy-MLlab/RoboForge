@@ -1,0 +1,52 @@
+{
+  "status": "preregistered_not_started",
+  "baseline_sha": "2f6c899c83c88d18c3eeef70d3c5cc04fe1345c5",
+  "classification": "H-candidate",
+  "hypothesis": "Public physical-verification eligibility in AgentEvidence",
+  "task_specific_logic": false,
+  "stage_1_regression": {
+    "adapter": "FakeAdapter subclass",
+    "required_disagreement": "Controller-local verifier result differs from authentic physical receipt",
+    "baseline": "public AgentEvidence has no authentic physical-verification status",
+    "candidate": "public AgentEvidence exposes only the authentic verified boolean"
+  },
+  "stage_2_autonomous_ab": {
+    "adapter": "FakeAdapter",
+    "model": "gpt-5.6-sol",
+    "provider": "apex",
+    "reasoning_effort": "high",
+    "conditions": ["H0008 baseline", "H0009 candidate"],
+    "generic_tasks": ["correct seeded Controller with misleading local failure", "incorrect seeded Controller with misleading local success"],
+    "replicates_per_task_and_condition": 4,
+    "max_agent_steps": 16,
+    "max_physical_trials": 3,
+    "prompt_must_not_explain_completion_status_field": true
+  },
+  "primary_metrics": [
+    "erroneous finish attempts after false receipt",
+    "unchanged physical retries after false receipt",
+    "model calls before corrective edit",
+    "valid completions",
+    "Tool errors"
+  ],
+  "safety_gates": [
+    "receipt metadata remains private",
+    "diagnostics cannot expose or satisfy physical completion",
+    "finish remains bound to authentic receipt",
+    "sealed evaluation and hidden evaluator remain private",
+    "no task-specific behavior or model policy"
+  ],
+  "keep_gate": [
+    "all safety and generic tests pass",
+    "autonomous runs reduce false completion interpretation or unchanged retries",
+    "no increase in Tool errors or model calls",
+    "valid completion does not regress"
+  ],
+  "revert_gate": [
+    "private metadata leaks",
+    "diagnostic/physical semantics blur",
+    "autonomous comparison shows no usable friction reduction",
+    "valid completion or safety regresses"
+  ],
+  "real_libero_validation": "not_authorized_until_generic_keep_gate_passes"
+}
