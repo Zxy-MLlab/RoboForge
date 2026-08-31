@@ -23,9 +23,8 @@ Investigation only.
 - New regression: none.
 - New embodied experiment: none.
 
-KEEP/REVERT is not yet applicable. H0005 remains a candidate pending explicit
-authorization to begin the test-first implementation/controlled-comparison
-cycle.
+The implementation and controlled comparison cycle is complete. See the
+updates below and the dedicated research-record files in this directory.
 
 ## Stage 1 and Stage 2 update
 
@@ -43,5 +42,19 @@ comparison is in `/root/autodl-tmp/harness-validation-H0005/comparison.md`.
 Stage 2 is **inconclusive**, not a positive causal result: baseline has no
 success-rate denominator, candidate had two unrelated Tool errors, and overall
 protocol-error/model-call improvements were not observed. H0005 is therefore
-not yet KEEP-qualified under the preregistered autonomous gate. No LIBERO run
-was performed.
+not task-performance-qualified by Stage 2 alone.
+
+## Stage 3 real multi-task update
+
+The frozen H0005 Harness ran real LIBERO tasks 0, 1, and 2 at development state
+0. Each consumed 20 physical trials; none completed. The run used 572 model
+calls and produced 72 durable execution objects. All evidence, Controller, and
+artifact digests validated.
+
+Guarded replacement behavior was exact: 22 authoritative same-range digests
+succeeded and 27 non-authoritative digests failed closed. The implementation
+is therefore retained for correctness and truthful public data. The real run
+does not establish a task-success benefit and exposes residual protocol burden.
+
+Full forensic report:
+`/root/autodl-tmp/experiments/libero-real-20260830-h0005/forensic-analysis.md`.

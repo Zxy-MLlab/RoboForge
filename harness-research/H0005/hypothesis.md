@@ -2,8 +2,11 @@
 
 ## Status
 
-Candidate only. No production change, regression test, or embodied experiment
-has been started.
+Implemented and retained as a correctness/interface repair. Deterministic
+regressions and the full repository suite pass. The preregistered FakeAdapter
+A/B was inconclusive because the baseline made no guarded replacement attempt.
+A frozen three-task real LIBERO campaign subsequently completed and supplies
+observational validation, not a causal task-score comparison.
 
 ## Problem
 
@@ -25,8 +28,9 @@ concurrency protection.
 An ideal task strategist can omit the optional guard and edit successfully, so
 this is not a hard execution block. However, it cannot infer whether the digest
 covers the file, displayed content, or original range bytes, nor whether line
-endings are included. The current interface makes the safer operation
-unnecessarily difficult. Classification: H candidate, not A.
+endings are included. H0005 makes the safer operation possible, but real
+trajectories show that manually copying the digest remains error-prone.
+Classification: generic H interface friction, not an A correctness defect.
 
 ## Generality gates
 

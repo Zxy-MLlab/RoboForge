@@ -1,8 +1,8 @@
 {
-  "status": "not_started",
+  "status": "completed_keep_correctness_residual_friction",
   "baseline_harness_sha": "fe9506f113356204caf688cd41ef728bcec244ac",
   "protocol_parent_sha": "33113c5fc5b1415de8b5fe155490ccceac17436b",
-  "classification": "H-candidate",
+  "classification": "H-correctness-repair-with-residual-interface-friction",
   "hypothesis": "authoritative guarded line-edit digest",
   "stage_1_deterministic_regression": {
     "status": "passed",
@@ -69,10 +69,18 @@
     "context cost is disproportionate to observed use"
   ],
   "stage_3_multitask_validation": {
-    "status": "not_started_pending_authorization",
-    "scope": "same frozen Harness comparison on more than one development task",
+    "status": "completed_observational_not_matched_ab",
+    "scope": "frozen H0005 Harness on three real LIBERO development tasks",
+    "harness_sha": "4b98dfbd4a44336418dccb61fc67f14ac58bffda",
+    "tasks": [0, 1, 2],
+    "model_calls": 572,
+    "physical_trials": 60,
+    "task_completions": 0,
+    "authoritative_guard_successes": 22,
+    "authoritative_guard_failures": 0,
+    "non_authoritative_guard_failures": 27,
     "task_success_is_primary_metric": false
   },
-  "cross_environment_validation": "pending",
+  "cross_environment_validation": "not_established",
   "task_specific_logic": false
 }
