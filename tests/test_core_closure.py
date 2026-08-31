@@ -613,8 +613,10 @@ def test_consequential_tool_schema_declares_decision_prerequisite():
                for item in registry.schemas}
     mutating_description = schemas["mutate"]["description"]
     assert "WORKSPACE_MUTATION" in mutating_description
-    assert "record_decision" in mutating_description
-    assert "record_decision" not in schemas["inspect"]["description"]
+    assert "decision_context" in mutating_description
+    assert "decision_context" in schemas["mutate"]["parameters"]["required"]
+    assert "decision_context" not in schemas["inspect"]["description"]
+    assert "decision_context" not in schemas["inspect"]["parameters"].get("required", [])
 
 
 def test_controller_execution_tools_declare_source_entrypoint(tmp_path):
@@ -631,11 +633,14 @@ def test_controller_execution_tools_declare_source_entrypoint(tmp_path):
 def test_decision_schema_declares_opaque_evidence_reference_formats(tmp_path):
     loop = _loop(tmp_path, object(), resume=False)
     schema = next(item["function"] for item in loop.tools.schemas
-                  if item["function"]["name"] == "record_decision")
-    evidence_items = schema["parameters"]["properties"]["evidence_refs"]["items"]
+                  if item["function"]["name"] == "run_controller")
+    context = schema["parameters"]["properties"]["decision_context"]
+    evidence_items = context["properties"]["evidence_refs"]["items"]
 
     assert evidence_items["pattern"] == "^(evidence|artifact|run)://"
     assert "returned by" in evidence_items["description"]
+    assert "record_decision" not in {item["function"]["name"]
+                                     for item in loop.tools.schemas}
 
 
 def test_read_range_digest_can_guard_atomic_line_replacement(tmp_path):
