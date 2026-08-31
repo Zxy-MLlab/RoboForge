@@ -1,0 +1,88 @@
+{
+  "status": "preregistered_not_started",
+  "protocol": "roboforge-h0009-matched-real-validation-v1",
+  "hypothesis": "Exposing only the authenticated physical verification boolean reduces contradictory-evidence interpretation friction without changing task strategy or safety semantics.",
+  "baseline": {
+    "campaign": "/root/autodl-tmp/experiments/libero-real-20260831-h0008",
+    "harness_sha": "d9bd7ce6f816bf2a9dcbae6b7608e7fa8a7c15fa",
+    "task_results": {
+      "3": {"model_calls": 228, "physical_trials": 30, "completion_valid": false},
+      "4": {"model_calls": 373, "physical_trials": 30, "completion_valid": false},
+      "7": {"model_calls": 74, "physical_trials": 5, "completion_valid": true}
+    },
+    "aggregate": {
+      "model_calls": 675,
+      "physical_trials": 65,
+      "tool_calls": 718,
+      "tool_errors": 63,
+      "immediate_unchanged_controller_reruns": 31
+    }
+  },
+  "candidate": {
+    "production_sha": "5ef4c242f4bc5c1867538d92bcae9f03a5e48664",
+    "campaign_root": "/root/autodl-tmp/experiments/libero-real-20260831-h0009",
+    "production_change": "physical AgentEvidence includes only physical_verification.verified after authentic receipt binding validation"
+  },
+  "model": "gpt-5.6-sol",
+  "provider": "apex",
+  "base_url": "https://api.apexin.ai/v1",
+  "reasoning_effort": "high",
+  "outcome_verifier_reasoning_effort": "low",
+  "suite": "libero_spatial",
+  "suite_scope_note": "Matched validation uses the same supported suite and tasks as H0008; this is not a cross-suite claim.",
+  "task_order": [3, 4, 7],
+  "state": 0,
+  "max_agent_steps_per_task": 500,
+  "max_physical_trials_per_task": 30,
+  "max_diagnostics_per_task": 8,
+  "session_timeout_seconds_per_task": 7200,
+  "controller_timeout_seconds": 600,
+  "profile": "autonomous",
+  "sandbox": "auto_fail_closed",
+  "fresh_workspace_per_task": true,
+  "capability_snapshot": {
+    "source": "/root/autodl-tmp/experiments/libero-real-20260831-h0008/capability-library",
+    "tree_sha256": "2f82569eb68dbaa17703b62c38496ea20d8f38950bdd8066605ac8851e9d2d0d",
+    "file_count": 20,
+    "copy_to_fresh_candidate_campaign": true,
+    "shared_across_candidate_tasks": true
+  },
+  "fixed_variables": [
+    "task order and state",
+    "model and provider",
+    "reasoning effort",
+    "budgets and timeouts",
+    "initial capability snapshot",
+    "Adapter and verifier configuration",
+    "sandbox and reset protocol"
+  ],
+  "primary_metrics": [
+    "false physical verification followed by finish attempt",
+    "immediate unchanged-Controller physical rerun",
+    "model calls per physical trial",
+    "Tool and protocol errors",
+    "physical trial count",
+    "valid completion"
+  ],
+  "field_integrity_checks": [
+    "every candidate physical evidence object has exact physical_verification.verified boolean",
+    "candidate diagnostic evidence never has physical_verification",
+    "verification receipt identity, environment identity, resume token, evaluator data, reward, and simulator truth remain private",
+    "finish remains bound to the private authentic receipt"
+  ],
+  "keep_gate": [
+    "field integrity and all safety checks pass",
+    "contradictory-evidence false interpretation or unchanged physical retries decrease on matched trajectories",
+    "Tool/protocol error rate does not meaningfully increase",
+    "no evidence of task-specific strategy entering Harness",
+    "task success is reported but is not sufficient by itself"
+  ],
+  "revert_gate": [
+    "private receipt or evaluator metadata leaks",
+    "diagnostic evidence gains physical completion semantics",
+    "real runs show no usable reduction in targeted interaction friction",
+    "safety, valid intent conversion, or completion behavior meaningfully regresses"
+  ],
+  "freeze_rule": "No Harness or prompt modification during the campaign.",
+  "post_campaign_rule": "Forensically compare against H0008 and KEEP or REVERT H0009. Do not select another Harness hypothesis in the same campaign."
+}
