@@ -662,15 +662,17 @@ def test_read_range_digest_preserves_stale_write_protection(tmp_path):
                                      inspected["range_sha256"])
 
 
-def test_line_edit_schema_explains_read_range_digest_contract(tmp_path):
+def test_line_edit_schema_explains_internal_guard_contract(tmp_path):
     loop = _loop(tmp_path, object(), resume=False)
     schemas = {item["function"]["name"]: item["function"]
                for item in loop.tools.schemas}
     read_result = loop.workspace.read_file("missing.py", 1, 1)
     assert "range_sha256" in read_result or not read_result["exists"]
     description = schemas["replace_file_lines"]["description"]
-    assert "range_sha256" in description
     assert "read_file" in description
+    assert "automatically" in description
+    assert "expected_old_sha256" not in schemas[
+        "replace_file_lines"]["parameters"]["properties"]
 
 
 @pytest.mark.parametrize("initial", ["alpha\nbeta", "alpha\r\nbeta\r\n"])
@@ -707,6 +709,94 @@ def test_read_range_digest_is_absent_for_missing_file(tmp_path):
     result = workspace.read_file("missing.py", 1, 1)
     assert result == {"path": "missing.py", "exists": False, "content": "",
                       "total_lines": 0}
+
+
+def test_agent_read_then_replace_threads_guard_without_model_digest(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+
+    inspected = loop.tools.invoke("read_file", {
+        "path": "controller.py", "start_line": 2, "end_line": 2})
+    assert inspected["range_sha256"] == hashlib.sha256(b"beta\n").hexdigest()
+    loop.tools.invoke("replace_file_lines", {
+        "path": "controller.py", "start_line": 2, "end_line": 2,
+        "new_content": "BETA\n"})
+
+    assert loop.workspace.read("controller.py") == "alpha\nBETA\ngamma"
+
+
+def test_agent_threaded_guard_rejects_selected_range_change(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+    loop.tools.invoke("read_file", {
+        "path": "controller.py", "start_line": 2, "end_line": 2})
+
+    loop.workspace.write_file("controller.py", "alpha\nchanged\ngamma\n")
+    with pytest.raises(WorkspaceError, match="file changed"):
+        loop.tools.invoke("replace_file_lines", {
+            "path": "controller.py", "start_line": 2, "end_line": 2,
+            "new_content": "BETA\n"})
+    assert loop.workspace.read("controller.py") == "alpha\nchanged\ngamma"
+
+
+def test_agent_threaded_guard_allows_change_outside_selected_range(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+    loop.tools.invoke("read_file", {
+        "path": "controller.py", "start_line": 2, "end_line": 2})
+
+    loop.workspace.write_file("controller.py", "ALPHA\nbeta\ngamma\n")
+    loop.tools.invoke("replace_file_lines", {
+        "path": "controller.py", "start_line": 2, "end_line": 2,
+        "new_content": "BETA\n"})
+    assert loop.workspace.read("controller.py") == "ALPHA\nBETA\ngamma"
+
+
+def test_agent_line_replace_without_matching_read_fails_closed(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+
+    with pytest.raises(WorkspaceError, match="read_file"):
+        loop.tools.invoke("replace_file_lines", {
+            "path": "controller.py", "start_line": 2, "end_line": 2,
+            "new_content": "BETA\n"})
+    assert loop.workspace.read("controller.py") == "alpha\nbeta\ngamma"
+
+
+def test_agent_line_replace_does_not_reuse_guard_for_another_range(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    loop.workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+    loop.tools.invoke("read_file", {
+        "path": "controller.py", "start_line": 1, "end_line": 1})
+
+    with pytest.raises(WorkspaceError, match="read_file"):
+        loop.tools.invoke("replace_file_lines", {
+            "path": "controller.py", "start_line": 2, "end_line": 2,
+            "new_content": "BETA\n"})
+
+
+def test_agent_line_replace_after_process_resume_requires_fresh_read(tmp_path):
+    first = _loop(tmp_path, object(), resume=False)
+    first.workspace.write_file("controller.py", "alpha\nbeta\ngamma\n")
+    first.tools.invoke("read_file", {
+        "path": "controller.py", "start_line": 2, "end_line": 2})
+
+    resumed = _loop(tmp_path, object(), resume=True)
+    with pytest.raises(WorkspaceError, match="read_file"):
+        resumed.tools.invoke("replace_file_lines", {
+            "path": "controller.py", "start_line": 2, "end_line": 2,
+            "new_content": "BETA\n"})
+    assert resumed.workspace.read("controller.py") == "alpha\nbeta\ngamma"
+
+
+def test_agent_line_edit_schema_internalizes_concurrency_digest(tmp_path):
+    loop = _loop(tmp_path, object(), resume=False)
+    schema = next(item["function"] for item in loop.tools.schemas
+                  if item["function"]["name"] == "replace_file_lines")
+
+    assert "expected_old_sha256" not in schema["parameters"]["properties"]
+    assert "automatically" in schema["description"]
+    assert "read_file" in schema["description"]
 
 
 def test_decision_record_is_deduplicated_and_checkpointed(tmp_path):
