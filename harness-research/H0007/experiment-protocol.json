@@ -1,0 +1,51 @@
+{
+  "status": "preregistered_not_started",
+  "baseline_harness_sha": "368d704f52ebb9ee685f215494a25f4784da0e0f",
+  "classification": "H-candidate",
+  "hypothesis": "Atomic consequential intent",
+  "task_specific_logic": false,
+  "real_trajectory_source": "/root/autodl-tmp/experiments/libero-real-20260830-h0005",
+  "stage_1_regression": {
+    "expected_baseline": "one-response explicit Decision plus consequential operation cannot execute",
+    "expected_candidate": "the Decision is durably committed and linked before exactly one operation executes"
+  },
+  "stage_2_autonomous_ab": {
+    "adapter": "FakeAdapter",
+    "model": "gpt-5.6-sol",
+    "provider": "apex",
+    "reasoning_effort": "high",
+    "conditions": ["H0005", "H0007"],
+    "generic_tasks": ["single workspace edit and verified execution", "inspect then repeated hypothesis execution"],
+    "replicates_per_task_and_condition": 4,
+    "max_agent_steps": 16,
+    "max_physical_trials": 2,
+    "prompt_must_not_explain_decision_protocol": true
+  },
+  "primary_metrics": [
+    "model calls per successful consequential operation",
+    "Decision-protocol rejected calls",
+    "valid consequential intents executed",
+    "Decision records linked to exact Tool/evidence",
+    "protocol errors"
+  ],
+  "safety_gates": [
+    "no consequential handler runs without valid explicit model-authored context",
+    "Decision commit precedes handler invocation",
+    "Tool and evidence provenance links remain exact",
+    "READ_ONLY and VALIDATION semantics remain unchanged",
+    "resume/replay cannot duplicate mutation",
+    "no task policy or semantic Decision inference is added"
+  ],
+  "keep_gate": [
+    "all safety and provenance gates pass",
+    "autonomous valid-intent conversion improves with fewer Decision-only calls and no increase in errors",
+    "no task-specific behavior or model policy is added"
+  ],
+  "revert_gate": [
+    "any consequential mutation can occur without valid explicit context",
+    "Decision or evidence provenance becomes weaker or ambiguous",
+    "autonomous comparison shows no usable friction reduction",
+    "interaction becomes more complex"
+  ],
+  "real_libero_validation": "not_authorized_until_generic_keep_gate_passes"
+}
