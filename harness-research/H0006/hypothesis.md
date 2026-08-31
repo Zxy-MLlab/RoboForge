@@ -2,8 +2,9 @@
 
 ## Status
 
-Preregistered. Production code and tests are unchanged at baseline
-`be5bffbef5dba0659f6fd1b83f851018ee79726e`.
+Tested and rejected. The candidate was evaluated against its preregistered
+generic FakeAdapter gate and did not reduce autonomous editing friction. Its
+production change is reverted; H0005 remains the retained behavior.
 
 ## Real-trajectory problem
 

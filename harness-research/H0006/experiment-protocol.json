@@ -1,5 +1,5 @@
 {
-  "status": "preregistered_not_started",
+  "status": "completed_reverted",
   "baseline_harness_sha": "be5bffbef5dba0659f6fd1b83f851018ee79726e",
   "classification": "H-candidate",
   "hypothesis": "Harness-threaded guarded line edits",
@@ -43,4 +43,32 @@
     "autonomous comparison shows no usable friction reduction"
   ],
   "real_libero_validation": "not_authorized_until_generic_keep_gate_passes"
+  ,
+  "execution": {
+    "baseline_worktree_sha": "dc35a0e9af9b55a37d9e9034472a7bfe98670fd0",
+    "candidate_sha": "1e7b2cbf48e90d80632884c226c8d4d78e552de0",
+    "runs_completed": 16,
+    "raw_results": "/root/autodl-tmp/harness-validation-H0006",
+    "baseline": {
+      "model_calls": 83,
+      "replace_successes": 11,
+      "replace_attempts": 19,
+      "workspace_errors": 8,
+      "validated_successful_edits": 5,
+      "verified_physical_trials": 4,
+      "valid_completions": 0
+    },
+    "candidate": {
+      "model_calls": 88,
+      "replace_successes": 12,
+      "replace_attempts": 21,
+      "workspace_errors": 9,
+      "validated_successful_edits": 7,
+      "verified_physical_trials": 4,
+      "valid_completions": 0
+    },
+    "keep_gate": "failed",
+    "decision": "revert",
+    "real_libero_run": false
+  }
 }
