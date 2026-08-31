@@ -1,5 +1,5 @@
 {
-  "status": "preregistered_not_started",
+  "status": "generic_keep_passed_real_validation_not_started",
   "baseline_sha": "2f6c899c83c88d18c3eeef70d3c5cc04fe1345c5",
   "classification": "H-candidate",
   "hypothesis": "Public physical-verification eligibility in AgentEvidence",
@@ -48,5 +48,5 @@
     "autonomous comparison shows no usable friction reduction",
     "valid completion or safety regresses"
   ],
-  "real_libero_validation": "not_authorized_until_generic_keep_gate_passes"
+  "real_libero_validation": "authorized_after_generic_keep; not started pending separate matched preregistration"
 }
