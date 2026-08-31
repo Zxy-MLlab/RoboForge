@@ -1,5 +1,5 @@
 {
-  "status": "preregistered_not_started",
+  "status": "completed_reverted",
   "baseline_harness_sha": "368d704f52ebb9ee685f215494a25f4784da0e0f",
   "classification": "H-candidate",
   "hypothesis": "Atomic consequential intent",
@@ -47,5 +47,35 @@
     "autonomous comparison shows no usable friction reduction",
     "interaction becomes more complex"
   ],
-  "real_libero_validation": "not_authorized_until_generic_keep_gate_passes"
+  "real_libero_validation": "not_authorized_until_generic_keep_gate_passes",
+  "execution": {
+    "baseline_sha": "368d704f52ebb9ee685f215494a25f4784da0e0f",
+    "candidate_sha": "4a90a557f25aa3e472a3be0dff27cd89a5b9d222",
+    "runs_completed": 16,
+    "raw_results": "/root/autodl-tmp/harness-validation-H0007",
+    "baseline": {
+      "model_calls": 90,
+      "decision_only_calls": 27,
+      "consequential_successes": 23,
+      "consequential_attempts": 26,
+      "tool_errors": 3,
+      "physical_trials": 12,
+      "verified_physical_executions": 8,
+      "valid_completions": 2
+    },
+    "candidate": {
+      "model_calls": 86,
+      "decision_only_calls": 0,
+      "consequential_successes": 25,
+      "consequential_attempts": 36,
+      "tool_errors": 12,
+      "physical_trials": 12,
+      "verified_physical_executions": 8,
+      "valid_completions": 4
+    },
+    "provenance_mismatches": 0,
+    "keep_gate": "failed",
+    "decision": "revert",
+    "real_libero_run": false
+  }
 }

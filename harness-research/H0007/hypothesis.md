@@ -2,8 +2,9 @@
 
 ## Status
 
-Preregistered. Production code and tests remain at retained H0005 behavior,
-with H0006 reverted, at `368d704f52ebb9ee685f215494a25f4784da0e0f`.
+Tested and rejected. The candidate removed standalone Decision calls and
+preserved provenance, but the preregistered autonomous valid-intent/error gate
+failed. Its production change is reverted; retained H0005 behavior remains.
 
 ## Real-trajectory problem
 
