@@ -6,6 +6,25 @@ RoboForge 只增加 physical experiment、Adapter boundary、immutable evidence�
 authentic verification、physical budget、recovery/idempotency、embodied debugging
 以及 Experience/Skill/Capability persistence。
 
+Canonical lifecycle commands are deliberately ordinary CLI operations owned by
+the external Control Plane:
+
+```bash
+roboforge env info
+roboforge run controller.py --runtime libero --task 0 --seed 0 --run-dir runs/task-0
+roboforge replay runs/task-0
+roboforge compare runs/baseline runs/candidate
+roboforge submit capability://ID --asset-root assets/shared \
+  --evidence runs/verified/evidence/RECORD.json --note "independent gate passed"
+```
+
+`run` freezes and executes one Controller through the isolated provider. `replay`
+only verifies and projects immutable evidence; it never repeats a physical action.
+Only verified physical evidence can move a registry entry from `candidate` to the
+terminal `promoted` state. The final architecture, upstream mapping, real LIBERO
+metrics, reproducibility commands, and limitations are recorded in
+[`docs/final_validation_report.md`](docs/final_validation_report.md).
+
 ```bash
 python -m pip install -e '.[openhands]'
 roboforge-openhands --adapter libero --adapter-python /path/to/libero-python \
@@ -159,7 +178,7 @@ JSON Schema。Workspace 事务、事件日志和执行快照支持幂等提交�
 
 ```bash
 python -m pytest -q tests evaluation
-python -m compileall -q embodied_codex evaluation
+python -m compileall -q roboforge embodied_codex evaluation scripts
 git diff --check
 python tests/live_acquisition_acceptance.py
 ```

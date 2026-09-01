@@ -42,16 +42,42 @@ class AssetLibrary:
                  applicability: Any = None, evidence: Any = None,
                  provenance: Any = None, usage: str = "", implementation: Any = None) -> dict[str, Any]:
         if kind not in KINDS or not name.strip(): raise ValueError("invalid asset kind/name")
+        verification_status = "candidate" if kind == "capabilities" else "recorded"
         payload = {"schema_version": 1, "name": name, "purpose": purpose,
                    "description": description, "applicability": applicability,
                    "evidence": evidence, "provenance": provenance,
-                   "usage": usage, "implementation": implementation}
+                   "usage": usage, "implementation": implementation,
+                   "verification_status": verification_status,
+                   "verification_decision": None}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         payload["asset_id"] = f"{URI_KIND[kind]}://{digest}"
         path = self.root / kind / f"{digest}.json"
         if path.exists() and json.loads(path.read_text()) != payload: raise ValueError("asset collision")
         path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
         return self.summary(payload)
+
+    def decide_capability(self, asset_id: str, *, decision: str,
+                          evidence: list[str], note: str) -> dict[str, Any]:
+        if decision not in {"promoted", "rejected"}:
+            raise ValueError("decision must be promoted or rejected")
+        if not asset_id.startswith("capability://") or not evidence or not note.strip():
+            raise ValueError("capability decision requires id, evidence, and note")
+        digest = asset_id.split("://", 1)[1]
+        path = self.root / "capabilities" / f"{digest}.json"
+        if not path.is_file(): raise KeyError(asset_id)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        current = value.get("verification_status", "candidate")
+        requested = {"decision": decision, "evidence": list(evidence), "note": note}
+        if current in {"promoted", "rejected"}:
+            if value.get("verification_decision") != requested:
+                raise ValueError("capability decision is immutable")
+            return self.summary(value)
+        if current != "candidate": raise ValueError("only candidates can be decided")
+        value["verification_status"] = decision
+        value["verification_decision"] = requested
+        path.write_text(json.dumps(value, sort_keys=True, indent=2), encoding="utf-8")
+        self.audit("capability_decision", asset_id=asset_id, **requested)
+        return self.summary(value)
 
     def search(self, query: str, *, kind: str | None = None) -> list[dict[str, Any]]:
         kinds = [kind] if kind else sorted(KINDS)
@@ -85,4 +111,4 @@ class AssetLibrary:
 
     @staticmethod
     def summary(data: dict[str, Any]) -> dict[str, Any]:
-        return {k: data.get(k) for k in ("asset_id", "name", "purpose", "description", "applicability", "evidence", "provenance", "usage")}
+        return {k: data.get(k) for k in ("asset_id", "name", "purpose", "description", "applicability", "evidence", "provenance", "usage", "verification_status", "verification_decision")}

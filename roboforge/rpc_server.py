@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import signal
 import threading
@@ -20,12 +21,14 @@ def main() -> None:
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--controller-path", type=Path, required=True)
     parser.add_argument("--socket", type=Path, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token", default=os.getenv("ROBOFORGE_RPC_TOKEN"))
     parser.add_argument("--max-trials", type=int, default=12)
     parser.add_argument("--max-diagnostics", type=int, default=8)
     parser.add_argument("--timeout-seconds", type=float, default=600.0)
     parser.add_argument("--configuration-json", default="{}")
     args = parser.parse_args()
+    if not args.token:
+        parser.error("RPC token is required via ROBOFORGE_RPC_TOKEN or --token")
 
     # Imports are deliberately local: this process is the only side allowed to
     # load the frozen Adapter/deployment and its physical dependencies.

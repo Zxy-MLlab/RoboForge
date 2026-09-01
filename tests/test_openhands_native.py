@@ -1,8 +1,11 @@
 from pathlib import Path
+import json
+import pytest
 from roboforge.assets import AssetLibrary
 from roboforge.fakes import FakeAdapter
 from roboforge.service import ExperimentService, IndeterminateExperiment
 from roboforge.capability import CapabilityAcquirer
+from roboforge.control_plane import compare, replay, submit
 
 def test_physical_trial_is_immutable_idempotent_and_diagnostic_is_separate(tmp_path):
     controller = tmp_path / "controller.py"; controller.write_text("def run(robot): return {}\n")
@@ -44,6 +47,73 @@ def test_assets_are_progressively_disclosed_and_evidence_backed(tmp_path):
         purpose="parse nested perception output", description="public JSON helper")
     assert lib.search("object detection handles", kind="capabilities")[0]["asset_id"] == capability["asset_id"]
 
+def test_capability_promotion_is_external_and_requires_verified_evidence(tmp_path):
+    library = AssetLibrary(tmp_path / "assets")
+    candidate = library.register("capabilities", name="depth filter", purpose="perception",
+        description="Reject invalid depth", implementation={"source": "value = 1"})
+    assert candidate["verification_status"] == "candidate"
+    controller = tmp_path / "controller.py"; controller.write_text("value = 1\n")
+    run = tmp_path / "run"
+    adapter = FakeAdapter(); adapter.receipt_verified = True
+    evidence = ExperimentService(run, adapter).run_controller(
+        request_id="verified", controller_path=controller, intent="validate candidate")
+    evidence_path = next((run / "evidence").glob("*.json"))
+    promoted = submit(library.root, candidate["asset_id"], [str(evidence_path)],
+        note="external contract and physical validation passed")
+    assert promoted["verification_status"] == "promoted"
+    assert promoted["verification_decision"]["evidence"] == [evidence.ref]
+
+    assert library.decide_capability(candidate["asset_id"], decision="promoted",
+        evidence=[evidence.ref], note="external contract and physical validation passed") == promoted
+    with pytest.raises(ValueError, match="immutable"):
+        library.decide_capability(candidate["asset_id"], decision="rejected",
+            evidence=[evidence.ref], note="conflicting terminal decision")
+
+def test_capability_promotion_rejects_negative_physical_evidence(tmp_path):
+    library = AssetLibrary(tmp_path / "assets")
+    candidate = library.register("capabilities", name="unsafe filter", purpose="perception",
+        description="Unverified candidate", implementation={"source": "value = 1"})
+    controller = tmp_path / "controller.py"; controller.write_text("value = 1\n")
+    run = tmp_path / "run"
+    evidence = ExperimentService(run, FakeAdapter()).run_controller(
+        request_id="negative", controller_path=controller, intent="negative validation")
+    evidence_path = next((run / "evidence").glob("*.json"))
+    with pytest.raises(ValueError, match="independently verified physical evidence"):
+        submit(library.root, candidate["asset_id"], [str(evidence_path)], note="must fail")
+    assert library.read(candidate["asset_id"], session_id="test")["verification_status"] == "candidate"
+
+def test_capability_registration_cannot_bypass_external_gate(tmp_path):
+    library = AssetLibrary(tmp_path / "assets")
+    with pytest.raises(TypeError, match="verification_status"):
+        library.register("capabilities", name="bypass", purpose="test",
+            description="must remain a candidate", verification_status="promoted")
+
+def test_lifecycle_cli_parses_frozen_run_request(monkeypatch, tmp_path, capsys):
+    from roboforge import cli
+    controller = tmp_path / "controller.py"; controller.write_text("value = 1\n")
+    captured = {}
+    def fake_run(args):
+        captured.update(vars(args)); return {"ref": "evidence://frozen"}
+    monkeypatch.setattr(cli, "_run_frozen_candidate", fake_run)
+    assert cli.main(["run", str(controller), "--runtime", "libero", "--task", "8",
+                     "--seed", "51", "--run-dir", str(tmp_path / "run")]) == 0
+    assert captured["entrypoint"] == controller
+    assert (captured["runtime"], captured["task"], captured["seed"]) == ("libero", "8", 51)
+    assert json.loads(capsys.readouterr().out)["ref"] == "evidence://frozen"
+
+def test_replay_never_reexecutes_and_compare_reads_verified_records(tmp_path):
+    service = ExperimentService(tmp_path / "run", FakeAdapter())
+    controller = tmp_path / "controller.py"; controller.write_text("value = 1\n")
+    first = service.run_controller(request_id="first", controller_path=controller, intent="baseline")
+    controller.write_text("value = 2\n")
+    second = service.run_controller(request_id="second", controller_path=controller, intent="candidate")
+    files = sorted((tmp_path / "run" / "evidence").glob("*.json"))
+    replayed = replay(files[0])
+    assert replayed["physical_action_replayed"] is False
+    result = compare(files[0], files[1])
+    assert result["baseline"] == first.ref and result["candidate"] == second.ref
+    assert any(change["field"] == "controller_sha256" for change in result["changes"])
+
 def test_new_runtime_has_no_generic_agent_loop_implementation():
     root = Path(__file__).parents[1] / "roboforge"
     text = "\n".join(p.read_text() for p in root.glob("*.py"))
@@ -64,6 +134,8 @@ def test_openhands_editor_allows_capability_modules_but_remains_workspace_confin
 
 def test_formal_cli_passes_explicit_provider_to_adapter_worker():
     cli = (Path(__file__).parents[1] / "roboforge" / "cli.py").read_text()
+    assert 'f"--token={token}"' not in cli
+    assert 'worker_env["ROBOFORGE_RPC_TOKEN"] = token' in cli
     assert 'p.add_argument("--provider"' in cli
     assert '"verifier_provider": provider' in cli
     assert '"--configuration-json"' in cli
