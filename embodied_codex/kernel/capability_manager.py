@@ -62,6 +62,14 @@ class CapabilityManager:
                               ("experiences", self.experience_library)):
             if library is not None:
                 rows = library.search(query, limit=limit, statuses=statuses)
+                # Do not present arbitrary zero-relevance assets for a
+                # non-empty query.  They create misleading retrieval signals
+                # and can cause an agent to activate an unrelated capability.
+                if str(query).strip():
+                    scored = [row for row in rows if "retrieval_score" in row]
+                    if scored:
+                        rows = [row for row in scored
+                                if float(row.get("retrieval_score", 0.0)) > 0.0]
                 source = "shared" if name == "tools" else name.rstrip("s")
                 result[name] = [{**dict(row), "source": source} for row in rows]
         if include_gaps and self.gap_library is not None:

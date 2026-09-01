@@ -1,4 +1,25 @@
-# RoboForge Embodied Coding Agent Harness
+# RoboForge: OpenHands for the physical world
+
+正式运行时是 `roboforge/`：OpenHands SDK 负责 Agent loop、LLM、conversation、
+context、workspace、file editor、terminal、grep/glob、retry 与 session lifecycle；
+RoboForge 只增加 physical experiment、Adapter boundary、immutable evidence、
+authentic verification、physical budget、recovery/idempotency、embodied debugging
+以及 Experience/Skill/Capability persistence。
+
+```bash
+python -m pip install -e '.[openhands]'
+roboforge-openhands --adapter libero --adapter-python /path/to/libero-python \
+  --task 0 --run-dir runs/libero-task-0 --asset-root assets/shared
+```
+
+OpenHands 1.44 使用 Python 3.12，而当前固定 LIBERO/MuJoCo deployment 使用
+Python 3.11；正式入口通过带随机 token 的 mode-0600 Unix socket 启动隔离的
+`roboforge-adapter-worker`。Adapter worker 是 sensor/action/reset/safety/verification
+authority，OpenHands 进程不加载 LIBERO 或 evaluator。
+
+`embodied_codex/kernel` 是旧版兼容和 embodied implementation 来源，不再是新正式
+OpenHands-native CLI 的 Agent loop。新调用链不导入旧 AgentLoop、provider loop、
+workspace、context builder 或 generic editor。
 
 RoboForge 是一个环境无关的 Embodied Coding Agent Harness。它提供持久 workspace、隔离
 Controller runtime、Adapter SDK 合同、结构化证据、事务事件日志和渐进式 Tool/Skill/
@@ -6,7 +27,7 @@ Experience/Gap 检索；任务策略、失败诊断和能力获取由模型决�
 
 ## 架构边界
 
-`embodied_codex/kernel/` 是唯一运行底座：Agent Loop、workspace、sandbox runtime、
+历史兼容入口中的 `embodied_codex/kernel/` 曾是运行底座：Agent Loop、workspace、sandbox runtime、
 function-calling tools、capability manager、context builder、event store 和恢复检查点。
 `embodied_codex/kernel/assets.py` 提供不可变 Tool
 版本、Schema、manual-first 和资产库；`embodied_codex/deployments/` 是 Adapter 实现。
@@ -15,6 +36,14 @@ LIBERO 只通过 `deployments/libero.py` 和 `evaluation/run_embodied_codex_libe
 中的外部 Policy，不会被 kernel 导入。
 
 旧实验代码已不再作为运行入口；正式 CLI、LIBERO 和自定义 Adapter 都进入同一个 Kernel。
+
+完整的边界、证据模型、资产生命周期和迁移约束见
+[`docs/embodied_codex_harness_technical_report_zh.md`](docs/embodied_codex_harness_technical_report_zh.md)。
+其中 Generic Coding Harness 负责模型对话、上下文、workspace、文件和 shell；Kernel 的
+embodied layer 负责 Physical Experiment、factual debugging evidence、within-task learning
+ledger、Experience/Skill 持久化、Capability acquisition，以及 Adapter-owned observation、
+action、reset、安全和物理验证。Adapter 不携带任务策略，资产也通过 progressive disclosure
+按需检索和读取。
 
 ## 安装与运行
 
@@ -60,6 +89,11 @@ roboforge run --adapter libero --task 0 --profile autonomous \
   --run-dir runs/libero-task-0 --asset-root assets/shared
 ```
 
+For the formal OpenHands-native CLI, select the model provider explicitly when
+using a configured endpoint, for example `--provider apex --api-key-env
+APEX_API_KEY`. The CLI forwards this provider configuration to the isolated
+Adapter worker so LIBERO's authentic verifier uses the same approved endpoint.
+
 完整 LIBERO deployment 使用 Python 3.10/3.11，并固定兼容的 robosuite 1.4.1 与
 MuJoCo 2.3.7。Kernel 本身仍支持项目声明的其他 Python 版本。
 
@@ -90,6 +124,20 @@ Adapter-owned deployment capability 提供。相同 runtime spec 的 Tool 共享
 ID，Tool 执行使用该 venv 的 Python，Harness Python 环境不会被安装过程修改。
 
 ## 安全与稳定性
+
+### Embodied 操作
+
+模型可使用稳定的高层操作：`observe` 获取当前公开环境状态，`run_controller` 执行一次
+带完整 provenance 的 physical trial，`inspect_trial` 与 `compare_trials` 查看事实证据及
+状态/行为差异；`find_capability`、`inspect_capability` 和 `acquire_capability` 支持渐进式
+能力检索与获取。普通代码编辑和命令执行继续使用同一套 workspace/file/shell 工具。任务
+策略、失败解释以及是否获取或复用能力始终由模型决定，Harness 负责实验账本、隔离、证据
+和持久化。
+
+真实 LIBERO campaign 的公开验收记录位于外部实验目录（例如
+`/root/autodl-tmp/experiments/libero-real-20260831-h0009/final-experiment-report.md`）。
+该报告区分了通用 FakeAdapter A/B、真实 LIBERO 多轮 trial，以及能力获取验收；其中
+LIBERO 结果仅作为当前运行证据，不被硬编码进 Kernel，也不被宣称为普遍成功率提升。
 
 默认 `auto` sandbox 先探测 rootless `posix-hardened`（Landlock + no_new_privs + seccomp +
 rlimit + 环境白名单 + 私有临时目录 + 进程组回收），再探测 bubblewrap namespace 增强。

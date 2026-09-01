@@ -304,6 +304,11 @@ def test_progress_survives_checkpoint_resume(tmp_path):
     assert resumed.controller_versions == first.controller_versions
     context = json.loads(resumed._messages("progress resume")[1]["content"])
     assert context["state"]["task_progress"] == [progress]
+    summary = context["state"]["experiment_summary"]
+    assert summary["physical_trials"] == 1
+    assert summary["distinct_recent_controllers"] == 1
+    assert summary["latest_evidence_ref"].startswith("evidence://")
+    assert summary["latest_physical_verification"] == {"verified": False}
 
 
 def test_controller_versions_are_inspectable_comparable_and_restorable(tmp_path):
@@ -662,15 +667,15 @@ def test_read_range_digest_preserves_stale_write_protection(tmp_path):
                                      inspected["range_sha256"])
 
 
-def test_line_edit_schema_explains_read_range_digest_contract(tmp_path):
+def test_line_edit_schema_is_agent_simple_and_harness_transactional(tmp_path):
     loop = _loop(tmp_path, object(), resume=False)
     schemas = {item["function"]["name"]: item["function"]
                for item in loop.tools.schemas}
     read_result = loop.workspace.read_file("missing.py", 1, 1)
     assert "range_sha256" in read_result or not read_result["exists"]
     description = schemas["replace_file_lines"]["description"]
-    assert "range_sha256" in description
-    assert "read_file" in description
+    assert "range_sha256" not in description
+    assert "current workspace file" in description
 
 
 @pytest.mark.parametrize("initial", ["alpha\nbeta", "alpha\r\nbeta\r\n"])

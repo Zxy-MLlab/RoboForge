@@ -674,27 +674,33 @@ class AgentLoop:
             "platform": platform_runtime_schema, "cuda": cuda_runtime_schema},
             "required": ["python", "dependencies", "accelerator", "platform"],
             "additionalProperties": False}
-        registry.add("list_tool_groups", "List optional Tool groups without loading their schemas.",
+        # Backward-compatible controls for existing sessions. New agents can
+        # use semantic acquire/inspect operations and need not call these.
+        registry.add("list_tool_groups", "List optional Tool groups.",
                      self._schema(), registry.group_index)
-        registry.add("activate_tool_group", "Explicitly activate one optional Tool schema group.",
+        registry.add("activate_tool_group", "Activate an optional Tool group (legacy compatibility).",
                      self._schema({"group": {"type": "string", "enum": [
                          "source_inspection", "web_acquisition", "asset_authoring"]}}, ["group"]),
                      registry.activate)
-        registry.add("deactivate_tool_group", "Deactivate an optional Tool schema group.",
+        registry.add("deactivate_tool_group", "Deactivate an optional Tool group (legacy compatibility).",
                      self._schema({"group": {"type": "string", "enum": [
                          "source_inspection", "web_acquisition", "asset_authoring"]}}, ["group"]),
                      registry.deactivate)
         registry.add("list_files", "List files in the persistent workspace.", self._schema({"pattern": string}),
                      lambda pattern="**/*": ws.list_files(pattern))
-        registry.add("read_file", "Read a bounded line range from a workspace file. The result includes range_sha256; pass that exact value as expected_old_sha256 to replace_file_lines.", self._schema(
+        registry.add("read_file", "Read a bounded line range from a workspace file.", self._schema(
             {"path": string, "start_line": integer, "end_line": integer}, ["path"]),
-            lambda path, start_line=1, end_line=400: ws.read_file(path, start_line, end_line))
+            lambda path, start_line=1, end_line=400: {
+                key: value for key, value in ws.read_file(path, start_line, end_line).items()
+                if key != "range_sha256"})
         registry.add("write_file", "Atomically write one workspace file.", self._schema(
             {"path": string, "content": string}, ["path", "content"]), ws.write_file,
             consequence="WORKSPACE_MUTATION")
-        registry.add("replace_file_lines", "Atomically replace an inspected line range. expected_old_sha256 must be the range_sha256 from the most recent read_file of this exact line range.", self._schema(
-            {"path": string, "start_line": integer, "end_line": integer, "new_content": string,
-             "expected_old_sha256": string}, ["path", "start_line", "end_line", "new_content"]), ws.replace_file_lines,
+        registry.add("replace_file_lines", "Atomically replace a line range in the current workspace file. The Harness reads the current range and applies the edit transactionally.", self._schema(
+            {"path": string, "start_line": integer, "end_line": integer, "new_content": string},
+            ["path", "start_line", "end_line", "new_content"]),
+            lambda path, start_line, end_line, new_content: ws.replace_file_lines(
+                path, start_line, end_line, new_content),
             consequence="WORKSPACE_MUTATION")
         registry.add("run_command", "Run a bounded engineering/test command in the workspace.", self._schema(
             {"argv": {"type": "array", "items": string, "minItems": 1},
@@ -786,6 +792,34 @@ class AgentLoop:
         registry.add("run_controller", "Execute workspace controller.py, which must define def run(robot), once and return sensor evidence.",
                      self._schema(), lambda: self._agent_evidence(self._run_controller()),
                      consequence="PHYSICAL_INTERVENTION")
+        # High-level embodied semantics kept intentionally small so models can
+        # work like a coding agent without learning internal bookkeeping APIs.
+        registry.add("observe", "Observe the current robot/environment state.",
+                     self._schema(), self._observe_current)
+        registry.add("inspect_trial", "Inspect one physical trial and its factual evidence.",
+                     self._schema({"evidence_ref": string}, ["evidence_ref"]),
+                     self._inspect_execution)
+        registry.add("compare_trials", "Compare factual outcomes of two physical trials.",
+                     self._schema({"trial_a": string, "trial_b": string}, ["trial_a", "trial_b"]),
+                     lambda trial_a, trial_b: self._compare_executions(trial_a, trial_b))
+        registry.add("find_capability", "Find reusable capabilities, skills, or experiences.",
+                     self._schema({"query": string, "limit": integer}, ["query"]),
+                     lambda query, limit=8: cap.search(query=query, limit=limit, include_gaps=False))
+        def inspect_capability(asset_id):
+            result = cap.inspect(asset_id)
+            registry.activate("source_inspection")
+            return result
+
+        def acquire_capability(query):
+            registry.activate("web_acquisition")
+            registry.activate("asset_authoring")
+            return cap.web_search(query=query, limit=8)
+
+        registry.add("inspect_capability", "Inspect a selected capability asset.",
+                     self._schema({"asset_id": string}, ["asset_id"]), inspect_capability)
+        registry.add("acquire_capability", "Begin a public capability-acquisition workflow; inspect results, then download, build, validate, and register explicitly.",
+                     self._schema({"query": string}, ["query"]),
+                     acquire_capability)
         registry.add("run_diagnostic", "Run workspace controller.py, which must define def run(robot), as a bounded read-only diagnostic without consuming a physical trial.",
                      self._schema(), lambda: self._agent_evidence(self._run_diagnostic()))
         registry.add("record_decision",
@@ -866,6 +900,23 @@ class AgentLoop:
                          self._schema({"case_id": string}, ["case_id"]), self._select_case,
                          consequence="ENVIRONMENT_MUTATION")
         return registry
+
+    def _observe_current(self):
+        """Return a fresh public observation without consuming a physical trial.
+
+        ``initial_observation`` is intentionally a reset/start snapshot.  The
+        high-level Agent operation must instead query the live Adapter state so
+        it remains useful after actions and between experiments.
+        """
+        dispatch = getattr(self.adapter, "dispatch", None)
+        project = getattr(self.adapter, "project_rpc_output", None)
+        canonical = getattr(self.adapter, "canonical_observation", None)
+        if not callable(dispatch):
+            return self._canonical_observation(self.adapter.initial_observation())
+        request = {"channel": "proprioception", "request": {}}
+        raw = dispatch("observe", request)
+        value = project("observe", request, raw) if callable(project) else raw
+        return canonical(value) if callable(canonical) else value
 
     def _list_cases(self):
         return {"cases": [str(item) for item in getattr(self.adapter, "case_ids", ())],
@@ -1440,6 +1491,13 @@ class AgentLoop:
 
     def _run_controller(self):
         if self.runtime is None: raise RuntimeError("controller runtime is not configured")
+        if not self.workspace.controller.is_file():
+            raise FileNotFoundError("workspace controller.py is missing")
+        # Compile before any S0 reset, trial allocation, snapshot, or Adapter
+        # interaction. Invalid Python is a coding failure, not a physical
+        # experiment, and must not consume scarce robot budget.
+        controller_source = self.workspace.controller.read_text()
+        compile(controller_source, str(self.workspace.controller), "exec")
         episodic = bool(getattr(self.adapter, "episodic_trials", False))
         if episodic and not self._recovery_mode:
             reset = getattr(self.adapter, "reset_case", None)
@@ -1741,10 +1799,24 @@ class AgentLoop:
 
     def _messages(self, task: str):
         evidence = self._agent_latest_evidence
+        recent_versions = self.controller_versions[-16:]
+        latest_ref = (evidence.get("evidence_ref")
+                      if isinstance(evidence, Mapping) else None)
+        physical_verification = (evidence.get("physical_verification")
+                                 if isinstance(evidence, Mapping) else None)
         public_state = {"research": self.research_state,
                         "session_index": self.session_index,
                         "trial_index": self.trial_index,
-                        "controller_versions": self.controller_versions[-16:],
+                        "controller_versions": recent_versions,
+                        "experiment_summary": {
+                            "physical_trials": self.cumulative_executions,
+                            "distinct_recent_controllers": len({
+                                str(item.get("controller_sha256"))
+                                for item in recent_versions
+                                if item.get("controller_sha256")}),
+                            "latest_evidence_ref": latest_ref,
+                            "latest_physical_verification": physical_verification,
+                        },
                         "task_progress": self.progress_ledger[-16:],
                         "recent_decisions": self._recent_decisions(),
                         "active_tool_groups": list(self.tools.active_groups),

@@ -157,11 +157,11 @@ class _DisclosureModel:
         names = {item["function"]["name"] for item in tools}
         self.schema_names.append(names)
         if self.turn == 1:
-            return _call("activate_tool_group", {"group": "web_acquisition"}, self.turn)
+            return _call("acquire_capability", {"query": "robot perception"}, self.turn)
         return _call("list_files", {}, self.turn)
 
 
-def test_tool_schemas_are_progressively_disclosed_only_after_activation(tmp_path):
+def test_tool_schemas_are_progressively_disclosed_after_semantic_acquisition(tmp_path):
     adapter = FakeAdapter("progressive tools", tmp_path / "adapter")
     model = _DisclosureModel()
     loop = _loop(tmp_path, model, adapter,
@@ -170,13 +170,15 @@ def test_tool_schemas_are_progressively_disclosed_only_after_activation(tmp_path
     first, second = model.schema_names
     assert {"list_files", "search_assets", "inspect_asset", "run_controller",
             "inspect_execution", "view_sensor_artifact", "finish",
-            "activate_tool_group"}.issubset(first)
+            "acquire_capability"}.issubset(first)
+    # Legacy sessions may still see the compatibility control, but new flows
+    # disclose acquisition tools from the semantic operation itself.
     assert "search_web" not in first
     assert "register_tool" not in first
     assert "load_tool_source" not in first
     assert "search_web" in second
     assert "download_public_asset" in second
-    assert "register_tool" not in second
+    assert "register_tool" in second
 
     resumed_model = _DisclosureModel()
     resumed_model.turn = 1
@@ -189,7 +191,7 @@ def test_tool_schemas_are_progressively_disclosed_only_after_activation(tmp_path
         budget=LoopBudget(max_steps=1, max_executions=1), resume=True)
     resumed.run(adapter.instruction)
     assert "search_web" in resumed_model.schema_names[0]
-    assert "register_tool" not in resumed_model.schema_names[0]
+    assert "register_tool" in resumed_model.schema_names[0]
 
 
 class _FailedExecutionDisclosureModel:

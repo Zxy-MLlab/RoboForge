@@ -14,6 +14,44 @@ def _make_loop(tmp_path):
                                                        max_diagnostics=4))
 
 
+def test_high_level_observe_reads_live_state_without_trial(tmp_path):
+    loop = _make_loop(tmp_path)
+    before = loop._observe_current()
+    loop.adapter.dispatch("act", {"action": {"type": "set_value", "value": 1}})
+    after = loop._observe_current()
+    assert before != after
+    assert after["proprioception"]["proprioception"]["value"] == 1
+    assert loop.budget.executions == 0
+
+
+def test_capability_search_filters_zero_relevance_results(tmp_path):
+    from embodied_codex.kernel.capability_manager import CapabilityManager
+
+    class Library:
+        def search(self, query, limit=8, statuses=None):
+            return [{"tool_id": "irrelevant:v001", "retrieval_score": 0.0},
+                    {"tool_id": "matching:v001", "retrieval_score": 1.25}]
+
+    loop = _make_loop(tmp_path)
+    manager = CapabilityManager(asset_root=tmp_path / "assets", workspace=loop.workspace,
+                                adapter=loop.adapter, tool_library=Library())
+    found = manager.search("grasp")
+    assert [row["tool_id"] for row in found["tools"]] == ["matching:v001"]
+
+
+def test_invalid_controller_does_not_consume_physical_trial(tmp_path):
+    loop = _make_loop(tmp_path)
+    loop.workspace.write_file("controller.py", "def run(robot)\n    return {}\n")
+    before = (loop.budget.executions, loop.adapter.generation, len(loop.controller_versions))
+    try:
+        loop._run_controller()
+    except SyntaxError:
+        pass
+    else:
+        raise AssertionError("invalid controller unexpectedly executed")
+    assert (loop.budget.executions, loop.adapter.generation, len(loop.controller_versions)) == before
+
+
 def test_diagnostic_observation_is_not_a_physical_trial(tmp_path):
     loop = _make_loop(tmp_path)
     loop.workspace.write_file("controller.py", "def run(robot):\n    return robot.observe('rgb', {})\n")

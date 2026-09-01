@@ -226,7 +226,14 @@ class LiberoDeployment:
             self._in_warmup = False
             self.trace.append({"event":"adapter_warmup","steps":self._warmup_steps,
                                "controller_visible":True})
-        self._outcome_before = None
+        # A physical trial is reset immediately after begin_execution().  The
+        # reset establishes the actual episode initial state, so capture the
+        # verifier's before frame here rather than retaining the stale frame
+        # from before reset (or clearing it to None).
+        if getattr(self, "execution_kind", "physical_trial") == "physical_trial":
+            self._outcome_before = self._capture_outcome_rgb("before")
+        else:
+            self._outcome_before = None
 
     def resume_protocol(self):
         # A fresh simulator instance does not preserve physical state across a
