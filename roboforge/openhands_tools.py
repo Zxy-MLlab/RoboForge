@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -62,6 +64,18 @@ class ExperimentObservation(Observation):
     result: dict[str, Any] = Field(default_factory=dict)
 
 
+_PUBLIC_PATH_RE = re.compile(r"(?:file://)?(?:/root|/tmp|/workspace|/home)/[^\s,;]+")
+_PUBLIC_SECRET_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password)\s*([=:])\s*[^\s,;]+"
+)
+
+
+def _sanitize_error(value: Any) -> str:
+    text = str(value)[:2000]
+    text = _PUBLIC_PATH_RE.sub("<redacted-path>", text)
+    return _PUBLIC_SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+
+
 def _request_id(
     conversation: "LocalConversation | None",
     action: Action,
@@ -83,11 +97,45 @@ def _request_id(
     return f"direct:{tool_name}:{uuid.uuid4()}"
 
 
+def materialize_public_evidence(
+    service: ExperimentService,
+    evidence: ExperimentEvidence,
+    artifact_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    body = evidence.public_dict()
+    if artifact_dir is not None:
+        root = Path(artifact_dir).resolve()
+        rendered = []
+        for handle in evidence.artifacts:
+            data = service.read_artifact(handle)
+            if hashlib.sha256(data).hexdigest() != handle.sha256:
+                raise CorruptStore("artifact content digest mismatch")
+            name = Path(handle.name).name or "artifact"
+            target = (
+                root / ".roboforge" / "artifacts" / handle.sha256 / name
+            ).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ProtocolError("artifact materialization escaped workspace") from exc
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if (
+                not target.exists()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != handle.sha256
+            ):
+                temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                temporary.write_bytes(data)
+                temporary.replace(target)
+            rendered.append({**handle.__dict__, "local_path": str(target)})
+        body["artifacts"] = rendered
+    return body
+
+
 def _content_for_evidence(
     service: ExperimentService,
     evidence: ExperimentEvidence,
+    body: dict[str, Any],
 ) -> list[TextContent | ImageContent]:
-    body = evidence.public_dict()
     content: list[TextContent | ImageContent] = [
         TextContent(text=json.dumps(body, sort_keys=True, indent=2))
     ]
@@ -105,17 +153,23 @@ def _content_for_evidence(
 
 
 def _error(operation: str, exc: Exception) -> ExperimentObservation:
+    message = _sanitize_error(exc)
     return ExperimentObservation.from_text(
-        f"{type(exc).__name__}: {exc}",
+        f"{type(exc).__name__}: {message}",
         is_error=True,
         operation=operation,
-        result={},
+        result={"tool_error": {"type": type(exc).__name__, "message": message}},
     )
 
 
 class ObserveExecutor(ToolExecutor[ObserveAction, ExperimentObservation]):
-    def __init__(self, service: ExperimentService):
+    def __init__(
+        self,
+        service: ExperimentService,
+        artifact_dir: str | Path | None = None,
+    ):
         self.service = service
+        self.artifact_dir = artifact_dir
 
     def __call__(
         self,
@@ -126,10 +180,13 @@ class ObserveExecutor(ToolExecutor[ObserveAction, ExperimentObservation]):
             evidence = self.service.observe(
                 request_id=_request_id(conversation, action, "observe")
             )
+            body = materialize_public_evidence(
+                self.service, evidence, self.artifact_dir
+            )
             return ExperimentObservation(
                 operation="observe",
-                result=evidence.public_dict(),
-                content=_content_for_evidence(self.service, evidence),
+                result=body,
+                content=_content_for_evidence(self.service, evidence, body),
             )
         except (ProtocolError, CorruptStore) as exc:
             return _error("observe", exc)
@@ -138,10 +195,17 @@ class ObserveExecutor(ToolExecutor[ObserveAction, ExperimentObservation]):
 class RunControllerExecutor(
     ToolExecutor[RunControllerAction, ExperimentObservation]
 ):
-    def __init__(self, service: ExperimentService, controller_path: str | Path, asset_library=None):
+    def __init__(
+        self,
+        service: ExperimentService,
+        controller_path: str | Path,
+        asset_library=None,
+        artifact_dir: str | Path | None = None,
+    ):
         self.service = service
         self.controller_path = Path(controller_path).resolve()
         self.asset_library = asset_library
+        self.artifact_dir = artifact_dir
 
     def __call__(
         self,
@@ -161,18 +225,26 @@ class RunControllerExecutor(
                 intent=action.intent,
                 assets_used=action.assets_used,
             )
+            body = materialize_public_evidence(
+                self.service, evidence, self.artifact_dir
+            )
             return ExperimentObservation(
                 operation="run_controller",
-                result=evidence.public_dict(),
-                content=_content_for_evidence(self.service, evidence),
+                result=body,
+                content=_content_for_evidence(self.service, evidence, body),
             )
         except (ProtocolError, CorruptStore) as exc:
             return _error("run_controller", exc)
 
 
 class InspectTrialExecutor(ToolExecutor[InspectTrialAction, ExperimentObservation]):
-    def __init__(self, service: ExperimentService):
+    def __init__(
+        self,
+        service: ExperimentService,
+        artifact_dir: str | Path | None = None,
+    ):
         self.service = service
+        self.artifact_dir = artifact_dir
 
     def __call__(
         self,
@@ -184,10 +256,13 @@ class InspectTrialExecutor(ToolExecutor[InspectTrialAction, ExperimentObservatio
             if not ref:
                 raise ProtocolError("no experiment is available to inspect")
             evidence = self.service.inspect_trial(ref)
+            body = materialize_public_evidence(
+                self.service, evidence, self.artifact_dir
+            )
             return ExperimentObservation(
                 operation="inspect_trial",
-                result=evidence.public_dict(),
-                content=_content_for_evidence(self.service, evidence),
+                result=body,
+                content=_content_for_evidence(self.service, evidence, body),
             )
         except (ProtocolError, CorruptStore) as exc:
             return _error("inspect_trial", exc)
@@ -223,7 +298,12 @@ class ObserveTool(ToolDefinition[ObserveAction, ExperimentObservation]):
         return DeclaredResources(keys=("embodied:adapter",), declared=True)
 
     @classmethod
-    def create(cls, service: ExperimentService, **_: Any) -> Sequence["ObserveTool"]:
+    def create(
+        cls,
+        service: ExperimentService,
+        artifact_dir: str | Path | None = None,
+        **_: Any,
+    ) -> Sequence["ObserveTool"]:
         return [
             cls(
                 description=(
@@ -239,7 +319,7 @@ class ObserveTool(ToolDefinition[ObserveAction, ExperimentObservation]):
                     idempotentHint=False,
                     openWorldHint=False,
                 ),
-                executor=ObserveExecutor(service),
+                executor=ObserveExecutor(service, artifact_dir),
             )
         ]
 
@@ -258,6 +338,7 @@ class RunControllerTool(
         service: ExperimentService,
         controller_path: str | Path,
         asset_library=None,
+        artifact_dir: str | Path | None = None,
         **_: Any,
     ) -> Sequence["RunControllerTool"]:
         return [
@@ -277,7 +358,9 @@ class RunControllerTool(
                     idempotentHint=False,
                     openWorldHint=False,
                 ),
-                executor=RunControllerExecutor(service, controller_path, asset_library),
+                executor=RunControllerExecutor(
+                    service, controller_path, asset_library, artifact_dir
+                ),
             )
         ]
 
@@ -294,6 +377,7 @@ class InspectTrialTool(
     def create(
         cls,
         service: ExperimentService,
+        artifact_dir: str | Path | None = None,
         **_: Any,
     ) -> Sequence["InspectTrialTool"]:
         return [
@@ -311,7 +395,7 @@ class InspectTrialTool(
                     idempotentHint=True,
                     openWorldHint=False,
                 ),
-                executor=InspectTrialExecutor(service),
+                executor=InspectTrialExecutor(service, artifact_dir),
             )
         ]
 
@@ -354,10 +438,14 @@ def create_embodied_tools(
     service: ExperimentService,
     controller_path: str | Path,
     asset_library=None,
+    artifact_dir: str | Path | None = None,
 ) -> list[ToolDefinition[Any, Any]]:
     return [
-        *ObserveTool.create(service),
-        *RunControllerTool.create(service, controller_path, asset_library=asset_library),
-        *InspectTrialTool.create(service),
+        *ObserveTool.create(service, artifact_dir=artifact_dir),
+        *RunControllerTool.create(
+            service, controller_path, asset_library=asset_library,
+            artifact_dir=artifact_dir,
+        ),
+        *InspectTrialTool.create(service, artifact_dir=artifact_dir),
         *CompareTrialsTool.create(service),
     ]

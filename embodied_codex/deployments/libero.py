@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable, Mapping
 import uuid
@@ -29,6 +30,165 @@ Capability = Callable[[Mapping[str,Any]],Mapping[str,Any]]
 
 
 class LiberoDeploymentError(RuntimeError): pass
+
+
+_PUBLIC_PATH_RE = re.compile(
+    r"(?:file://)?(?:/root|/tmp|/workspace|/home)/[^\s,;]+"
+)
+_PUBLIC_SECRET_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+"
+)
+_PRIVATE_EXECUTION_KEYS = {
+    "base64",
+    "benchmark_state",
+    "case_handle",
+    "done",
+    "environment_identity",
+    "hidden_evaluator",
+    "image",
+    "raw",
+    "resume_token",
+    "reward",
+    "verification_receipt",
+}
+
+
+def _sanitize_public_text(value: Any) -> str:
+    """Keep controller-facing diagnostics useful without exposing host data."""
+    text = str(value)[:1000]
+    text = _PUBLIC_PATH_RE.sub("<redacted-path>", text)
+    return _PUBLIC_SECRET_RE.sub(
+        lambda match: match.group(0).split("=", 1)[0].split(":", 1)[0]
+        + "=<redacted>",
+        text,
+    )
+
+
+def _bounded_public(value: Any, *, depth: int = 0) -> Any:
+    """Project RPC facts to a bounded JSON shape for the coding Agent."""
+    if depth >= 8:
+        return "<truncated>"
+    if isinstance(value, Mapping):
+        return {
+            str(key): _bounded_public(item, depth=depth + 1)
+            for key, item in list(value.items())[:64]
+            if str(key) not in _PRIVATE_EXECUTION_KEYS
+            and not str(key).startswith("_harness_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_bounded_public(item, depth=depth + 1) for item in list(value)[:128]]
+    if isinstance(value, str):
+        return _sanitize_public_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _sanitize_public_text(value)
+
+
+def _split_public_error(value: Any) -> tuple[str, str]:
+    text = _sanitize_public_text(value)
+    kind, separator, message = text.partition(":")
+    if separator and kind and " " not in kind:
+        return kind, message.strip()
+    return "ControllerRuntimeError", text
+
+
+def _public_execution_diagnostics(execution: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only Controller-visible lifecycle, Tool, action, and state facts."""
+    raw_error = execution.get("error")
+    if execution.get("completed") is True and not raw_error:
+        termination = "completed"
+    elif raw_error == "controller timed out":
+        termination = "timeout"
+    elif raw_error == "controller exited":
+        termination = "process_exit"
+    elif raw_error == "controller process output exceeded the byte limit":
+        termination = "output_limit"
+    else:
+        termination = "controller_error"
+
+    tool_errors: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    for index, raw_event in enumerate(execution.get("rpc_events") or []):
+        if not isinstance(raw_event, Mapping):
+            continue
+        method = str(raw_event.get("method") or "")
+        arguments = raw_event.get("arguments")
+        if method == "use":
+            result = raw_event.get("result")
+            tool_result = result.get("result") if isinstance(result, Mapping) else None
+            tool_error = (
+                tool_result.get("tool_error")
+                if isinstance(tool_result, Mapping)
+                else None
+            )
+            if isinstance(tool_error, Mapping):
+                tool_errors.append(
+                    {
+                        "index": index,
+                        "tool_id": (
+                            str((arguments or {}).get("tool_id") or "")
+                            if isinstance(arguments, Mapping)
+                            else ""
+                        ),
+                        "step": (
+                            result.get("step")
+                            if isinstance(result, Mapping)
+                            else None
+                        ),
+                        "type": _sanitize_public_text(
+                            tool_error.get("type") or "ToolError"
+                        ),
+                        "message": _sanitize_public_text(
+                            tool_error.get("message") or "Tool failed"
+                        ),
+                    }
+                )
+            elif raw_event.get("error"):
+                kind, message = _split_public_error(raw_event["error"])
+                tool_errors.append(
+                    {
+                        "index": index,
+                        "tool_id": (
+                            str((arguments or {}).get("tool_id") or "")
+                            if isinstance(arguments, Mapping)
+                            else ""
+                        ),
+                        "step": None,
+                        "type": kind,
+                        "message": message,
+                    }
+                )
+        if method == "act":
+            action = {
+                "index": index,
+                "requested": _bounded_public(
+                    arguments.get("action") if isinstance(arguments, Mapping) else {}
+                ),
+            }
+            if "result" in raw_event:
+                action["result"] = _bounded_public(raw_event["result"])
+            if "error" in raw_event:
+                kind, message = _split_public_error(raw_event["error"])
+                action["error"] = {"type": kind, "message": message}
+            if "state_before" in raw_event:
+                action["state_before"] = _bounded_public(raw_event["state_before"])
+            if "state_after" in raw_event:
+                action["state_after"] = _bounded_public(raw_event["state_after"])
+            actions.append(action)
+
+    result: dict[str, Any] = {
+        "controller_termination": termination,
+        "tool_errors": tool_errors,
+        "action_trace": actions,
+    }
+    if execution.get("result") is not None:
+        result["controller_result"] = _bounded_public(execution["result"])
+    if raw_error:
+        kind, message = _split_public_error(raw_error)
+        result["controller_error"] = {"type": kind, "message": message}
+    if execution.get("stderr"):
+        result["controller_stderr"] = _sanitize_public_text(execution["stderr"])
+    return result
 
 
 def _validated_rotation_matrix(value: Any) -> np.ndarray:
@@ -846,13 +1006,16 @@ class LiberoDeployment:
         outcome = sensor_report.get("independent_task_outcome")
         verifier_diagnostic = None
         if isinstance(outcome, Mapping) and outcome.get("error"):
-            verifier_diagnostic = {"error": str(outcome["error"])[:1000]}
-        return {"outcome_observations": sensor_report.get("outcome_observations"),
-                "final_step": sensor_report.get("final_step"),
-                "final_proprioception": sensor_report.get("final_proprioception"),
-                "trace_path": sensor_report.get("trace_path"),
-                "rollout_path": sensor_report.get("rollout_path"),
-                "verifier_diagnostic": verifier_diagnostic}
+            verifier_diagnostic = {"error": _sanitize_public_text(outcome["error"])}
+        return {
+            **_public_execution_diagnostics(execution),
+            "outcome_observations": sensor_report.get("outcome_observations"),
+            "final_step": sensor_report.get("final_step"),
+            "final_proprioception": sensor_report.get("final_proprioception"),
+            "trace_path": sensor_report.get("trace_path"),
+            "rollout_path": sensor_report.get("rollout_path"),
+            "verifier_diagnostic": verifier_diagnostic,
+        }
 
     def verification_receipt(self, execution):
         report=self.sensor_report(execution)

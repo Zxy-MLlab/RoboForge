@@ -272,3 +272,178 @@ def test_asset_read_provenance_is_conversation_scoped(tmp_path):
     assert denied.is_error and service.status()["physical_trials"] == 0
     accepted = executor(RunControllerAction(intent="reuse", assets_used=[asset["asset_id"]]), first)
     assert not accepted.is_error
+
+
+def test_public_evidence_artifacts_materialize_inside_workspace(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from roboforge.openhands_tools import materialize_public_evidence
+
+    service = ExperimentService(tmp_path / "run", FakeAdapter())
+    evidence = service.observe(request_id="materialize")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    first = materialize_public_evidence(service, evidence, workspace)
+    artifact = first["artifacts"][0]
+    target = Path(artifact["local_path"])
+    before_mtime = target.stat().st_mtime_ns
+    second = materialize_public_evidence(service, evidence, workspace)
+
+    assert target.is_file()
+    assert target.resolve().is_relative_to(workspace.resolve())
+    assert target.read_bytes() == b"diagnostic-1"
+    assert __import__("hashlib").sha256(target.read_bytes()).hexdigest() == artifact["sha256"]
+    assert second["artifacts"][0]["local_path"] == str(target)
+    assert target.stat().st_mtime_ns == before_mtime
+    assert "local_path" not in json.dumps(evidence.public_dict())
+
+
+def test_materialized_artifact_name_cannot_escape_workspace(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from dataclasses import replace
+    from roboforge.openhands_tools import materialize_public_evidence
+
+    service = ExperimentService(tmp_path / "run", FakeAdapter())
+    evidence = service.observe(request_id="traversal")
+    malicious = replace(
+        evidence,
+        artifacts=(replace(evidence.artifacts[0], name="../../outside.png"),),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    body = materialize_public_evidence(service, malicious, workspace)
+
+    target = Path(body["artifacts"][0]["local_path"])
+    assert target.name == "outside.png"
+    assert target.resolve().is_relative_to(workspace.resolve())
+    assert not (tmp_path / "outside.png").exists()
+
+
+def test_openhands_error_observation_is_structured_and_sanitized():
+    pytest.importorskip("openhands.sdk")
+    from roboforge.openhands_tools import _error
+
+    observation = _error(
+        "run_controller",
+        RuntimeError("failed at /root/private/controller.py token=attacker-value"),
+    )
+
+    assert observation.is_error is True
+    assert observation.result["tool_error"]["type"] == "RuntimeError"
+    encoded = json.dumps(observation.result)
+    assert "/root/private" not in encoded
+    assert "attacker-value" not in encoded
+    assert "<redacted-path>" in encoded and "token=<redacted>" in encoded
+
+
+def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from roboforge.cli import _run_with_failure_feedback
+
+    service = ExperimentService(tmp_path / "run", FakeAdapter(), max_trials=3)
+    controller = tmp_path / "controller.py"
+    controller.write_text("def run(robot): return {}\n")
+
+    class Conversation:
+        def __init__(self):
+            self.run_calls = 0
+            self.messages = []
+
+        def run(self):
+            self.run_calls += 1
+            if self.run_calls == 1:
+                service.run_controller(
+                    request_id="failed-trial",
+                    controller_path=controller,
+                    intent="exercise feedback continuation",
+                )
+
+        def send_message(self, message, sender=None):
+            self.messages.append((message, sender))
+
+    conversation = Conversation()
+    _run_with_failure_feedback(conversation, service, tmp_path / "workspace")
+
+    assert conversation.run_calls == 2
+    assert len(conversation.messages) == 1
+    message, sender = conversation.messages[0]
+    assert sender == "roboforge"
+    assert "physical_verification" in message
+    assert "local_path" in message
+    assert "hidden success-evaluator state" in message.lower()
+
+
+def test_failure_feedback_stops_on_verified_or_exhausted_trial(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from roboforge.cli import _run_with_failure_feedback
+
+    controller = tmp_path / "controller.py"
+    controller.write_text("def run(robot): return {}\n")
+
+    for verified, max_trials in ((True, 2), (False, 1)):
+        adapter = FakeAdapter()
+        adapter.receipt_verified = verified
+        service = ExperimentService(
+            tmp_path / f"run-{verified}-{max_trials}",
+            adapter,
+            max_trials=max_trials,
+        )
+
+        class Conversation:
+            run_calls = 0
+            messages = []
+
+            def run(self):
+                self.run_calls += 1
+                service.run_controller(
+                    request_id="trial",
+                    controller_path=controller,
+                    intent="terminal condition",
+                )
+
+            def send_message(self, message, sender=None):
+                self.messages.append((message, sender))
+
+        conversation = Conversation()
+        _run_with_failure_feedback(conversation, service, tmp_path / "workspace")
+        assert conversation.run_calls == 1
+        assert conversation.messages == []
+
+
+def test_service_sanitizes_embedded_paths_and_secrets_without_mutating_adapter_data(
+    tmp_path,
+):
+    from copy import deepcopy
+    from roboforge.models import AdapterResult
+
+    class Adapter(FakeAdapter):
+        def observe(self):
+            return AdapterResult(
+                public={
+                    "message": (
+                        "failed at /root/private/controller.py "
+                        "token=attacker-token"
+                    ),
+                    "nested": {
+                        "api_key": "attacker-key",
+                        "detail": "log: /tmp/private/runtime.log",
+                    },
+                }
+            )
+
+    adapter = Adapter()
+    original = adapter.observe().public
+    expected = deepcopy(original)
+    adapter.observe = lambda: AdapterResult(public=original)
+
+    evidence = ExperimentService(tmp_path / "run", adapter).observe(
+        request_id="sanitize"
+    )
+    encoded = json.dumps(evidence.public, sort_keys=True)
+
+    assert original == expected
+    assert "/root/private" not in encoded and "/tmp/private" not in encoded
+    assert "attacker-token" not in encoded
+    assert "attacker-key" not in encoded
+    assert "<redacted-path>" in encoded

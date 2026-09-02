@@ -7,7 +7,10 @@ from jsonschema import Draft202012Validator
 from embodied_codex.adapters.libero import _perception_contract
 from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 from embodied_codex.capabilities.open_vocab_rgbd import OpenVocabularyRGBD
-from embodied_codex.deployments.libero import LiberoDeployment
+from embodied_codex.deployments.libero import (
+    LiberoDeployment,
+    _public_execution_diagnostics,
+)
 from embodied_codex.kernel.campaign import CampaignAdapter
 
 
@@ -81,6 +84,104 @@ def test_outcome_verifier_receives_complete_generic_before_after_payload(tmp_pat
     deployment.step = 1
     report = deployment.sensor_report({"completed": True})
     assert report["independent_task_outcome"]["verified"] is True
+
+
+def test_public_execution_diagnostics_exposes_tool_contract_failure():
+    execution = {
+        "completed": True,
+        "error": None,
+        "result": {
+            "tool_id": "libero.rgbd_perception:v001",
+            "step": 12,
+            "result": {
+                "ok": False,
+                "tool_error": {
+                    "type": "ToolContractError",
+                    "message": "20 is greater than the maximum of 12",
+                },
+            },
+        },
+        "rpc_events": [
+            {
+                "method": "use",
+                "arguments": {
+                    "tool_id": "libero.rgbd_perception:v001",
+                    "payload": {"max_detections_per_query": 20},
+                },
+                "result": {
+                    "tool_id": "libero.rgbd_perception:v001",
+                    "step": 12,
+                    "result": {
+                        "ok": False,
+                        "tool_error": {
+                            "type": "ToolContractError",
+                            "message": "20 is greater than the maximum of 12",
+                        },
+                    },
+                },
+            }
+        ],
+    }
+
+    public = _public_execution_diagnostics(execution)
+
+    assert public["controller_termination"] == "completed"
+    assert public["tool_errors"] == [
+        {
+            "index": 0,
+            "tool_id": "libero.rgbd_perception:v001",
+            "step": 12,
+            "type": "ToolContractError",
+            "message": "20 is greater than the maximum of 12",
+        }
+    ]
+    assert public["controller_result"] == execution["result"]
+
+
+def test_public_execution_diagnostics_preserves_actions_but_not_privileged_state():
+    execution = {
+        "completed": False,
+        "error": "RuntimeError: failed at /root/private/controller.py token=abc",
+        "stderr": "secret: value from /tmp/private.log",
+        "rpc_events": [
+            {
+                "method": "act",
+                "arguments": {
+                    "action": {
+                        "type": "move_to_point",
+                        "position_m": [0.1, 0.2, 0.3],
+                    }
+                },
+                "result": {
+                    "type": "move_to_point",
+                    "step": 23,
+                    "reached": False,
+                },
+                "state_before": {
+                    "robot": {"gripper": {"width_m": 0.07}},
+                    "reward": 99,
+                    "case_handle": "sealed-case",
+                },
+                "state_after": {
+                    "robot": {"gripper": {"width_m": 0.06}},
+                    "hidden_evaluator": True,
+                },
+            }
+        ],
+    }
+
+    public = _public_execution_diagnostics(execution)
+    encoded = json.dumps(public, sort_keys=True)
+
+    assert public["controller_termination"] == "controller_error"
+    assert public["action_trace"][0]["requested"]["position_m"] == [0.1, 0.2, 0.3]
+    assert public["action_trace"][0]["result"]["reached"] is False
+    assert public["action_trace"][0]["state_before"]["robot"]["gripper"] == {
+        "width_m": 0.07
+    }
+    assert "/root/private" not in encoded and "/tmp/private" not in encoded
+    for private in ("reward", "case_handle", "hidden_evaluator", "abc", "value"):
+        assert private not in encoded
 
 
 def test_campaign_delegates_execution_boundary_for_outcome_capture():

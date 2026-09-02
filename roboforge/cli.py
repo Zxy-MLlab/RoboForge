@@ -79,6 +79,36 @@ def _llm_base_url(model: str, base_url: str) -> str:
         return base_url.rstrip("/")[:-3]
     return base_url
 
+
+def _run_with_failure_feedback(conversation, service, workspace: Path) -> None:
+    """Continue one OpenHands conversation once per newly sealed failure."""
+    from .openhands_tools import materialize_public_evidence
+
+    feedback_ref = None
+    while True:
+        conversation.run()
+        status = service.status()
+        ref = status.get("latest_physical_evidence")
+        if not ref or ref == feedback_ref:
+            return
+        evidence = service.inspect_trial(ref)
+        verified = (evidence.physical_verification or {}).get("verified") is True
+        if verified or status["physical_trials"] >= status["max_trials"]:
+            return
+        feedback_ref = ref
+        public_failure = materialize_public_evidence(
+            service, evidence, workspace
+        )
+        conversation.send_message(
+            "A newly sealed physical trial failed authentic verification. "
+            "Continue this same coding conversation using only the public failure "
+            "evidence below. Inspect the materialized trace, video, and images when "
+            "useful; diagnose the first factual failure before changing code. Hidden "
+            "success-evaluator state and simulator internals remain unavailable.\n\n"
+            + json.dumps(public_failure, indent=2, sort_keys=True),
+            sender="roboforge",
+        )
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     lifecycle = _lifecycle_main(argv)
@@ -204,7 +234,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
             "a generic workspace-local Python capability, validate/register it with "
             "acquire_capability, then read/materialize and integrate it before physical use."
         )
-        convo.run()
+        _run_with_failure_feedback(convo, service, workspace)
     finally:
         convo.close(); worker.terminate()
         try: worker.wait(timeout=10)

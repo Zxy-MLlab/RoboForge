@@ -89,7 +89,12 @@ def register_spike_tools(
     if "glob" not in registered: register_tool("glob", GlobTool)
 
     library = AssetLibrary(asset_root) if asset_root else None
-    embodied = create_embodied_tools(service, controller, asset_library=library)
+    embodied = create_embodied_tools(
+        service,
+        controller,
+        asset_library=library,
+        artifact_dir=workspace_path,
+    )
     asset_tools = create_asset_tools(library, service, str(workspace_path)) if library else []
     for tool in [*embodied, *asset_tools]: register_tool(tool.name, tool)
 

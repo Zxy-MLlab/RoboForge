@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import difflib
+import re
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -47,6 +48,32 @@ class EmbodiedAdapter(Protocol):
 
 
 CrashHook = Callable[[str], None]
+
+_PUBLIC_PATH_RE = re.compile(r"(?:file://)?(?:/root|/tmp|/workspace|/home)/[^\s,;]+")
+_PUBLIC_SECRET_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password)\s*([=:])\s*[^\s,;]+"
+)
+
+
+def _sanitize_public_text(value: Any) -> str:
+    text = str(value)[:4000]
+    text = _PUBLIC_PATH_RE.sub("<redacted-path>", text)
+    return _PUBLIC_SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+
+
+def _sanitize_public_value(value: Any, *, key_name: str = "") -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_public_value(item, key_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_public_value(item, key_name=key_name) for item in value]
+    if isinstance(value, str):
+        if re.search(r"(?i)(?:api[_-]?key|token|secret|password)", key_name):
+            return "<redacted>"
+        return _sanitize_public_text(value)
+    return value
 
 
 class ExperimentService:
@@ -368,7 +395,8 @@ class ExperimentService:
         execution_error: str | None,
         assets_used: tuple[str, ...] = (),
     ) -> ExperimentEvidence:
-        self._assert_public_projection(result.public)
+        public = _sanitize_public_value(result.public)
+        self._assert_public_projection(public)
         handles = tuple(
             ArtifactHandle(**self.store.put_artifact(
                 name=artifact.name,
@@ -393,13 +421,13 @@ class ExperimentService:
             environment_generation=environment_generation,
             controller_sha256=controller_sha256,
             intent=intent,
-            public=result.public,
+            public=public,
             assets_used=assets_used,
             artifacts=handles,
             physical_verification=(
                 {"verified": bool(verified)} if kind == "physical_trial" else None
             ),
-            execution_error=execution_error,
+            execution_error=_sanitize_public_text(execution_error) if execution_error else None,
         )
         unsigned = evidence.public_dict()
         unsigned.pop("evidence_sha256")
