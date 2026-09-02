@@ -5,17 +5,12 @@ import hashlib
 import json
 import platform
 import sys
-import os
 from pathlib import Path
 from typing import Any
 
 from .assets import AssetLibrary
 from .store import canonical_json
 from .trust import verify_receipt
-
-def trusted_mode_available() -> bool:
-    """Return whether an externally isolated evaluator domain is configured."""
-    return os.environ.get("ROBOFORGE_TRUSTED_MODE", "").lower() in {"1", "true", "yes"}
 
 
 def environment_info() -> dict[str, Any]:
@@ -77,22 +72,7 @@ def compare(first: str | Path, second: str | Path) -> dict[str, Any]:
 def submit(asset_root: str | Path, asset_id: str, evidence_paths: list[str],
            *, note: str, evaluator_key: bytes | None = None,
            require_trusted_mode: bool = False) -> dict[str, Any]:
-    evidence = [load_evidence(path) for path in evidence_paths]
-    if not all((item.get("physical_verification") or {}).get("verified") is True
-               for item in evidence):
-        raise ValueError("promotion requires independently verified physical evidence")
-    if evaluator_key is None:
-        raise ValueError("promotion requires an evaluator-only receipt key")
-    if require_trusted_mode and not trusted_mode_available():
-        raise ValueError("trusted promotion unavailable: evaluator isolation is not configured")
-    for item in evidence:
-        receipt = item.get("sealed_receipt")
-        if not verify_receipt(receipt, evaluator_key):
-            raise ValueError("invalid or expired evaluator receipt")
-        if receipt.get("trial_id") != item.get("ref"):
-            raise ValueError("receipt trial binding mismatch")
-        if asset_id not in item.get("assets_used", []):
-            raise ValueError("receipt evidence does not prove capability use")
-    refs = [str(item["ref"]) for item in evidence]
-    return AssetLibrary(asset_root).decide_capability(
-        asset_id, decision="promoted", evidence=refs, note=note)
+    # This module runs in the Agent/runtime trust domain.  It must never have
+    # a local path to the trusted repository, regardless of environment
+    # variables, request flags, or caller-supplied HMAC keys.
+    raise PermissionError("trusted promotion is exclusively owned by isolated promotion service")

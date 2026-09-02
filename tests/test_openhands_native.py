@@ -67,16 +67,20 @@ def test_capability_promotion_is_external_and_requires_verified_evidence(tmp_pat
     from roboforge.store import canonical_json
     body["evidence_sha256"] = __import__("hashlib").sha256(canonical_json({k:v for k,v in body.items() if k != "evidence_sha256"})).hexdigest()
     evidence_path.write_text(json.dumps(body, indent=2, sort_keys=True))
-    promoted = submit(library.root, candidate["asset_id"], [str(evidence_path)],
-        note="external contract and physical validation passed", evaluator_key=b"evaluator")
-    assert promoted["verification_status"] == "promoted"
-    assert promoted["verification_decision"]["evidence"] == [evidence.ref]
+    with pytest.raises(PermissionError, match="isolated promotion service"):
+        submit(library.root, candidate["asset_id"], [str(evidence_path)],
+            note="external contract and physical validation passed", evaluator_key=b"evaluator")
+    assert library.read(candidate["asset_id"], session_id="test")["verification_status"] == "candidate"
 
-    assert library.decide_capability(candidate["asset_id"], decision="promoted",
-        evidence=[evidence.ref], note="external contract and physical validation passed") == promoted
-    with pytest.raises(ValueError, match="immutable"):
-        library.decide_capability(candidate["asset_id"], decision="rejected",
-            evidence=[evidence.ref], note="conflicting terminal decision")
+def test_agent_cannot_enable_trusted_promotion(monkeypatch, tmp_path):
+    library = AssetLibrary(tmp_path / "assets")
+    candidate = library.register("capabilities", name="attack", purpose="test", description="attack")
+    monkeypatch.setenv("ROBOFORGE_TRUSTED_MODE", "1")
+    for kwargs in ({}, {"require_trusted_mode": False},
+                   {"require_trusted_mode": True, "evaluator_key": b"attacker-key"}):
+        with pytest.raises(PermissionError, match="isolated promotion service"):
+            submit(library.root, candidate["asset_id"], [], note="forged", **kwargs)
+    assert library.read(candidate["asset_id"], session_id="attack")["verification_status"] == "candidate"
 
 def test_capability_promotion_rejects_negative_physical_evidence(tmp_path):
     library = AssetLibrary(tmp_path / "assets")
@@ -87,7 +91,7 @@ def test_capability_promotion_rejects_negative_physical_evidence(tmp_path):
     evidence = ExperimentService(run, FakeAdapter()).run_controller(
         request_id="negative", controller_path=controller, intent="negative validation")
     evidence_path = next((run / "evidence").glob("*.json"))
-    with pytest.raises(ValueError, match="independently verified physical evidence"):
+    with pytest.raises(PermissionError, match="isolated promotion service"):
         submit(library.root, candidate["asset_id"], [str(evidence_path)], note="must fail")
     assert library.read(candidate["asset_id"], session_id="test")["verification_status"] == "candidate"
 
