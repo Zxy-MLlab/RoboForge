@@ -1,0 +1,45 @@
+{
+  "experiment": "openhands-autonomous-task4-terminal-e2e-20260903",
+  "task": 4,
+  "instruction": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+  "development_state": 1,
+  "conversation_id": "41c0fd4c-872f-4094-94df-3bea72e731b3",
+  "conversation_events": 917,
+  "trial_count": 15,
+  "max_physical_trials": 15,
+  "termination_reason": "physical_trial_budget_exhausted",
+  "latest_verified": false,
+  "promotion": "not_attempted_no_verified_candidate",
+  "openhands_events": "/root/autodl-tmp/experiments/openhands-autonomous-task4-terminal-e2e-20260903/openhands/41c0fd4c872f409494df3bea72e731b3/events",
+  "workspace_trials": "/root/autodl-tmp/experiments/openhands-autonomous-task4-terminal-e2e-20260903/workspace/.roboforge/trials",
+  "campaign_result": "/root/autodl-tmp/experiments/openhands-autonomous-task4-terminal-e2e-20260903/workspace/.roboforge/campaign-result.json",
+  "controller_digests": [
+    "914a054f8c388412d27356f3c0e55336faeb6dbc695b8157932c501878cc89c8",
+    "d92583b671c7d756772e573da455656a36fed1ac61dc5a66d9d36308a7c1c452",
+    "5f880b38bb395d126fb46cce837d5b560437c3b3edab42be145898bd509c444a",
+    "48e12654f93b947855340a1d3415ceb5cb7cef72dc7af0832995cb8d35fd8deb",
+    "50c2252a92f073fda2e6972c09a9a050df5355aa932a3e677c6d91bb34b521f3",
+    "ce76156d67b27cf59edc141964c1da611b775acdce7d357fde4886aac2caad15",
+    "95170e1ddf04746a2cef9ce56015e8adee5ad49403e6e492915f3323a069a89f",
+    "f63ec0040604d73e2f5ff5ab42eb80fc4434d478fd813f57e902e47b21542534",
+    "48c49e8e6dbf66c7cfdea53f3f447a36845e7472a68c6af646b093172eac730c",
+    "3dfc09c924683668bba5ba29318420d2d5a7c51630735cf64230ce7a6c224e70",
+    "9d01c5e1b9018ecfb8474d9a646f533e61aad88e396ad531d81cd5cfcbf2c769",
+    "64369914115e2c9eee0a445cde5643715ca1cf2d67e4c64c13df97306a689728",
+    "80bd586133064e119bb0d597c12ccbd124eaefb42a8ceb6a620173e7d8eff52d",
+    "9fe441e8f4fd1feb20c6c2a589bf21da25412e45f8794de05c7764546608030c",
+    "07bca83d86091a2a9f9d5afec072bbb2a8ced90350202247bbb09c61a61d0677"
+  ],
+  "outcome_summary": {
+    "task_successes": 0,
+    "visual_attachment_trials": [3, 14, 15],
+    "visual_support_relation_trials": [12],
+    "robot_act_nonzero_all_trials": true,
+    "harness_infrastructure_failures": 0
+  },
+  "notes": [
+    "All trials ran with runner_exit_code=0 and environment_status=ok.",
+    "No verified candidate was frozen; held-out evaluation and promotion were therefore not run.",
+    "Repeated provider disconnects were recorded in the OpenHands conversation; the final run consumed the physical-trial budget."
+  ]
+}

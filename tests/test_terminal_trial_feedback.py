@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from roboforge.evidence import derive_status, extract_first_error
+from roboforge.cli import _write_campaign_result
 from roboforge.fakes import FakeAdapter
 from roboforge.models import AdapterResult, RawArtifact
 from roboforge.preflight import preflight_controller
@@ -106,3 +107,20 @@ def test_runner_controller_environment_and_task_status_are_distinct():
                       "environment_status": "ok", "task_success": False,
                       "termination_reason": "completed", "first_error": None,
                       "trial_status": "task_failed"}
+
+
+def test_campaign_result_records_openhands_failure_and_current_trial_count(tmp_path):
+    campaign = _write_campaign_result(
+        tmp_path,
+        status={"physical_trials": 13, "max_trials": 15},
+        elapsed=42.0,
+        max_iterations=80,
+        wall_time_budget=14400,
+        latest_verified=False,
+        run_error="ConversationRunError: provider unavailable",
+    )
+    assert campaign["termination_reason"] == "openhands_run_error"
+    assert campaign["physical_trials"] == 13
+    assert json.loads(
+        (tmp_path / ".roboforge" / "campaign-result.json").read_text()
+    ) == campaign
