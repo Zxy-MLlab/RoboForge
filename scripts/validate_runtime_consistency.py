@@ -17,12 +17,39 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 def trace(public: dict) -> list:
-    path = public.get("trace_path")
+    path = public.get("trace_path") or public.get("artifacts", [{}])[0].get("path")
     if not path or not Path(path).is_file(): return []
     return json.loads(Path(path).read_text())
 
 def actions(rows: list) -> list:
     return [row.get("request") for row in rows if row.get("event") == "act"]
+
+def semantic(rows: list, public: dict, receipt: dict) -> list[dict]:
+    out=[]
+    for i,row in enumerate(rows):
+        event=row.get("event")
+        out.append({"step": row.get("step", i),
+                    "observation_schema": row.get("observation_schema"),
+                    "observation_fingerprint": row.get("observation_fingerprint") or row.get("frame_id"),
+                    "action": row.get("request") if event == "act" else None,
+                    "robot_state": row.get("robot_state"),
+                    "termination": row.get("termination"),
+                    "success": row.get("success"),
+                    "error": row.get("error")})
+    if not out:
+        out=[{"step": public.get("final_step"),"observation_schema":None,
+              "observation_fingerprint":None,"action":None,"robot_state":public.get("final_proprioception"),
+              "termination":public.get("termination"),"success":receipt.get("verified"),"error":None}]
+    return out
+
+def field_diff(left, right):
+    rows=[]
+    for i in range(max(len(left),len(right))):
+        a=left[i] if i<len(left) else None; b=right[i] if i<len(right) else None
+        for field in sorted(set((a or {})) | set((b or {}))):
+            av=(a or {}).get(field); bv=(b or {}).get(field)
+            if av != bv: rows.append({"index":i,"field":field,"direct":av,"roboforge":bv,"direct_type":type(av).__name__,"roboforge_type":type(bv).__name__})
+    return rows
 
 
 def instruction(adapter) -> str:
@@ -80,6 +107,8 @@ def main() -> int:
     direct = manifest["direct"]; candidate = manifest["roboforge"]
     public = candidate["evidence"]["public"]
     direct_trace, provider_trace = trace(direct["public"]), trace(public)
+    direct_sem, provider_sem = semantic(direct_trace, direct["public"], direct["receipt"]), semantic(provider_trace, public, candidate["evidence"].get("physical_verification") or {})
+    differences=field_diff(direct_sem, provider_sem)
     manifest["comparison"] = {
         "instruction_equal": direct["instruction"] == candidate["instruction"],
         "task_identity_equal": direct["identity"].get("task_identity") ==
@@ -91,9 +120,11 @@ def main() -> int:
         "actions_equal": actions(direct_trace) == actions(provider_trace),
         "termination_equal": direct["public"].get("termination") == public.get("termination"),
         "success_equal": direct["receipt"].get("verified") == (candidate["evidence"].get("physical_verification") or {}).get("verified"),
-        "trace_equal": direct_trace == provider_trace,
-        "direct_trace_sha256": hashlib.sha256(json.dumps(direct_trace,sort_keys=True,default=str).encode()).hexdigest(),
-        "roboforge_trace_sha256": hashlib.sha256(json.dumps(provider_trace,sort_keys=True,default=str).encode()).hexdigest(),
+        "semantic_trace_equal": not differences,
+        "trace_field_differences": differences,
+        "direct_semantic_digest": hashlib.sha256(json.dumps(direct_sem,sort_keys=True,default=str).encode()).hexdigest(),
+        "roboforge_semantic_digest": hashlib.sha256(json.dumps(provider_sem,sort_keys=True,default=str).encode()).hexdigest(),
+        "provenance": {"direct_trace_path": direct["public"].get("trace_path"), "roboforge_trace_path": public.get("trace_path"), "direct_elapsed": direct.get("elapsed_seconds"), "roboforge_elapsed": candidate.get("elapsed_seconds")},
     }
     (output / "runtime-consistency.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
