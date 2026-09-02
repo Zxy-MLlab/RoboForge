@@ -119,13 +119,15 @@ def test_trial_materialization_exposes_sanitized_files_and_nonzero_status(tmp_pa
     result = materialize_trial(service, evidence, workspace, controller_path=controller)
     trial = workspace / ".roboforge" / "trials" / "physical-000001"
     expected = {"manifest.json", "frozen_source", "trace.json", "first_error.json",
-                "action_receipts.jsonl", "keyframes", "rollout.mp4", "stdout.log",
+                "action_receipts.jsonl", "keyframes", "stdout.log",
                 "stderr.log", "result.json"}
     assert expected.issubset({item.name for item in trial.iterdir()})
     assert result["runner_exit_code"] == 1
     assert result["controller_status"] == "error"
     assert json.loads((trial / "first_error.json").read_text())["message"] == "20 > 12"
     assert json.loads((trial / "stdout.log").read_text()) == result
+    manifest = json.loads((trial / "manifest.json").read_text())
+    assert manifest["artifact_availability"]["rollout_mp4"] is True
     encoded = (trial / "trace.json").read_text()
     for private in ("sim.data", "sim.model", "hidden_evaluator", "promotion key"):
         assert private not in encoded

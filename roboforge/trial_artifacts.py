@@ -85,10 +85,10 @@ def materialize_trial(
         rendered.append({**handle.__dict__, "local_path": str(destination)})
 
     action_trace = list(public_result.get("action_trace") or [])
+    trajectory_synthetic = False
     if not (target / "trajectory.npz").exists():
         _write_trajectory_fallback(target / "trajectory.npz", action_trace)
-    if not (target / "rollout.mp4").exists():
-        (target / "rollout.mp4").write_bytes(b"")
+        trajectory_synthetic = True
     (target / "action_receipts.jsonl").write_text(
         "".join(json.dumps(item, sort_keys=True) + "\n" for item in action_trace),
         encoding="utf-8",
@@ -110,7 +110,15 @@ def materialize_trial(
     _json(target / "manifest.json", {"schema_version": 1, "trial_id": trial_id,
           "evidence": public, "artifacts": rendered, "paths": {
               "trace": str(target / "trace.json"), "first_error": str(target / "first_error.json"),
-              "actions": str(target / "action_receipts.jsonl"), "result": str(target / "result.json")}})
+              "actions": str(target / "action_receipts.jsonl"), "result": str(target / "result.json"),
+              "rollout": str(target / "rollout.mp4") if (target / "rollout.mp4").is_file() else None,
+              "trajectory": str(target / "trajectory.npz") if (target / "trajectory.npz").is_file() else None},
+          "artifact_availability": {
+              "rollout_mp4": (target / "rollout.mp4").is_file(),
+              "trajectory_npz": (target / "trajectory.npz").is_file(),
+              "trajectory_synthetic": trajectory_synthetic,
+              "keyframe_count": len(list(keyframes.iterdir())),
+          }})
     return result
 
 

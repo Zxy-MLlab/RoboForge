@@ -1,6 +1,6 @@
 """Formal OpenHands-native RoboForge entry point."""
 from __future__ import annotations
-import argparse, os, secrets, shlex, subprocess, sys, time
+import argparse, os, secrets, subprocess, sys, threading, time
 import uuid
 import json
 from pathlib import Path
@@ -90,7 +90,7 @@ def _run_frozen_candidate(args) -> dict:
         "--controller-path", str(entrypoint), "--socket", str(socket_path),
         "--max-trials", "1", "--timeout-seconds", str(args.timeout),
         "--configuration-json", json.dumps({"disable_agent_verifier": True})]
-    worker_env = os.environ.copy(); worker_env["ROBOFORGE_RPC_TOKEN"] = token
+    worker_env = _runtime_worker_env(token)
     worker = subprocess.Popen(command, cwd=Path(__file__).parents[1], env=worker_env)
     client = ExperimentRpcClient(socket_path, token, timeout=args.timeout + 60)
     try:
@@ -115,6 +115,24 @@ def _llm_base_url(model: str, base_url: str) -> str:
     if model.lower().startswith(("claude", "anthropic/")) and base_url.rstrip("/").endswith("/v1"):
         return base_url.rstrip("/")[:-3]
     return base_url
+
+
+def _runtime_worker_env(token: str) -> dict[str, str]:
+    """Pass runtime configuration, but never Agent/evaluator credentials."""
+    allowed = {
+        "PATH", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONPATH", "PYTHONNOUSERSITE",
+        "LD_LIBRARY_PATH", "CUDA_HOME", "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES", "MUJOCO_GL", "OMP_NUM_THREADS",
+        "LIBERO_CONFIG_PATH", "PYOPENGL_PLATFORM", "ROBOFORGE_DEVICE", "ROBOFORGE_ROOT",
+        "ROBOFORGE_VENDOR_ROOT", "ROBOFORGE_LIBERO_VENDOR_CONFIG",
+        "ROBOFORGE_GROUNDINGDINO_CHECKPOINT", "ROBOFORGE_SAM_CHECKPOINT",
+        "ROBOFORGE_GRASPNET_CHECKPOINT", "ROBOFORGE_PYTHON",
+        "HF_HOME", "TOKENIZERS_PARALLELISM",
+    }
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    env["ROBOFORGE_RPC_TOKEN"] = token
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
 
 
 def _initialize_persistent_workspace(workspace: Path) -> None:
@@ -155,6 +173,7 @@ def _write_campaign_result(
     latest_verified: bool,
     run_error: str | None = None,
     conversation_reason: str | None = None,
+    max_agent_budget: float | None = None,
 ) -> dict:
     if latest_verified:
         termination_reason = "verified"
@@ -175,6 +194,7 @@ def _write_campaign_result(
         "max_physical_trials": status["max_trials"],
         "max_openhands_iterations": max_iterations,
         "wall_time_budget_seconds": wall_time_budget,
+        "max_agent_budget": max_agent_budget,
         "elapsed_seconds": elapsed,
         "latest_verified": latest_verified,
     }
@@ -233,6 +253,8 @@ def main(argv=None):
                    default=os.getenv("ROBOFORGE_MODEL_PROVIDER"))
     p.add_argument("--max-iterations", type=int, default=80)
     p.add_argument("--wall-time-budget", type=float, default=14400)
+    p.add_argument("--max-agent-budget", type=float, default=None,
+                   help="OpenHands public max_budget_per_run limit")
     p.add_argument("--reasoning-effort", default="medium", choices=["low", "medium", "high", "xhigh"])
     p.add_argument("--model-retries", type=int, default=2)
     p.add_argument("--model-timeout", type=int, default=180)
@@ -286,7 +308,7 @@ def main(argv=None):
         "--controller-path", str(controller), "--socket", str(socket_path),
         "--max-trials", str(a.max_trials),
         "--configuration-json", json.dumps(adapter_configuration, sort_keys=True)]
-    worker_env = os.environ.copy(); worker_env["ROBOFORGE_RPC_TOKEN"] = token
+    worker_env = _runtime_worker_env(token)
     worker = subprocess.Popen(command, cwd=Path(__file__).parents[1], env=worker_env)
     service = ExperimentRpcClient(socket_path, token, timeout=900)
     for _ in range(300):
@@ -315,22 +337,10 @@ def main(argv=None):
     interface_manual = workspace / "ROBOT_INTERFACE.json"
     interface_manual.write_text(json.dumps(task_info.get("robot_interface") or {}, indent=2,
         sort_keys=True), encoding="utf-8")
-    from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher
-    from .stop_gate import write_public_status
-
-    campaign_status = write_public_status(service, workspace)
-    stop_hook = HookConfig(stop=[HookMatcher(hooks=[HookDefinition(
-        command=(
-            f"PYTHONPATH={shlex.quote(str(Path(__file__).parents[1]))} "
-            f"{shlex.quote(sys.executable)} -m roboforge.stop_gate "
-            f"--status {shlex.quote(str(campaign_status))}"
-        ),
-        timeout=10,
-    )])])
     convo = create_openhands_conversation(llm=llm, workspace=workspace,
         persistence_dir=run / "openhands", service=service, controller_path=controller,
         asset_root=a.asset_root, conversation_id=conversation_id,
-        max_iterations=a.max_iterations, hook_config=stop_hook,
+        max_iterations=a.max_iterations, max_budget_per_run=a.max_agent_budget,
         terminal_env={
             "ROBOFORGE_RPC_SOCKET": str(socket_path),
             "ROBOFORGE_RPC_TOKEN": token,
@@ -345,11 +355,10 @@ Read `.roboforge/trials/<trial_id>/result.json`, `first_error.json`, `trace.json
 with ordinary Terminal/file tools, then continue until authentic verification or
 the physical budget is exhausted. Do not infer hidden simulator state or use task-specific patches.
 Reusable assets are under {Path(a.asset_root).resolve()} and should be searched only when useful."""
-    prompt += ("\nBefore changing the existing Controller, run it once through the Terminal trial CLI. "
-               "A deterministic contract preflight failure does not consume physical budget; read its "
-               "result.json and first_error.json before editing.")
-    prompt += "\nYour first response MUST invoke terminal or file_editor; do not reply with planning text alone. Continue using tools until the task is finished or the budget is exhausted."
-    prompt += "\nBefore the first physical trial, consider whether existing assets are relevant. When asset search returns a relevant result, read that selected asset before deciding whether to reuse or adapt it; a search hit alone is not reuse."
+    prompt += ("\nUse the public coding tools and ordinary Terminal commands as appropriate. "
+               "Trial preflight results, execution traces, images, logs and artifacts are available "
+               "in the workspace; inspect whichever evidence is useful before deciding your next edit "
+               "or experiment. Continue until you explicitly finish or an SDK/runtime budget is reached.")
     prompt += ("\nIf factual evidence reveals a missing reusable software capability, "
                "independently implement or obtain it as ordinary workspace code, inspect its "
                "source and license, validate it through Terminal, and integrate it through the "
@@ -357,6 +366,21 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
                "alone freezes and publishes validated capabilities; there is no Agent-side "
                "capability acquisition or materialization tool.")
     started = time.monotonic()
+    wall_time_expired = threading.Event()
+
+    def pause_at_wall_time_limit() -> None:
+        wall_time_expired.set()
+        # ``pause`` is an official LocalConversation lifecycle operation.  It
+        # lets the current SDK run terminate without wrapping it in another
+        # model/tool loop.
+        try:
+            convo.pause()
+        except Exception:
+            pass
+
+    wall_timer = threading.Timer(a.wall_time_budget, pause_at_wall_time_limit)
+    wall_timer.daemon = True
+    wall_timer.start()
     run_error = None
     run_exception = None
     final_status = None
@@ -377,8 +401,8 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
             "it as a normal Python/service dependency before physical use."
         )
         # One official OpenHands run owns the entire edit→Terminal→inspect→edit
-        # session. The public Stop hook keeps that same run alive after an
-        # unverified trial; RoboForge does not implement a second AgentLoop.
+        # session. RoboForge does not intercept Finish or implement a second
+        # AgentLoop; the SDK's own iteration/budget lifecycle is authoritative.
         convo.run()
         conversation_reason = _conversation_termination_reason(convo)
     except Exception as exc:
@@ -388,6 +412,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         run_error = f"{type(exc).__name__}: {exc}"
         run_exception = exc
     finally:
+        wall_timer.cancel()
         # Query the worker before terminating it so the final campaign record
         # reflects all durable trials completed during this run, including an
         # OpenHands exception path.
@@ -407,6 +432,8 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         try: worker.wait(timeout=10)
         except subprocess.TimeoutExpired: worker.kill(); worker.wait()
     elapsed = time.monotonic() - started
+    if wall_time_expired.is_set():
+        elapsed = max(elapsed, a.wall_time_budget)
     status = final_status or {"physical_trials": 0, "max_trials": a.max_trials}
     _write_campaign_result(
         workspace,
@@ -417,6 +444,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         latest_verified=latest_verified,
         run_error=run_error,
         conversation_reason=conversation_reason,
+        max_agent_budget=a.max_agent_budget,
     )
     if run_exception is not None:
         raise run_exception

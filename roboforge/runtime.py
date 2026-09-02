@@ -19,6 +19,13 @@ from openhands.tools.preset.default import register_builtins_agents
 from openhands.tools.preset.planning import get_planning_tools
 from openhands.tools.task import TaskToolSet
 
+try:
+    # BrowserToolSet is an upstream optional extension.  Importing it is kept
+    # best-effort so a headless install still has a working coding agent.
+    from openhands.tools.browser_use.definition import BrowserToolSet
+except Exception:  # pragma: no cover - exercised by minimal SDK installs
+    BrowserToolSet = None  # type: ignore[assignment,misc]
+
 from .service import ExperimentService
 
 class ConfinedFileEditorExecutor(FileEditorExecutor):
@@ -88,9 +95,16 @@ def register_spike_tools(
     if "terminal" not in registered: register_tool("terminal", TerminalTool)
     if "grep" not in registered: register_tool("grep", GrepTool)
     if "glob" not in registered: register_tool("glob", GlobTool)
-    # Register only public OpenHands extensions. Browser-backed agents stay
-    # disabled until BrowserToolSet.is_usable() succeeds in the installed SDK.
-    register_builtins_agents(enable_browser=False)
+    # Register only public OpenHands extensions. Browser-backed agents are
+    # enabled only when the installed SDK can actually start Chromium; this
+    # avoids both a fake Web capability and an unconditional hard-disable.
+    browser_usable = False
+    if BrowserToolSet is not None:
+        try:
+            browser_usable = bool(BrowserToolSet.is_usable())
+        except Exception:
+            browser_usable = False
+    register_builtins_agents(enable_browser=browser_usable)
     planning = get_planning_tools(str(workspace_path / "PLAN.md"))
 
     # ``service``, ``controller`` and ``asset_root`` remain accepted for API
@@ -111,4 +125,6 @@ def register_spike_tools(
         Tool(name="grep"), Tool(name="glob"),
         *(tool for tool in planning if tool.name not in {"grep", "glob"}),
         Tool(name=TaskToolSet.name),
+        *( [Tool(name=BrowserToolSet.name)]
+           if browser_usable and BrowserToolSet is not None else []),
     ]

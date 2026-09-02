@@ -207,13 +207,27 @@ def test_formal_tools_use_public_planning_and_subagent_extensions(tmp_path):
 def test_formal_cli_passes_explicit_provider_to_adapter_worker():
     cli = (Path(__file__).parents[1] / "roboforge" / "cli.py").read_text()
     assert 'f"--token={token}"' not in cli
-    assert 'worker_env["ROBOFORGE_RPC_TOKEN"] = token' in cli
+    assert "worker_env = _runtime_worker_env(token)" in cli
+    assert "os.environ.copy()" not in cli
     assert 'p.add_argument("--provider"' in cli
     assert '"verifier_provider": provider' in cli
     assert '"--configuration-json"' in cli
     assert "physical_verification.verified=true" in cli
     assert "there is no Agent-side" in cli
     assert "acquire_capability" not in cli
+
+
+def test_runtime_worker_environment_does_not_inherit_unrelated_secrets(monkeypatch):
+    from roboforge.cli import _runtime_worker_env
+
+    monkeypatch.setenv("ROBOFORGE_PROMOTION_TOKEN", "must-not-cross")
+    monkeypatch.setenv("APEX_API_KEY", "model-secret")
+    monkeypatch.setenv("LIBERO_CONFIG_PATH", "/safe/config")
+    env = _runtime_worker_env("rpc-token")
+    assert env["ROBOFORGE_RPC_TOKEN"] == "rpc-token"
+    assert env["LIBERO_CONFIG_PATH"] == "/safe/config"
+    assert "ROBOFORGE_PROMOTION_TOKEN" not in env
+    assert "APEX_API_KEY" not in env
 
 
 def test_canonical_workspace_layout(tmp_path):

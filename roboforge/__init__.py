@@ -17,7 +17,8 @@ from .assets import AssetLibrary
 
 def create_openhands_conversation(*, llm, workspace, persistence_dir, service, controller_path,
                                   asset_root=None, conversation_id=None, max_iterations=500,
-                                  hook_config=None, terminal_env=None):
+                                  hook_config=None, terminal_env=None,
+                                  max_budget_per_run=None):
     """Construct an OpenHands conversation with native coding tools only."""
     from openhands.sdk import Agent
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
@@ -28,6 +29,7 @@ def create_openhands_conversation(*, llm, workspace, persistence_dir, service, c
     return LocalConversation(agent=agent, workspace=workspace, persistence_dir=persistence_dir,
                              conversation_id=conversation_id,
                              max_iteration_per_run=max_iterations,
+                             max_budget_per_run=max_budget_per_run,
                              visualizer=None, delete_on_close=False,
                              hook_config=hook_config)
 

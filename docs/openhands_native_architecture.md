@@ -25,9 +25,11 @@ FileEditor, Terminal, Grep, Glob, workspace-bound `planning_file_editor`, and
 `code-explorer`, and `general-purpose` subagents. Git and package installation
 are ordinary Terminal operations.
 
-Browser/Web is not registered in the verified local environment because the
-OpenHands `BrowserToolSet` is not usable there without `browser-use` and a
-Chromium runtime. No Web invocation is claimed for that environment.
+Browser/Web is registered only when the installed OpenHands
+`BrowserToolSet.is_usable()` check succeeds (it requires a working browser
+runtime). In the verified local environment that check is false, so no Web
+invocation is claimed. Git has no native SDK tool in OpenHands 1.44.1; agents
+use the ordinary Terminal `git` command (and the public workspace Git API).
 
 New runs create an ordinary persistent robot project layout containing
 `controllers/`, `capabilities/{perception,grasping,planning,control}/`,
