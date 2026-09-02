@@ -159,6 +159,7 @@ def main(argv=None):
     p.add_argument("--provider", choices=["openai", "apex"],
                    default=os.getenv("ROBOFORGE_MODEL_PROVIDER"))
     p.add_argument("--max-iterations", type=int, default=80)
+    p.add_argument("--wall-time-budget", type=float, default=14400)
     p.add_argument("--reasoning-effort", default="medium", choices=["low", "medium", "high", "xhigh"])
     p.add_argument("--model-retries", type=int, default=2)
     p.add_argument("--model-timeout", type=int, default=180)
@@ -296,7 +297,34 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         # One official OpenHands run owns the entire edit→Terminal→inspect→edit
         # session. The public Stop hook keeps that same run alive after an
         # unverified trial; RoboForge does not implement a second AgentLoop.
+        started = time.monotonic()
         convo.run()
+        elapsed = time.monotonic() - started
+        status = service.status()
+        latest = status.get("latest_physical_evidence")
+        verified = bool(
+            latest
+            and (service.inspect_trial(str(latest)).physical_verification or {}).get("verified") is True
+        )
+        termination_reason = (
+            "verified" if verified
+            else "physical_trial_budget_exhausted" if status["physical_trials"] >= status["max_trials"]
+            else "wall_time_budget_exhausted" if elapsed >= a.wall_time_budget
+            else "openhands_iteration_budget_or_agent_stop"
+        )
+        campaign = {
+            "schema_version": 1,
+            "termination_reason": termination_reason,
+            "physical_trials": status["physical_trials"],
+            "max_physical_trials": status["max_trials"],
+            "max_openhands_iterations": a.max_iterations,
+            "wall_time_budget_seconds": a.wall_time_budget,
+            "elapsed_seconds": elapsed,
+            "latest_verified": verified,
+        }
+        (workspace / ".roboforge" / "campaign-result.json").write_text(
+            json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     finally:
         convo.close(); worker.terminate()
         try: worker.wait(timeout=10)
