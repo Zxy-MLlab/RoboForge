@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "protocol": "openhands-terminal-autonomous-libero-v1",
+  "task": "4",
+  "instruction": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+  "campaign": {
+    "path": "/root/autodl-tmp/experiments/openhands-autonomous-task4-final-r3-20260903",
+    "conversation_id": "800cd20db4604a7db93006b9cb9eb18a",
+    "event_count": 699,
+    "agent_events": 268,
+    "terminal_calls": 152,
+    "editor_calls": 60,
+    "grep_calls": 2,
+    "physical_trials": 14,
+    "max_physical_trials": 15,
+    "termination_reason": "verified",
+    "latest_verified": true,
+    "wall_time_budget_seconds": 14400,
+    "iterations_budget": 500,
+    "web_called": false,
+    "subagent_called": false
+  },
+  "development_result": {
+    "trial_id": "physical-000014",
+    "controller_sha256": "c56243da18adddfa4592e665372d8bdb0313eb3bde2039f4bb73b077efa74557",
+    "trace_sha256": "3f8749bcdb4d5a2cae565956e56312e6450cff01b1e58e93a9e870ba38f61010",
+    "task_success": true,
+    "runner_exit_code": 0,
+    "sealed_verified": true,
+    "result_path": "/root/autodl-tmp/experiments/openhands-autonomous-task4-final-r3-20260903/workspace/.roboforge/trials/physical-000014/result.json",
+    "trace_path": "/root/autodl-tmp/experiments/openhands-autonomous-task4-final-r3-20260903/workspace/.roboforge/trials/physical-000014/trace.json"
+  },
+  "capability": {
+    "asset_id": "capability://6390792feccbdc123533bc574696a46123bb76eea6f5b812988eb974cdd62fdc",
+    "controller_loaded_trial": "experiment://physical-000001",
+    "loaded_controller_sha256": "791534bb4e8c8898c96784cc85fb6db7665e01bbcc9fe3c0ee968c7bba30fc63",
+    "loaded_trace_sha256": "0ca16d84f904cfe0dffe24ef7f4114cea4d488faa0fe966f29e2eb50cb16a98a",
+    "sealed_receipt_sha256": "9978c06b2ee44cf46f53b461d58e37b054ba10afb87930fc51cd0014549b0211",
+    "promotion_decision_id": "decision://ac75b4724ac1693a757f98f8b66d00a9f985c935e8fd851ee37be02f611ebd77",
+    "promotion_result": "promoted",
+    "promotion_result_path": "/root/autodl-tmp/experiments/openhands-autonomous-task4-final-r3-20260903/capability-promotion/promotion-valid-result.json"
+  },
+  "held_out": {
+    "pilot_states": "1-5",
+    "pilot_path": "/root/autodl-tmp/experiments/task4-autonomous-heldout-validation-1-5-20260903-rerun/paired-evaluation.json",
+    "pilot_baseline_success_rate": 0.0,
+    "pilot_candidate_success_rate": 0.0,
+    "pilot_paired_difference": 0.0,
+    "states": "6-25",
+    "path": "/root/autodl-tmp/experiments/task4-autonomous-heldout-evaluation-6-25-20260903/paired-evaluation.json",
+    "baseline_episodes": 20,
+    "candidate_episodes": 20,
+    "baseline_success_rate": 0.0,
+    "candidate_success_rate": 0.0,
+    "paired_difference": 0.0,
+    "interpretation": "development success on state 0 did not generalize to held-out states 1-25"
+  },
+  "contract_regression": {
+    "path": "/root/autodl-tmp/experiments/openhands-contract-regression-r2-20260903/workspace/.roboforge/trials/preflight-3ee0e15113ce/result.json",
+    "error_type": "ToolContractError",
+    "message": "20 is greater than the maximum of 12",
+    "physical_trial_consumed": false,
+    "runner_exit_code": 2
+  },
+  "tests": {
+    "openhands_native_command": "/root/autodl-tmp/RoboForge-v2-spike/.venv/bin/python -m pytest -q tests/test_openhands_native.py tests/test_terminal_trial_feedback.py",
+    "openhands_native": "37 passed, 0 skipped",
+    "full_tests_command": "/root/autodl-tmp/mj311/bin/python -m pytest -q tests evaluation",
+    "full_tests": "301 passed, 6 skipped (Python 3.11; skips are OpenHands SDK unavailable in that interpreter)",
+    "compileall_exit": 0,
+    "git_diff_check_exit": 0
+  },
+  "limitations": [
+    "The successful development episode used no capability; a separate fresh episode loaded the new capability and was sealed successfully before promotion.",
+    "Web and Subagent were not invoked in this campaign; the SDK/browser environment did not provide a usable BrowserToolSet.",
+    "Held-out evaluation is a real negative result and was not fed back to the OpenHands conversation."
+  ]
+}
