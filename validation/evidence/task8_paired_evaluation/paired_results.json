@@ -1,0 +1,1049 @@
+{
+  "results": [
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 1,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 1,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 2,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 2,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 3,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 3,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 4,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 4,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 5,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 5,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 6,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 6,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 7,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 7,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 8,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 8,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 9,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 9,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 10,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 10,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 11,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 11,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 12,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 12,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 13,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 13,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 14,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 14,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 15,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 15,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 16,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 16,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 17,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 17,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 18,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 18,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 19,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 19,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 20,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 20,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 21,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 21,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 22,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 22,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 23,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 23,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 24,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 24,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 25,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 25,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 26,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 26,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 27,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 27,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 28,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 28,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 29,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 29,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 30,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 30,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 31,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 31,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 32,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 32,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 33,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 33,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 34,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 34,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 35,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 35,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 36,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 36,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 37,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 37,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 38,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 38,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 39,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 39,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 40,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 40,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 41,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 41,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 42,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 42,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 43,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 43,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 44,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "execution_status": null,
+      "sealed_evaluation": true,
+      "state": 44,
+      "success_rate": 1.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 45,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 45,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 46,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 46,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 47,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 47,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 48,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 48,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "baseline",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 49,
+      "success_rate": 0.0
+    },
+    {
+      "arm": "candidate",
+      "episodes": 1,
+      "evaluation_passed": false,
+      "evaluator_successes": 0,
+      "execution_status": null,
+      "sealed_evaluation": false,
+      "state": 49,
+      "success_rate": 0.0
+    }
+  ],
+  "schema_version": 1,
+  "states": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49
+  ],
+  "task": "8",
+  "totals": {
+    "baseline": {
+      "episodes": 49,
+      "success_rate": 0.0,
+      "successes": 0
+    },
+    "candidate": {
+      "episodes": 49,
+      "success_rate": 0.2653061224489796,
+      "successes": 13
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "agent_visible_evaluator": false,
+  "controller": "controller.py",
+  "protocol": "roboforge-runtime-consistency-v1",
+  "schema_version": 1,
+  "source": "real LIBERO RTX 5090 trial",
+  "state": 0,
+  "task": "0"
+}

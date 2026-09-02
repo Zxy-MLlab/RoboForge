@@ -64,11 +64,20 @@ not retuned. Records:
 - states 6-49: `/root/autodl-tmp/experiments/goal-paired-task8-initial-final-heldout-6-49-20260902`
 - immediate-previous versus final negative result (1/5 tie): `/root/autodl-tmp/experiments/goal-paired-task8-heldout-1-5-20260902`
 
+Reviewable lightweight copies are committed under
+`validation/evidence/task8_paired_evaluation/`. `paired_results.json` and
+`paired_results.csv` contain both arms for every state 1-49; the accompanying
+Controller snapshots, manifests and `checksums.sha256` make the reviewed inputs
+independently checkable without committing simulator caches or videos.
+
 Capability `capability://07216908e961c612508c1008fbcc25cec35f8919a782adceb76699fbf70a3515`
 was promoted externally from authentic task-8 physical evidence. A fresh task-0
 Controller materialized and used it without execution error; the ID is bound in
 trial provenance at
 `/root/autodl-tmp/experiments/goal-promoted-capability-reuse-task0-20260902`.
+The compact promotion and reuse records are committed under
+`validation/evidence/capability_reuse/`. Runtime consistency's compact manifest
+and result are under `validation/evidence/runtime_consistency/`.
 The ordinary `roboforge run` path also completed task 0 at
 `/root/autodl-tmp/experiments/goal-cli-run-task0-20260902`.
 

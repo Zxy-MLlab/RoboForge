@@ -1,0 +1,27 @@
+{
+  "comparison": {
+    "direct_final_step": 12,
+    "instruction_equal": true,
+    "roboforge_final_step": 12,
+    "task_identity_equal": true,
+    "trace_semantics_equal": true
+  },
+  "direct": {
+    "final_step": 12,
+    "identity": {
+      "adapter": "libero",
+      "environment_generation": "b82ccbb842aa41b097523e883140e456",
+      "episode_id": "libero-task-0-state-0"
+    },
+    "instruction": "pick up the black bowl between the plate and the ramekin and place it on the plate"
+  },
+  "roboforge": {
+    "final_step": 12,
+    "identity": {
+      "adapter": "libero",
+      "environment_generation": "f22b10b9c929459fb03a8ec311c859db",
+      "episode_id": "libero-task-0-state-0"
+    },
+    "instruction": "pick up the black bowl between the plate and the ramekin and place it on the plate"
+  }
+}

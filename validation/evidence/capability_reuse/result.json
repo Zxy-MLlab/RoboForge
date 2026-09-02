@@ -1,0 +1,9 @@
+{
+  "assets_used": [
+    "capability://07216908e961c612508c1008fbcc25cec35f8919a782adceb76699fbf70a3515"
+  ],
+  "capability": "capability://07216908e961c612508c1008fbcc25cec35f8919a782adceb76699fbf70a3515",
+  "execution_error": null,
+  "trial_ref": "experiment://physical-000001",
+  "verification_status": "promoted"
+}
