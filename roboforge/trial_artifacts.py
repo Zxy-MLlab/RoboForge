@@ -95,7 +95,6 @@ def materialize_trial(
     )
     _json(target / "trace.json", trace)
     _json(target / "first_error.json", first_error or {})
-    (target / "stdout.log").write_text(runner_stdout, encoding="utf-8")
     stderr = runner_stderr or str(public_result.get("controller_stderr") or "")
     (target / "stderr.log").write_text(stderr, encoding="utf-8")
     result = {**lifecycle, "trial_id": trial_id, "evidence_ref": evidence.ref,
@@ -105,6 +104,8 @@ def materialize_trial(
               "first_error_path": str(target / "first_error.json")}
     if first_error:
         result.update({key: first_error.get(key) for key in ("step", "api", "error_type", "message")})
+    stdout = runner_stdout or json.dumps(result, indent=2, sort_keys=True) + "\n"
+    (target / "stdout.log").write_text(stdout, encoding="utf-8")
     _json(target / "result.json", result)
     _json(target / "manifest.json", {"schema_version": 1, "trial_id": trial_id,
           "evidence": public, "artifacts": rendered, "paths": {
@@ -136,11 +137,17 @@ def materialize_preflight_failure(
     (target / "action_receipts.jsonl").write_text("", encoding="utf-8")
     (target / "stdout.log").write_text("", encoding="utf-8")
     (target / "stderr.log").write_text(first["message"] + "\n", encoding="utf-8")
-    result = {**first, "runner_exit_code": 2, "controller_status": "not_started",
+    result = {**first, "trial_id": trial_id, "runner_exit_code": 2, "controller_status": "not_started",
               "environment_status": "not_started", "task_success": None,
               "termination_reason": "contract_preflight_failed",
               "physical_trial_consumed": False, "trace_path": str(target / "trace.json"),
               "first_error_path": str(target / "first_error.json")}
+    # Mirror the CLI's machine-readable stdout so the evidence directory is
+    # directly inspectable even when execution stops before a Runtime worker
+    # is started.  stderr remains the concise human-readable first error.
+    (target / "stdout.log").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     _json(target / "result.json", result)
     _json(target / "manifest.json", {"schema_version": 1, "trial_id": trial_id,
           "preflight": report, "result": result})

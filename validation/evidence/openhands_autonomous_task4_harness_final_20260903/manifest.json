@@ -1,0 +1,194 @@
+{
+  "campaign_result": {
+    "elapsed_seconds": 1018.052667658776,
+    "latest_verified": false,
+    "max_openhands_iterations": 80,
+    "max_physical_trials": 15,
+    "physical_trials": 15,
+    "schema_version": 1,
+    "termination_reason": "physical_trial_budget_exhausted",
+    "wall_time_budget_seconds": 14400.0
+  },
+  "conversation_ids": [
+    "openhands"
+  ],
+  "development_success": false,
+  "event_count": 400,
+  "event_counts": {
+    "ActionEvent": 71,
+    "HookExecutionEvent": 85,
+    "MessageEvent": 172,
+    "ObservationEvent": 71,
+    "SystemPromptEvent": 1,
+    "tool:file_editor": 30,
+    "tool:grep": 2,
+    "tool:terminal": 110
+  },
+  "experiment_path": "/root/autodl-tmp/experiments/openhands-autonomous-task4-harness-final-20260903",
+  "final_controller_sha256": "73dde55c65b0447e285f241f135d44027de17a309887f138a76aed2bbb0784ee",
+  "held_out_evaluation_run": false,
+  "held_out_reason": "not run: no verified development candidate; held-out must not be used for tuning",
+  "initial_controller_sha256": "7d308b8689054e93c55f03766eaf8455c4013d84de7932b4aebef9e04e371e97",
+  "instruction": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+  "maximum_event_index": 399,
+  "physical_trial_budget": 15,
+  "physical_trials": 15,
+  "promotion_run": false,
+  "schema_version": 1,
+  "state": 0,
+  "subagent_called": false,
+  "task": 4,
+  "trials": [
+    {
+      "controller_sha256": "7d308b8689054e93c55f03766eaf8455c4013d84de7932b4aebef9e04e371e97",
+      "controller_status": "completed",
+      "robot_act_events": 0,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "9ef47e359ba51ff46fc514ae0c97c6550734a8838b050dc7d627db1d5d8bda7c",
+      "trial_id": "physical-000001"
+    },
+    {
+      "controller_sha256": "3bfd37724ce680cd9f720683bc5351e18db84737c4a3cb983615e1eb66cad1f6",
+      "controller_status": "completed",
+      "robot_act_events": 10,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "9d4fa3fbe06af9a2af9ab151947211262c0459d82838003bdb9df41693a6c3d2",
+      "trial_id": "physical-000002"
+    },
+    {
+      "controller_sha256": "d845e59ee137ec3a4d4a7088d1182a69872e1fb1fda5ac465bee40202a6d70ee",
+      "controller_status": "completed",
+      "robot_act_events": 5,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "d30815cb3f656ddc2fb56210696181904d686157d9e767b0aa051093b193b720",
+      "trial_id": "physical-000003"
+    },
+    {
+      "controller_sha256": "f9f60db12849befdf8fa3cbceee6feb2295f8ba02c1a4f2ceb307d2d4c803362",
+      "controller_status": "error",
+      "robot_act_events": 7,
+      "runner_exit_code": 1,
+      "task_success": false,
+      "termination_reason": "controller_error",
+      "trace_sha256": "05f0636abb980d78b1a1961fceac2ac09eaad7a211234073c97749b4fc751085",
+      "trial_id": "physical-000004"
+    },
+    {
+      "controller_sha256": "242e900c297274a8d2b16e0286f980997ffdb8c5db222333996cdeeb7a338e98",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "b56d1cb295300648b0b16bb9ad1a8293e80d7154611bb01794f1d41118b78a19",
+      "trial_id": "physical-000005"
+    },
+    {
+      "controller_sha256": "66a7454ec5fd7d6af352208398c4577df98bc871a81f3e94c83a8f88f2563e96",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "3f7e93298b92c0ba62ebb4d023013f9e7f53bc34a8cfc8e534073e6b94649362",
+      "trial_id": "physical-000006"
+    },
+    {
+      "controller_sha256": "43410dca18b71145ffb0b0ae33638f85de3be734dd15f3b4624a5254514ddd24",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "554a9329146e0edb3b6a0c65e13b5f1dce8cb1c11cef6c1d7192c2dad6195ae1",
+      "trial_id": "physical-000007"
+    },
+    {
+      "controller_sha256": "203c1c4d2a21ef2cc3f193182e8427698f894faf4fda136c5001840739fb14e6",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "1774c8e43186af22b0b46dabe63a4ec65a15a7df3ae8efa3c80202de4a8e12ab",
+      "trial_id": "physical-000008"
+    },
+    {
+      "controller_sha256": "cc1ad4fb091278f6db7158161396bb1d0d468f16613e044ba8287011f7fcb19d",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "625938562670af3b1181ed92218b3cc2a9fdddbc37d064d0dd83dd97b8c1ea1a",
+      "trial_id": "physical-000009"
+    },
+    {
+      "controller_sha256": "3d80e0a8386be9577aff8cbc93d2d812ddc6172aca2090c66f0f431b2a00f946",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "c6657421f9a72d761a471fb0a28f6fdeed1285b26d7ca43811eb34387846b4e4",
+      "trial_id": "physical-000010"
+    },
+    {
+      "controller_sha256": "3d80e0a8386be9577aff8cbc93d2d812ddc6172aca2090c66f0f431b2a00f946",
+      "controller_status": "completed",
+      "robot_act_events": 13,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "b785fcc0bfe10274c8f256a428ffd7313a46d423a9c845d69d0194eb048c0d1f",
+      "trial_id": "physical-000011"
+    },
+    {
+      "controller_sha256": "0c7edf813f2bb1cf6a8e2a77c7d9274e830bce3227a076a9b9628ea123d93feb",
+      "controller_status": "completed",
+      "robot_act_events": 13,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "dcd0d756d10eef75fee865f742bd7a9d81081285657da9eaafc263a4bbdc6070",
+      "trial_id": "physical-000012"
+    },
+    {
+      "controller_sha256": "3d80e0a8386be9577aff8cbc93d2d812ddc6172aca2090c66f0f431b2a00f946",
+      "controller_status": "completed",
+      "robot_act_events": 13,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "c3beb9c428a16f7b7e4db5672971d332420aeff9b0bb8d5850aec07aafe96f55",
+      "trial_id": "physical-000013"
+    },
+    {
+      "controller_sha256": "73dde55c65b0447e285f241f135d44027de17a309887f138a76aed2bbb0784ee",
+      "controller_status": "completed",
+      "robot_act_events": 12,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "778e4166116f6275ead2305785d810fd78e5370833567ed9b91999d61a3e03dd",
+      "trial_id": "physical-000014"
+    },
+    {
+      "controller_sha256": "73dde55c65b0447e285f241f135d44027de17a309887f138a76aed2bbb0784ee",
+      "controller_status": "completed",
+      "robot_act_events": 13,
+      "runner_exit_code": 0,
+      "task_success": false,
+      "termination_reason": "completed",
+      "trace_sha256": "99664e69cbf1dd02d128bbf16ba715b2584c6683556c13bfffc90742dcfcb342",
+      "trial_id": "physical-000015"
+    }
+  ],
+  "web_called": false
+}

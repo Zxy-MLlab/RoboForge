@@ -154,6 +154,7 @@ def _write_campaign_result(
     wall_time_budget: float,
     latest_verified: bool,
     run_error: str | None = None,
+    conversation_reason: str | None = None,
 ) -> dict:
     if latest_verified:
         termination_reason = "verified"
@@ -163,6 +164,8 @@ def _write_campaign_result(
         termination_reason = "wall_time_budget_exhausted"
     elif run_error:
         termination_reason = "openhands_run_error"
+    elif conversation_reason:
+        termination_reason = conversation_reason
     else:
         termination_reason = "openhands_iteration_budget_or_agent_stop"
     campaign = {
@@ -181,6 +184,38 @@ def _write_campaign_result(
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return campaign
+
+
+def _conversation_termination_reason(conversation) -> str | None:
+    """Map OpenHands' public conversation state/events to a durable reason."""
+    try:
+        state = conversation.state
+        status = getattr(getattr(state, "execution_status", None), "value", None)
+        if status is None:
+            status = str(getattr(state, "execution_status", ""))
+        events = list(getattr(state, "events", ()) or ())
+    except Exception:
+        return None
+    codes = []
+    for event in events:
+        code = getattr(event, "code", None)
+        if code is None and isinstance(event, dict):
+            code = event.get("code")
+        if code:
+            codes.append(str(code))
+    if "MaxIterationsReached" in codes:
+        return "openhands_iteration_budget_exhausted"
+    if "MaxBudgetReached" in codes:
+        return "openhands_budget_exhausted"
+    mapping = {
+        "finished": "agent_finished",
+        "paused": "conversation_paused",
+        "stuck": "conversation_stuck",
+        "error": "openhands_conversation_error",
+        "waiting_for_confirmation": "waiting_for_confirmation",
+        "idle": "agent_stop",
+    }
+    return mapping.get(status)
 
 
 def main(argv=None):
@@ -310,6 +345,9 @@ Read `.roboforge/trials/<trial_id>/result.json`, `first_error.json`, `trace.json
 with ordinary Terminal/file tools, then continue until authentic verification or
 the physical budget is exhausted. Do not infer hidden simulator state or use task-specific patches.
 Reusable assets are under {Path(a.asset_root).resolve()} and should be searched only when useful."""
+    prompt += ("\nBefore changing the existing Controller, run it once through the Terminal trial CLI. "
+               "A deterministic contract preflight failure does not consume physical budget; read its "
+               "result.json and first_error.json before editing.")
     prompt += "\nYour first response MUST invoke terminal or file_editor; do not reply with planning text alone. Continue using tools until the task is finished or the budget is exhausted."
     prompt += "\nBefore the first physical trial, consider whether existing assets are relevant. When asset search returns a relevant result, read that selected asset before deciding whether to reuse or adapt it; a search hit alone is not reuse."
     prompt += ("\nIf factual evidence reveals a missing reusable software capability, "
@@ -323,6 +361,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
     run_exception = None
     final_status = None
     latest_verified = False
+    conversation_reason = None
     try:
         if conversation_id is None: convo.send_message(prompt)
         else: convo.send_message(
@@ -341,6 +380,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         # session. The public Stop hook keeps that same run alive after an
         # unverified trial; RoboForge does not implement a second AgentLoop.
         convo.run()
+        conversation_reason = _conversation_termination_reason(convo)
     except Exception as exc:
         # Preserve a machine-readable campaign record even when the public
         # OpenHands session fails (for example, a transient provider outage).
@@ -376,6 +416,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         wall_time_budget=a.wall_time_budget,
         latest_verified=latest_verified,
         run_error=run_error,
+        conversation_reason=conversation_reason,
     )
     if run_exception is not None:
         raise run_exception

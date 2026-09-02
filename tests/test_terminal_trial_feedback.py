@@ -4,12 +4,12 @@ from pathlib import Path
 import pytest
 
 from roboforge.evidence import derive_status, extract_first_error
-from roboforge.cli import _write_campaign_result
+from roboforge.cli import _conversation_termination_reason, _write_campaign_result
 from roboforge.fakes import FakeAdapter
 from roboforge.models import AdapterResult, RawArtifact
 from roboforge.preflight import preflight_controller
 from roboforge.service import ExperimentService, ProtocolError
-from roboforge.trial_artifacts import materialize_trial
+from roboforge.trial_artifacts import materialize_preflight_failure, materialize_trial
 
 
 PERCEPTION = {
@@ -54,6 +54,18 @@ def test_preflight_failure_does_not_consume_physical_trial(tmp_path):
     assert adapter.reset_count == adapter.controller_runs == 0
 
 
+def test_preflight_artifact_captures_terminal_stdout(tmp_path):
+    controller = tmp_path / "controller.py"
+    controller.write_text("def run(robot): return robot.use('bad:v1', {'limit': 20})\n")
+    result = materialize_preflight_failure(
+        tmp_path / "workspace",
+        {"ok": False, "errors": [{"api": "robot.use", "message": "20 > 12"}]},
+        controller_path=controller,
+    )
+    trial = tmp_path / "workspace" / ".roboforge" / "trials" / result["trial_id"]
+    assert json.loads((trial / "stdout.log").read_text()) == result
+
+
 def test_first_error_is_generic_and_prefers_earliest_tool_error():
     public = {"tool_errors": [
         {"tool_id": "perception:v1", "step": 12, "type": "ToolContractError", "message": "20 > 12"},
@@ -63,6 +75,23 @@ def test_first_error_is_generic_and_prefers_earliest_tool_error():
         "path": "$.tool_errors[0]", "error_type": "ToolContractError",
         "message": "20 > 12", "api": "perception:v1", "step": 12,
     }
+
+
+def test_first_error_is_ordered_by_step_not_container_order():
+    public = {"tool_errors": [
+        {"tool_id": "grasp:v1", "step": 13, "type": "RuntimeError", "message": "later"},
+        {"tool_id": "perception:v1", "step": 12, "type": "ToolContractError", "message": "20 > 12"},
+    ]}
+    assert extract_first_error(public)["api"] == "perception:v1"
+    assert extract_first_error(public)["step"] == 12
+
+
+def test_first_error_prefers_rpc_event_index_when_steps_are_unavailable():
+    public = {"tool_errors": [
+        {"index": 9, "tool_id": "grasp:v1", "type": "RuntimeError", "message": "later"},
+        {"index": 2, "tool_id": "perception:v1", "type": "ToolContractError", "message": "first"},
+    ]}
+    assert extract_first_error(public)["api"] == "perception:v1"
 
 
 class ErrorAdapter(FakeAdapter):
@@ -96,6 +125,7 @@ def test_trial_materialization_exposes_sanitized_files_and_nonzero_status(tmp_pa
     assert result["runner_exit_code"] == 1
     assert result["controller_status"] == "error"
     assert json.loads((trial / "first_error.json").read_text())["message"] == "20 > 12"
+    assert json.loads((trial / "stdout.log").read_text()) == result
     encoded = (trial / "trace.json").read_text()
     for private in ("sim.data", "sim.model", "hidden_evaluator", "promotion key"):
         assert private not in encoded
@@ -124,3 +154,25 @@ def test_campaign_result_records_openhands_failure_and_current_trial_count(tmp_p
     assert json.loads(
         (tmp_path / ".roboforge" / "campaign-result.json").read_text()
     ) == campaign
+
+
+def test_campaign_result_distinguishes_agent_finish_from_iteration_budget(tmp_path):
+    from types import SimpleNamespace
+
+    finished = SimpleNamespace(state=SimpleNamespace(
+        execution_status=SimpleNamespace(value="finished"), events=[]))
+    limited = SimpleNamespace(state=SimpleNamespace(
+        execution_status=SimpleNamespace(value="error"),
+        events=[SimpleNamespace(code="MaxIterationsReached")]))
+    assert _conversation_termination_reason(finished) == "agent_finished"
+    assert _conversation_termination_reason(limited) == "openhands_iteration_budget_exhausted"
+    campaign = _write_campaign_result(
+        tmp_path,
+        status={"physical_trials": 1, "max_trials": 15},
+        elapsed=42.0,
+        max_iterations=80,
+        wall_time_budget=14400,
+        latest_verified=False,
+        conversation_reason="agent_finished",
+    )
+    assert campaign["termination_reason"] == "agent_finished"

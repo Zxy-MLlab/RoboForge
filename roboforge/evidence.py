@@ -12,47 +12,67 @@ def extract_first_error(value: Any) -> dict[str, Any] | None:
     mappings/lists in recorded order and recognises explicit error objects,
     RPC error strings, and tool_error payloads.
     """
-    def walk(node: Any, path: str = "$") -> dict[str, Any] | None:
+    candidates: list[tuple[tuple[int, int, int, int], dict[str, Any]]] = []
+    order = 0
+
+    def add(path: str, error: Mapping[str, Any], *, fallback_type: str = "ToolError") -> None:
+        nonlocal order
+        step = error.get("step")
+        index = error.get("index")
+        # Explicit execution step is the primary chronology.  Trace/index order
+        # is the fallback for errors that occur before a robot step is assigned.
+        has_step = isinstance(step, (int, float)) and not isinstance(step, bool)
+        has_index = isinstance(index, (int, float)) and not isinstance(index, bool)
+        step_rank = int(step) if has_step else 10**12
+        index_rank = int(index) if has_index else 10**12
+        # RPC event index is the strongest chronology when supplied.  Step is
+        # next; traversal order is only a fallback for terminal errors that do
+        # not carry either coordinate.
+        coordinate_kind = 0 if has_index else 1 if has_step else 2
+        coordinate = index_rank if has_index else step_rank if has_step else order
+        candidates.append(((coordinate_kind, coordinate, step_rank, order), {
+            "path": path,
+            "error_type": str(error.get("type") or fallback_type),
+            "message": str(error.get("message") or "tool call failed"),
+            **({"api": error.get("tool_id")} if "tool_id" in error else {}),
+            **({"step": step} if "step" in error else {}),
+        }))
+        order += 1
+
+    def walk(node: Any, path: str = "$") -> None:
         if isinstance(node, Mapping):
             errors = node.get("tool_errors")
-            if (
-                isinstance(errors, (list, tuple))
-                and errors
-                and isinstance(errors[0], Mapping)
-            ):
-                error = errors[0]
-                return {
-                    "path": path + ".tool_errors[0]",
-                    "error_type": str(error.get("type") or "ToolError"),
-                    "message": str(error.get("message") or "tool call failed"),
-                    "api": error.get("tool_id"),
-                    "step": error.get("step"),
-                }
+            if isinstance(errors, (list, tuple)):
+                for index, error in enumerate(errors):
+                    if isinstance(error, Mapping):
+                        add(path + f".tool_errors[{index}]", error)
             if isinstance(node.get("tool_error"), Mapping):
-                error = node["tool_error"]
-                return {"path": path + ".tool_error", "error_type": str(error.get("type") or "ToolError"),
-                        "message": str(error.get("message") or "tool call failed")}
+                error = dict(node["tool_error"])
+                for field in ("step", "index", "tool_id"):
+                    if field not in error and field in node:
+                        error[field] = node[field]
+                add(path + ".tool_error", error)
             if node.get("error") not in (None, ""):
                 error = node["error"]
                 if isinstance(error, Mapping):
-                    return {"path": path + ".error", "error_type": str(error.get("type") or "RuntimeError"),
-                            "message": str(error.get("message") or "runtime error")}
-                text = str(error)
-                kind, sep, message = text.partition(":")
-                return {"path": path + ".error", "error_type": kind.strip() if sep else "RuntimeError",
-                        "message": message.strip() if sep else text}
+                    add(path + ".error", error, fallback_type="RuntimeError")
+                else:
+                    text = str(error)
+                    kind, sep, message = text.partition(":")
+                    add(path + ".error", {
+                        "type": kind.strip() if sep else "RuntimeError",
+                        "message": message.strip() if sep else text,
+                    }, fallback_type="RuntimeError")
             for key, item in node.items():
-                found = walk(item, f"{path}.{key}")
-                if found:
-                    return found
+                walk(item, f"{path}.{key}")
         elif isinstance(node, (list, tuple)):
             for index, item in enumerate(node):
-                found = walk(item, f"{path}[{index}]")
-                if found:
-                    return found
-        return None
+                walk(item, f"{path}[{index}]")
 
-    return walk(value)
+    walk(value)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])[1]
 
 
 def derive_status(public: Mapping[str, Any], execution_error: str | None = None) -> dict[str, Any]:
