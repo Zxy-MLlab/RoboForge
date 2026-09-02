@@ -67,7 +67,7 @@ def test_capability_promotion_is_external_and_requires_verified_evidence(tmp_pat
     from roboforge.store import canonical_json
     body["evidence_sha256"] = __import__("hashlib").sha256(canonical_json({k:v for k,v in body.items() if k != "evidence_sha256"})).hexdigest()
     evidence_path.write_text(json.dumps(body, indent=2, sort_keys=True))
-    with pytest.raises(PermissionError, match="isolated promotion service"):
+    with pytest.raises(RuntimeError, match="external promotion service"):
         submit(library.root, candidate["asset_id"], [str(evidence_path)],
             note="external contract and physical validation passed", evaluator_key=b"evaluator")
     assert library.read(candidate["asset_id"], session_id="test")["verification_status"] == "candidate"
@@ -78,7 +78,7 @@ def test_agent_cannot_enable_trusted_promotion(monkeypatch, tmp_path):
     monkeypatch.setenv("ROBOFORGE_TRUSTED_MODE", "1")
     for kwargs in ({}, {"require_trusted_mode": False},
                    {"require_trusted_mode": True, "evaluator_key": b"attacker-key"}):
-        with pytest.raises(PermissionError, match="isolated promotion service"):
+        with pytest.raises(RuntimeError, match="external promotion service"):
             submit(library.root, candidate["asset_id"], [], note="forged", **kwargs)
     assert library.read(candidate["asset_id"], session_id="attack")["verification_status"] == "candidate"
 
@@ -91,7 +91,7 @@ def test_capability_promotion_rejects_negative_physical_evidence(tmp_path):
     evidence = ExperimentService(run, FakeAdapter()).run_controller(
         request_id="negative", controller_path=controller, intent="negative validation")
     evidence_path = next((run / "evidence").glob("*.json"))
-    with pytest.raises(PermissionError, match="isolated promotion service"):
+    with pytest.raises(RuntimeError, match="external promotion service"):
         submit(library.root, candidate["asset_id"], [str(evidence_path)], note="must fail")
     assert library.read(candidate["asset_id"], session_id="test")["verification_status"] == "candidate"
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import platform
 import sys
+import os, socket
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +73,13 @@ def compare(first: str | Path, second: str | Path) -> dict[str, Any]:
 def submit(asset_root: str | Path, asset_id: str, evidence_paths: list[str],
            *, note: str, evaluator_key: bytes | None = None,
            require_trusted_mode: bool = False) -> dict[str, Any]:
-    # This module runs in the Agent/runtime trust domain.  It must never have
-    # a local path to the trusted repository, regardless of environment
-    # variables, request flags, or caller-supplied HMAC keys.
-    raise PermissionError("trusted promotion is exclusively owned by isolated promotion service")
+    del asset_root, evaluator_key, require_trusted_mode
+    socket_path=os.environ.get("ROBOFORGE_PROMOTION_SOCKET")
+    token=os.environ.get("ROBOFORGE_PROMOTION_TOKEN")
+    if not socket_path or not token: raise RuntimeError("external promotion service is not configured")
+    request={"token":token,"asset_id":asset_id,"evidence":evidence_paths,"note":note}
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
+        connection.connect(socket_path); connection.sendall((json.dumps(request)+"\n").encode())
+        response=json.loads(connection.makefile("rb").readline())
+    if not response.get("ok"): raise PermissionError(response.get("error","promotion failed"))
+    return dict(response["result"])

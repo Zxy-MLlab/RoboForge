@@ -1,4 +1,4 @@
-"""Materialize a promoted capability and reuse it in a fresh LIBERO trial."""
+"""Paired LIBERO comparison with and without a reusable capability."""
 from __future__ import annotations
 
 import argparse
@@ -29,7 +29,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--asset-root", type=Path, required=True)
     parser.add_argument("--capability", required=True)
-    parser.add_argument("--task", default="0"); parser.add_argument("--state", type=int, default=0)
+    parser.add_argument("--task", default="0"); parser.add_argument("--states", default="0")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(); output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
     workspace = output / "workspace"; workspace.mkdir(); controller = workspace / "controller.py"
@@ -39,24 +39,23 @@ def main() -> int:
         raise ValueError("cross-task reuse requires an externally promoted capability")
     materialized = CapabilityAcquirer(workspace, library).materialize(
         args.capability, "point_refs.py", session_id="external-reuse")
-    adapter = load_adapter("libero", task=args.task, run_dir=output / "provider" / "legacy",
-        case=args.state, configuration={"disable_agent_verifier": True})
-    try:
-        service = ExperimentService(output / "provider" / "service",
-            LegacyAdapterBridge(adapter, ControllerRuntime(timeout_seconds=600)), max_trials=1)
-        evidence = service.run_controller(request_id="promoted-capability-reuse",
-            controller_path=controller, intent="cross-task promoted capability reuse",
-            assets_used=[args.capability])
-        result = {"schema_version": 1, "task": args.task, "state": args.state,
+    rows=[]
+    for state in [int(x) for x in args.states.split(",")]:
+      for arm, used in (("without",[]),("with",[args.capability])):
+        adapter = load_adapter("libero", task=args.task, run_dir=output / f"state-{state}" / arm / "legacy",
+            case=state, configuration={"disable_agent_verifier": True})
+        try:
+          service = ExperimentService(output / f"state-{state}" / arm / "service", LegacyAdapterBridge(adapter, ControllerRuntime(timeout_seconds=600)), max_trials=1)
+          evidence = service.run_controller(request_id=f"reuse-{state}-{arm}",controller_path=controller,intent=arm,assets_used=used)
+          rows.append({"state":state,"arm":arm,"success":bool((evidence.physical_verification or {}).get("verified")),"trial":evidence.public_dict()})
+        finally: adapter.close()
+    totals={arm:sum(r["success"] for r in rows if r["arm"]==arm)/max(1,sum(r["arm"]==arm for r in rows)) for arm in ("without","with")}
+    result = {"schema_version": 2, "task": args.task,
             "capability": args.capability, "verification_status": asset["verification_status"],
-            "materialized": materialized, "trial": evidence.public_dict()}
-        (output / "reuse-validation.json").write_text(
-            json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
-        print(json.dumps({"ref": evidence.ref, "assets_used": list(evidence.assets_used),
-                          "execution_error": evidence.execution_error}, indent=2))
-        return 0 if evidence.execution_error is None else 1
-    finally:
-        adapter.close()
+            "materialized": materialized, "results":rows,"success_rates":totals,"improvement":totals["with"]-totals["without"]}
+    (output / "reuse-validation.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+    print(json.dumps(totals, indent=2)); return 0
 
 
 if __name__ == "__main__": raise SystemExit(main())

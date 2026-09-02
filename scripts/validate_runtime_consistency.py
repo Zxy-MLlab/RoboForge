@@ -16,6 +16,14 @@ from roboforge.service import ExperimentService
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def trace(public: dict) -> list:
+    path = public.get("trace_path")
+    if not path or not Path(path).is_file(): return []
+    return json.loads(Path(path).read_text())
+
+def actions(rows: list) -> list:
+    return [row.get("request") for row in rows if row.get("event") == "act"]
+
 
 def instruction(adapter) -> str:
     value = adapter.instruction
@@ -71,14 +79,21 @@ def main() -> int:
                 "roboforge": provider_arm(controller, output / "roboforge", args.task, args.state)}
     direct = manifest["direct"]; candidate = manifest["roboforge"]
     public = candidate["evidence"]["public"]
+    direct_trace, provider_trace = trace(direct["public"]), trace(public)
     manifest["comparison"] = {
         "instruction_equal": direct["instruction"] == candidate["instruction"],
         "task_identity_equal": direct["identity"].get("task_identity") ==
                                candidate["identity"].get("task_identity"),
         "direct_final_step": direct["public"].get("final_step"),
         "roboforge_final_step": public.get("final_step"),
-        "trace_semantics_equal": bool(direct["public"].get("final_step") ==
-                                      public.get("final_step")),
+        "state_equal": direct["identity"].get("initial_state") == candidate["identity"].get("initial_state"),
+        "seed_equal": direct["identity"].get("seed") == candidate["identity"].get("seed"),
+        "actions_equal": actions(direct_trace) == actions(provider_trace),
+        "termination_equal": direct["public"].get("termination") == public.get("termination"),
+        "success_equal": direct["receipt"].get("verified") == (candidate["evidence"].get("physical_verification") or {}).get("verified"),
+        "trace_equal": direct_trace == provider_trace,
+        "direct_trace_sha256": hashlib.sha256(json.dumps(direct_trace,sort_keys=True,default=str).encode()).hexdigest(),
+        "roboforge_trace_sha256": hashlib.sha256(json.dumps(provider_trace,sort_keys=True,default=str).encode()).hexdigest(),
     }
     (output / "runtime-consistency.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

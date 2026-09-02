@@ -36,7 +36,12 @@ def evaluate(controller: Path, *, task: str, state: int, root: Path) -> dict:
     try:
         report = SealedEvaluationPolicy().evaluate_frozen(adapter=adapter,
             runtime=ControllerRuntime(timeout_seconds=600), controller=controller)
-        return {**report, "elapsed_seconds": time.monotonic() - started}
+        trace_files=list(root.rglob("trace.json")); trace_digest=sha256(trace_files[-1]) if trace_files else None
+        return {**report, "elapsed_seconds": time.monotonic() - started,
+                "controller_digest": sha256(controller), "trace_digest": trace_digest,
+                "episode_digest": hashlib.sha256(canonical_json(report)).hexdigest(),
+                "environment": {"task":task,"state":state},
+                "receipt_digest": hashlib.sha256(canonical_json(report.get("sealed_evaluation_cases",[]))).hexdigest()}
     finally:
         adapter.close(); del adapter; gc.collect()
 

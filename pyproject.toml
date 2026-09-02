@@ -47,6 +47,7 @@ embodied_codex = "embodied_codex.cli:main"
 roboforge = "roboforge.cli:main"
 roboforge-openhands = "roboforge.cli:main"
 roboforge-adapter-worker = "roboforge.rpc_server:main"
+roboforge-promotion-service = "roboforge.promotion_service:main"
 
 [tool.setuptools.packages.find]
 include = ["embodied_codex", "embodied_codex.*", "roboforge", "roboforge.*", "evaluation", "evaluation.*", "scripts", "scripts.*"]
