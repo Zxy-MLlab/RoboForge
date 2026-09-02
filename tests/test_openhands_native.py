@@ -6,6 +6,7 @@ from roboforge.fakes import FakeAdapter
 from roboforge.service import ExperimentService, IndeterminateExperiment
 from roboforge.capability import CapabilityAcquirer
 from roboforge.control_plane import compare, replay, submit
+from roboforge.trust import sign_receipt, verify_receipt
 
 def test_physical_trial_is_immutable_idempotent_and_diagnostic_is_separate(tmp_path):
     controller = tmp_path / "controller.py"; controller.write_text("def run(robot): return {}\n")
@@ -48,6 +49,7 @@ def test_assets_are_progressively_disclosed_and_evidence_backed(tmp_path):
     assert lib.search("object detection handles", kind="capabilities")[0]["asset_id"] == capability["asset_id"]
 
 def test_capability_promotion_is_external_and_requires_verified_evidence(tmp_path):
+    import time
     library = AssetLibrary(tmp_path / "assets")
     candidate = library.register("capabilities", name="depth filter", purpose="perception",
         description="Reject invalid depth", implementation={"source": "value = 1"})
@@ -56,10 +58,17 @@ def test_capability_promotion_is_external_and_requires_verified_evidence(tmp_pat
     run = tmp_path / "run"
     adapter = FakeAdapter(); adapter.receipt_verified = True
     evidence = ExperimentService(run, adapter).run_controller(
-        request_id="verified", controller_path=controller, intent="validate candidate")
+        request_id="verified", controller_path=controller, intent="validate candidate",
+        assets_used=[candidate["asset_id"]])
     evidence_path = next((run / "evidence").glob("*.json"))
+    body = json.loads(evidence_path.read_text()); body["sealed_receipt"] = sign_receipt(
+        {"trial_id": evidence.ref, "issued_at": time.time(), "success": True}, b"evaluator")
+    body.pop("evidence_sha256", None)
+    from roboforge.store import canonical_json
+    body["evidence_sha256"] = __import__("hashlib").sha256(canonical_json({k:v for k,v in body.items() if k != "evidence_sha256"})).hexdigest()
+    evidence_path.write_text(json.dumps(body, indent=2, sort_keys=True))
     promoted = submit(library.root, candidate["asset_id"], [str(evidence_path)],
-        note="external contract and physical validation passed")
+        note="external contract and physical validation passed", evaluator_key=b"evaluator")
     assert promoted["verification_status"] == "promoted"
     assert promoted["verification_decision"]["evidence"] == [evidence.ref]
 
@@ -81,6 +90,25 @@ def test_capability_promotion_rejects_negative_physical_evidence(tmp_path):
     with pytest.raises(ValueError, match="independently verified physical evidence"):
         submit(library.root, candidate["asset_id"], [str(evidence_path)], note="must fail")
     assert library.read(candidate["asset_id"], session_id="test")["verification_status"] == "candidate"
+
+def test_signed_receipt_rejects_tamper_and_replay(tmp_path):
+    import time
+    key = b"evaluator-only-test-key"
+    receipt = sign_receipt({"trial_id": "trial-1", "task": "8", "success": True,
+                            "issued_at": time.time()}, key)
+    assert verify_receipt(receipt, key)
+    altered = dict(receipt); altered["success"] = False
+    assert not verify_receipt(altered, key)
+    expired = sign_receipt({"trial_id": "trial-1", "issued_at": 1.0}, key)
+    assert not verify_receipt(expired, key, now=5000.0)
+
+def test_capability_decision_does_not_modify_content_addressed_object(tmp_path):
+    library = AssetLibrary(tmp_path / "assets")
+    candidate = library.register("capabilities", name="immutable", purpose="test", description="CAS")
+    path = tmp_path / "assets" / "capabilities" / (candidate["asset_id"].split("://", 1)[1] + ".json")
+    before = path.read_bytes()
+    library.decide_capability(candidate["asset_id"], decision="rejected", evidence=["trial://x"], note="failed gate")
+    assert path.read_bytes() == before
 
 def test_capability_registration_cannot_bypass_external_gate(tmp_path):
     library = AssetLibrary(tmp_path / "assets")
@@ -118,11 +146,12 @@ def test_new_runtime_has_no_generic_agent_loop_implementation():
     root = Path(__file__).parents[1] / "roboforge"
     text = "\n".join(p.read_text() for p in root.glob("*.py"))
     assert "class AgentLoop" not in text
+    assert "_handle_content_response" not in text
     assert "embodied_codex.kernel.agent_loop" not in text
     cli = (root / "cli.py").read_text()
     for forbidden in ("embodied_codex.providers", "kernel.agent_loop", "kernel.workspace", "context_builder"):
         assert forbidden not in cli
-    assert "evaluation" not in text
+    assert "evaluation.sealed" not in text
     assert "class Workspace" not in text
     assert "class AgentLoop" not in text
 

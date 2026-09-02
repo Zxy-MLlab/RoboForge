@@ -99,21 +99,9 @@ def create_asset_tools(library: AssetLibrary, service, workspace: str | None = N
     specs = [(SearchAssetsTool, SearchAssetsAction, SearchAssetsExecutor(library), True, "Search only compact asset metadata."),
              (ReadAssetTool, ReadAssetAction, ReadAssetExecutor(library), True, "Read one selected asset in detail."),
              (SaveAssetTool, SaveAssetAction, SaveAssetExecutor(library, service), False, "Persist an evidence-backed embodied asset.")]
-    if workspace:
-        acquirer = CapabilityAcquirer(workspace, library)
-        specs.append((AcquireCapabilityTool, AcquireCapabilityAction,
-            AcquireExecutor(acquirer), False,
-            "Validate and register a NEW workspace-local Python capability with immutable provenance. "
-            "Existing capability:// assets must be read then materialized, not reacquired from their JSON files."))
-        class MaterializeExecutor(ToolExecutor):
-            def __call__(self, action, conversation=None):
-                session_id = str(conversation.id) if conversation is not None else None
-                try: value = acquirer.materialize(action.asset_id, action.destination, session_id=session_id)
-                except Exception as exc: return AssetObservation.from_text(f"{type(exc).__name__}: {exc}", is_error=True, result=None)
-                return AssetObservation.from_text(json.dumps(value, indent=2), result=value)
-        specs.append((MaterializeCapabilityTool, MaterializeCapabilityAction,
-            MaterializeExecutor(), False,
-            "Materialize one previously read, digest-verified Capability into the Controller workspace."))
+    # Capability acquisition/materialization are intentionally not Agent tools.
+    # The Agent performs those ordinary engineering actions through the
+    # OpenHands editor/terminal; the external Control Plane freezes the result.
     return [cls(description=desc, action_type=action, observation_type=AssetObservation,
         annotations=ToolAnnotations(title=cls.name, readOnlyHint=ro, destructiveHint=not ro,
             idempotentHint=ro, openWorldHint=False), executor=executor) for cls, action, executor, ro, desc in specs]

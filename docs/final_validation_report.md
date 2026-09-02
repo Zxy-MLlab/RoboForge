@@ -17,6 +17,21 @@ The Python 3.12 OpenHands process and Python 3.11 LIBERO process communicate ove
 an authenticated mode-0600 Unix socket. The provider owns reset, sensor/action
 access, safety and verification. Evaluation runs outside both Agent and candidate.
 
+## Trust-boundary remediation
+
+Capability bytes, signed receipts, and promotion decisions are separate immutable
+objects. `roboforge.trust` signs canonical receipt JSON with an evaluator-only key,
+checks version and expiry, and rejects tampering. Decisions receive their own
+`decision://` digest and never rewrite the original `capability://` bytes. The
+OpenHands asset surface is limited to search/read/save; capability code is created
+and validated through ordinary Editor/Terminal work and frozen externally.
+
+Adversarial coverage includes forged or expired receipts, altered receipts,
+terminal decision conflicts, CAS byte immutability, registration bypass, missing
+paired identity, and workspace traversal. Socket mode `0600` is transport
+authentication only; production should place Agent, candidate, provider,
+evaluator, and promotion storage in separate OS/container permission domains.
+
 ## Upstream mapping and licenses
 
 | Upstream | Revision inspected | License | Mechanism and RoboForge location |

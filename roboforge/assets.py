@@ -23,6 +23,7 @@ class AssetLibrary:
         self.root = Path(root).resolve()
         for kind in KINDS: (self.root / kind).mkdir(parents=True, exist_ok=True)
         self.audit_path = self.root / "usage.jsonl"
+        (self.root / "decisions").mkdir(parents=True, exist_ok=True)
 
     def audit(self, operation: str, **payload: Any) -> None:
         row = {"timestamp_ns": time.time_ns(), "operation": operation, **payload}
@@ -68,15 +69,39 @@ class AssetLibrary:
         value = json.loads(path.read_text(encoding="utf-8"))
         current = value.get("verification_status", "candidate")
         requested = {"decision": decision, "evidence": list(evidence), "note": note}
+        existing_decisions = []
+        for decision_path in sorted((self.root / "decisions").glob("*.json")):
+            try:
+                candidate_decision = json.loads(decision_path.read_text(encoding="utf-8"))
+                if candidate_decision.get("capability_id") == asset_id:
+                    existing_decisions.append(candidate_decision)
+            except (OSError, json.JSONDecodeError):
+                continue
+        if existing_decisions:
+            existing = existing_decisions[0]["decision"]
+            if existing != requested:
+                raise ValueError("capability decision is immutable")
+            value["verification_status"] = existing["decision"]
+            value["verification_decision"] = {**existing, "decision_id": existing_decisions[0]["decision_id"]}
+            return self.summary(value)
         if current in {"promoted", "rejected"}:
             if value.get("verification_decision") != requested:
                 raise ValueError("capability decision is immutable")
             return self.summary(value)
         if current != "candidate": raise ValueError("only candidates can be decided")
-        value["verification_status"] = decision
-        value["verification_decision"] = requested
-        path.write_text(json.dumps(value, sort_keys=True, indent=2), encoding="utf-8")
+        decision_payload = {"schema_version": 1, "capability_id": asset_id,
+                            "capability_digest": digest, "decision": requested}
+        decision_digest = hashlib.sha256(json.dumps(decision_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        decision_payload["decision_id"] = f"decision://{decision_digest}"
+        decision_path = self.root / "decisions" / f"{decision_digest}.json"
+        encoded = json.dumps(decision_payload, sort_keys=True, indent=2).encode()
+        if decision_path.exists() and decision_path.read_bytes() != encoded:
+            raise ValueError("decision collision")
+        decision_path.write_bytes(encoded)
         self.audit("capability_decision", asset_id=asset_id, **requested)
+        value = dict(value)
+        value["verification_status"] = decision
+        value["verification_decision"] = {**requested, "decision_id": decision_payload["decision_id"]}
         return self.summary(value)
 
     def search(self, query: str, *, kind: str | None = None) -> list[dict[str, Any]]:
@@ -102,10 +127,29 @@ class AssetLibrary:
 
     def read(self, asset_id: str, *, session_id: str | None = None) -> dict[str, Any]:
         digest = asset_id.split("://", 1)[-1]
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise KeyError(asset_id)
         for k in KINDS:
             p = self.root / k / f"{digest}.json"
             if p.exists():
-                value = json.loads(p.read_text()); self.audit("read", asset_id=asset_id,
+                value = json.loads(p.read_text())
+                # Content-addressed objects are immutable: detect tampering
+                # even when an attacker edits the JSON in place.
+                canonical = dict(value)
+                canonical.pop("asset_id", None)
+                actual = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                if actual != digest:
+                    raise ValueError("CAS object digest mismatch")
+                if k == "capabilities":
+                    decisions = sorted(self.root.joinpath("decisions").glob("*.json"))
+                    for decision_path in decisions:
+                        try: decision = json.loads(decision_path.read_text())
+                        except (OSError, json.JSONDecodeError): continue
+                        if decision.get("capability_id") == asset_id:
+                            value["verification_status"] = decision["decision"]["decision"]
+                            value["verification_decision"] = {**decision["decision"], "decision_id": decision["decision_id"]}
+                            break
+                self.audit("read", asset_id=asset_id,
                     session_id=session_id); return value
         raise KeyError(asset_id)
 

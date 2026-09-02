@@ -10,6 +10,7 @@ from typing import Any
 
 from .assets import AssetLibrary
 from .store import canonical_json
+from .trust import verify_receipt
 
 
 def environment_info() -> dict[str, Any]:
@@ -55,17 +56,35 @@ def compare(first: str | Path, second: str | Path) -> dict[str, Any]:
     keys = sorted((set(left) | set(right)) - ignored)
     changes = [{"field": key, "baseline": left.get(key), "candidate": right.get(key)}
                for key in keys if left.get(key) != right.get(key)]
+    lp, rp = left.get("public") or {}, right.get("public") or {}
+    # Missing identity fields are unknown, never an accidental paired match.
+    fields = ("task", "initial_state", "seed", "provider_version", "environment_version",
+              "eval_protocol", "episode_budget")
+    pairing = {field: (lp.get(field), rp.get(field),
+                       lp.get(field) is not None and rp.get(field) is not None and lp.get(field) == rp.get(field))
+               for field in fields}
+    paired = all(item[2] for item in pairing.values())
     return {"baseline": left["ref"], "candidate": right["ref"], "changes": changes,
-            "paired_seed": (left.get("public") or {}).get("seed") ==
-                           (right.get("public") or {}).get("seed")}
+            "paired": paired, "paired_seed": pairing["seed"][2] if pairing["seed"][0] is not None and pairing["seed"][1] is not None else "unknown",
+            "pairing": {key: ("match" if value[2] else "mismatch" if value[0] is not None and value[1] is not None else "unknown") for key, value in pairing.items()}}
 
 
 def submit(asset_root: str | Path, asset_id: str, evidence_paths: list[str],
-           *, note: str) -> dict[str, Any]:
+           *, note: str, evaluator_key: bytes | None = None) -> dict[str, Any]:
     evidence = [load_evidence(path) for path in evidence_paths]
     if not all((item.get("physical_verification") or {}).get("verified") is True
                for item in evidence):
         raise ValueError("promotion requires independently verified physical evidence")
+    if evaluator_key is None:
+        raise ValueError("promotion requires an evaluator-only receipt key")
+    for item in evidence:
+        receipt = item.get("sealed_receipt")
+        if not verify_receipt(receipt, evaluator_key):
+            raise ValueError("invalid or expired evaluator receipt")
+        if receipt.get("trial_id") != item.get("ref"):
+            raise ValueError("receipt trial binding mismatch")
+        if asset_id not in item.get("assets_used", []):
+            raise ValueError("receipt evidence does not prove capability use")
     refs = [str(item["ref"]) for item in evidence]
     return AssetLibrary(asset_root).decide_capability(
         asset_id, decision="promoted", evidence=refs, note=note)
