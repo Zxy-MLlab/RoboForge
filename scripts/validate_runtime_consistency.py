@@ -85,9 +85,13 @@ def provider_arm(controller: Path, root: Path, task: str, state: int) -> dict:
         started = time.monotonic()
         evidence = service.run_controller(request_id="runtime-consistency",
             controller_path=controller, intent="runtime consistency validation")
+        trace_paths = sorted((root / "legacy").rglob("trace.json"))
+        public = evidence.public_dict().get("public") or {}
+        if trace_paths:
+            public["trace_path"] = str(trace_paths[-1])
         return {"elapsed_seconds": time.monotonic() - started,
                 "instruction": instruction(adapter), "identity": adapter.execution_identity(),
-                "evidence": evidence.public_dict()}
+                "evidence": {**evidence.public_dict(), "public": public}}
     finally:
         adapter.close()
 

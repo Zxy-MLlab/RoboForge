@@ -1,0 +1,112 @@
+{
+  "baseline_success_states": [],
+  "candidate_failure_states": [
+    2,
+    3,
+    4,
+    5,
+    7,
+    8,
+    9,
+    10,
+    11,
+    15,
+    16,
+    18
+  ],
+  "candidate_success_states": [
+    1,
+    6,
+    12,
+    13,
+    14,
+    17,
+    19,
+    20
+  ],
+  "capability": {
+    "applicability": null,
+    "asset_id": "capability://67312e8e482855d640bf9ca51ee5635a665704f81faff16e4540606bd06923b8",
+    "description": "Reusable query helper loaded by controller",
+    "evidence": null,
+    "name": "LIBERO query specification",
+    "provenance": null,
+    "purpose": "perception query selection",
+    "usage": "",
+    "verification_decision": null,
+    "verification_status": "candidate"
+  },
+  "controller_digest": "012f89d74140a98a09a4d612e2402a16fcf07c9fbc6d95fdb479f245c6787a29",
+  "experiments": {
+    "capability_e2e": "/root/autodl-tmp/experiments/capability-e2e-final",
+    "runtime_consistency": "/root/autodl-tmp/experiments/runtime-semantic-consistency-final"
+  },
+  "paired_difference": 0.4,
+  "paired_totals": {
+    "baseline": {
+      "episodes": 20,
+      "success_rate": 0.0,
+      "successes": 0
+    },
+    "candidate": {
+      "episodes": 20,
+      "success_rate": 0.4,
+      "successes": 8
+    }
+  },
+  "promotion_decision": {
+    "decision": "promoted",
+    "decision_id": "decision://af43d0974eff14e14b55a65c6ff904ddec11719b986e9c2da4f8d2cc766e9b2c",
+    "evidence": [
+      "receipt://43ab97d2fcfe4f26c5a82bdd217918da4b01cc1462361b9f73fe96a7f110a51e"
+    ],
+    "note": "real LIBERO sealed success state 1"
+  },
+  "reuse": {
+    "asset_id": "capability://67312e8e482855d640bf9ca51ee5635a665704f81faff16e4540606bd06923b8",
+    "capability_digest": "67312e8e482855d640bf9ca51ee5635a665704f81faff16e4540606bd06923b8",
+    "controller_digest": "012f89d74140a98a09a4d612e2402a16fcf07c9fbc6d95fdb479f245c6787a29",
+    "report": {
+      "controller_sha256": "012f89d74140a98a09a4d612e2402a16fcf07c9fbc6d95fdb479f245c6787a29",
+      "episodes": 1,
+      "evaluation_passed": true,
+      "evaluator_successes": 1,
+      "sealed_evaluation": true,
+      "sealed_evaluation_cases": [
+        {
+          "case": "default",
+          "controller_sha256": "012f89d74140a98a09a4d612e2402a16fcf07c9fbc6d95fdb479f245c6787a29",
+          "evaluator_success": true,
+          "execution_status": "completed",
+          "passed": true
+        }
+      ],
+      "success_rate": 1.0
+    },
+    "seed": 6,
+    "state": 6,
+    "trace_digest": "f28cbc2bc01baeb7245927a7e608b2dba02d50cbcc00f58ac21e346239ce1c8b"
+  },
+  "runtime_consistency": {
+    "actions_equal": true,
+    "direct_final_step": 12,
+    "direct_semantic_digest": "d6a0782ee2c90ce44c538284ebacf6d5af8661befc1fb2cde63ed62a7210ca66",
+    "instruction_equal": true,
+    "provenance": {
+      "direct_elapsed": 0.23071743780747056,
+      "direct_trace_path": "/root/autodl-tmp/experiments/runtime-semantic-consistency-final/direct/adapter/executions/execution-000001/trace.json",
+      "roboforge_elapsed": 2.639300731010735,
+      "roboforge_trace_path": "/root/autodl-tmp/experiments/runtime-semantic-consistency-final/roboforge/legacy/adapter/executions/execution-000001/trace.json"
+    },
+    "roboforge_final_step": 12,
+    "roboforge_semantic_digest": "d6a0782ee2c90ce44c538284ebacf6d5af8661befc1fb2cde63ed62a7210ca66",
+    "seed_equal": true,
+    "semantic_trace_equal": true,
+    "state_equal": true,
+    "success_equal": true,
+    "task_identity_equal": true,
+    "termination_equal": true,
+    "trace_field_differences": []
+  },
+  "schema_version": 1
+}
