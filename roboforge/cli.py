@@ -145,36 +145,6 @@ def _initialize_persistent_workspace(workspace: Path) -> None:
         (workspace / name).mkdir(parents=True, exist_ok=True)
 
 
-def _run_with_failure_feedback(conversation, service, workspace: Path, *, max_conversation_turns: int = 80) -> None:
-    """Compatibility helper for callers using the public Conversation API.
-
-    It does not execute robot operations itself; it only appends materialized
-    evidence to the same conversation and lets OpenHands decide the next tool
-    call.  The canonical CLI uses one ``conversation.run()`` with a Stop hook.
-    """
-    from .openhands_tools import materialize_public_evidence
-    feedback_ref = None
-    for _ in range(max_conversation_turns):
-        before = len(getattr(getattr(conversation, "state", None), "events", ()))
-        before_trials = int(service.status().get("physical_trials", 0))
-        conversation.run()
-        status = service.status(); ref = status.get("latest_physical_evidence")
-        if ref and ref != feedback_ref:
-            evidence = service.inspect_trial(ref); feedback_ref = ref
-            if (evidence.physical_verification or {}).get("verified") is True or status["physical_trials"] >= status["max_trials"]:
-                return
-            conversation.send_message(
-                "A newly sealed physical trial failed. Continue this same conversation using the public files below; inspect trace and first error, then revise code. Hidden success-evaluator state remains unavailable.\n\n"
-                + json.dumps(materialize_public_evidence(service, evidence, workspace), indent=2, sort_keys=True),
-                sender="roboforge",
-            )
-            continue
-        after = len(getattr(getattr(conversation, "state", None), "events", ()))
-        if int(status.get("physical_trials", 0)) == before_trials and after <= before + 1:
-            conversation.send_message("The previous turn did not invoke a tool. Continue now: immediately use observe, Terminal, or file_editor and make a concrete engineering change.", sender="roboforge")
-            continue
-        return
-
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     lifecycle = _lifecycle_main(argv)

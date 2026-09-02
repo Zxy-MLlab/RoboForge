@@ -391,7 +391,12 @@ def test_openhands_error_observation_is_structured_and_sanitized():
     assert "<redacted-path>" in encoded and "token=<redacted>" in encoded
 
 
-def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path):
+def test_canonical_path_uses_terminal_trial_cli():
+    cli = (Path(__file__).parents[1] / "roboforge" / "cli.py").read_text()
+    assert "python -m roboforge trial" in cli
+    assert "_run_with_failure_feedback" not in cli
+
+def _legacy_feedback_test_removed(tmp_path):
     pytest.importorskip("openhands.sdk")
     from types import SimpleNamespace
 
@@ -433,7 +438,7 @@ def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path
     assert "hidden success-evaluator state" in message.lower()
 
 
-def test_same_openhands_conversation_recovers_from_noop_acknowledgement(tmp_path):
+def _legacy_noop_feedback_test_removed(tmp_path):
     pytest.importorskip("openhands.sdk")
     from types import SimpleNamespace
 
@@ -509,7 +514,7 @@ def test_stop_gate_allows_verified_or_exhausted_and_denies_missing(tmp_path):
     assert stop_decision(exhausted)["decision"] == "allow"
 
 
-def test_failure_feedback_stops_on_verified_or_exhausted_trial(tmp_path):
+def _legacy_stop_feedback_test_removed(tmp_path):
     pytest.importorskip("openhands.sdk")
     from roboforge.cli import _run_with_failure_feedback
 
