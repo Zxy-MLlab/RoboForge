@@ -58,6 +58,14 @@ def extract_first_error(value: Any) -> dict[str, Any] | None:
 def derive_status(public: Mapping[str, Any], execution_error: str | None = None) -> dict[str, Any]:
     """Separate runner, controller, environment and task outcomes."""
     first = extract_first_error(public)
+    if first is None and execution_error:
+        text = str(execution_error)
+        kind, sep, message = text.partition(":")
+        first = {
+            "path": "$.execution_error",
+            "error_type": kind.strip() if sep else "RuntimeError",
+            "message": message.strip() if sep else text,
+        }
     controller_error = public.get("controller_error") or first
     termination = str(public.get("controller_termination") or "unknown")
     controller_status = "error" if controller_error or termination not in {"completed", "unknown"} else "completed"
