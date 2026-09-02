@@ -145,6 +145,44 @@ def _initialize_persistent_workspace(workspace: Path) -> None:
         (workspace / name).mkdir(parents=True, exist_ok=True)
 
 
+def _write_campaign_result(
+    workspace: Path,
+    *,
+    status: dict,
+    elapsed: float,
+    max_iterations: int,
+    wall_time_budget: float,
+    latest_verified: bool,
+    run_error: str | None = None,
+) -> dict:
+    if latest_verified:
+        termination_reason = "verified"
+    elif status["physical_trials"] >= status["max_trials"]:
+        termination_reason = "physical_trial_budget_exhausted"
+    elif elapsed >= wall_time_budget:
+        termination_reason = "wall_time_budget_exhausted"
+    elif run_error:
+        termination_reason = "openhands_run_error"
+    else:
+        termination_reason = "openhands_iteration_budget_or_agent_stop"
+    campaign = {
+        "schema_version": 1,
+        "termination_reason": termination_reason,
+        "physical_trials": status["physical_trials"],
+        "max_physical_trials": status["max_trials"],
+        "max_openhands_iterations": max_iterations,
+        "wall_time_budget_seconds": wall_time_budget,
+        "elapsed_seconds": elapsed,
+        "latest_verified": latest_verified,
+    }
+    if run_error:
+        campaign["run_error"] = run_error
+    result_path = workspace / ".roboforge" / "campaign-result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return campaign
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     lifecycle = _lifecycle_main(argv)
@@ -280,6 +318,11 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
                "Robot SDK or a normal Python/service dependency. The external Control Plane "
                "alone freezes and publishes validated capabilities; there is no Agent-side "
                "capability acquisition or materialization tool.")
+    started = time.monotonic()
+    run_error = None
+    run_exception = None
+    final_status = None
+    latest_verified = False
     try:
         if conversation_id is None: convo.send_message(prompt)
         else: convo.send_message(
@@ -297,38 +340,45 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         # One official OpenHands run owns the entire edit→Terminal→inspect→edit
         # session. The public Stop hook keeps that same run alive after an
         # unverified trial; RoboForge does not implement a second AgentLoop.
-        started = time.monotonic()
         convo.run()
-        elapsed = time.monotonic() - started
-        status = service.status()
-        latest = status.get("latest_physical_evidence")
-        verified = bool(
-            latest
-            and (service.inspect_trial(str(latest)).physical_verification or {}).get("verified") is True
-        )
-        termination_reason = (
-            "verified" if verified
-            else "physical_trial_budget_exhausted" if status["physical_trials"] >= status["max_trials"]
-            else "wall_time_budget_exhausted" if elapsed >= a.wall_time_budget
-            else "openhands_iteration_budget_or_agent_stop"
-        )
-        campaign = {
-            "schema_version": 1,
-            "termination_reason": termination_reason,
-            "physical_trials": status["physical_trials"],
-            "max_physical_trials": status["max_trials"],
-            "max_openhands_iterations": a.max_iterations,
-            "wall_time_budget_seconds": a.wall_time_budget,
-            "elapsed_seconds": elapsed,
-            "latest_verified": verified,
-        }
-        (workspace / ".roboforge" / "campaign-result.json").write_text(
-            json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+    except Exception as exc:
+        # Preserve a machine-readable campaign record even when the public
+        # OpenHands session fails (for example, a transient provider outage).
+        # The durable trial service remains the source of physical-trial truth.
+        run_error = f"{type(exc).__name__}: {exc}"
+        run_exception = exc
     finally:
+        # Query the worker before terminating it so the final campaign record
+        # reflects all durable trials completed during this run, including an
+        # OpenHands exception path.
+        try:
+            final_status = service.status()
+            latest = final_status.get("latest_physical_evidence")
+            latest_verified = bool(
+                latest
+                and (service.inspect_trial(str(latest)).physical_verification or {}).get("verified") is True
+            )
+        except Exception as status_exc:
+            status_error = f"{type(status_exc).__name__}: {status_exc}"
+            run_error = f"{run_error}; status collection failed: {status_error}" if run_error else status_error
+            if run_exception is None:
+                run_exception = status_exc
         convo.close(); worker.terminate()
         try: worker.wait(timeout=10)
         except subprocess.TimeoutExpired: worker.kill(); worker.wait()
+    elapsed = time.monotonic() - started
+    status = final_status or {"physical_trials": 0, "max_trials": a.max_trials}
+    _write_campaign_result(
+        workspace,
+        status=status,
+        elapsed=elapsed,
+        max_iterations=a.max_iterations,
+        wall_time_budget=a.wall_time_budget,
+        latest_verified=latest_verified,
+        run_error=run_error,
+    )
+    if run_exception is not None:
+        raise run_exception
     return 0
 
 if __name__ == "__main__": raise SystemExit(main())
