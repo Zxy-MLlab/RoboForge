@@ -1,13 +1,13 @@
 """Formal OpenHands-native RoboForge entry point."""
 from __future__ import annotations
-import argparse, os, secrets, subprocess, sys, time
+import argparse, os, secrets, shlex, subprocess, sys, time
 import uuid
 import json
 from pathlib import Path
 
 
 def _lifecycle_main(argv: list[str]) -> int | None:
-    if not argv or argv[0] not in {"env", "run", "replay", "compare", "submit"}:
+    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit"}:
         return None
     from .control_plane import compare, environment_info, replay, submit
     root = argparse.ArgumentParser(prog="roboforge")
@@ -21,6 +21,12 @@ def _lifecycle_main(argv: list[str]) -> int | None:
     run_parser.add_argument("--run-dir", type=Path, required=True)
     run_parser.add_argument("--adapter-python", default=os.getenv("ROBOFORGE_ADAPTER_PYTHON") or sys.executable)
     run_parser.add_argument("--timeout", type=float, default=600)
+    trial_parser = commands.add_parser("trial", help="Run through the active external Runtime and materialize public evidence")
+    trial_parser.add_argument("entrypoint", type=Path)
+    trial_parser.add_argument("--intent", required=True)
+    trial_parser.add_argument("--workspace", type=Path, default=Path(os.getenv("ROBOFORGE_WORKSPACE", ".")))
+    trial_parser.add_argument("--socket", type=Path, default=os.getenv("ROBOFORGE_RPC_SOCKET"))
+    trial_parser.add_argument("--token", default=os.getenv("ROBOFORGE_RPC_TOKEN"))
     replay_parser = commands.add_parser("replay", help="Verify and project immutable trial evidence")
     replay_parser.add_argument("trial")
     compare_parser = commands.add_parser("compare", help="Compare baseline and candidate trial evidence")
@@ -32,13 +38,44 @@ def _lifecycle_main(argv: list[str]) -> int | None:
     submit_parser.add_argument("--evidence", action="append", required=True)
     submit_parser.add_argument("--note", required=True)
     args = root.parse_args(argv)
+    exit_code = 0
     if args.command == "env": value = environment_info()
-    elif args.command == "run": value = _run_frozen_candidate(args)
+    elif args.command == "run":
+        value = _run_frozen_candidate(args)
+        exit_code = int((value.get("public") or {}).get("lifecycle", {}).get("runner_exit_code", 0))
+    elif args.command == "trial":
+        return _run_active_trial(args)
     elif args.command == "replay": value = replay(args.trial)
     elif args.command == "compare": value = compare(args.baseline, args.candidate)
     else: value = submit(args.asset_root, args.candidate_version, args.evidence, note=args.note)
     print(json.dumps(value, indent=2, sort_keys=True))
-    return 0
+    return exit_code
+
+
+def _run_active_trial(args) -> int:
+    from .rpc import ExperimentRpcClient
+    from .stop_gate import write_public_status
+    from .trial_artifacts import materialize_preflight_failure, materialize_trial
+
+    if not args.socket or not args.token:
+        raise SystemExit("active trial requires ROBOFORGE_RPC_SOCKET and ROBOFORGE_RPC_TOKEN")
+    workspace = args.workspace.resolve(); controller = args.entrypoint.resolve()
+    try:
+        controller.relative_to(workspace)
+    except ValueError as exc:
+        raise SystemExit("Controller must be inside the active OpenHands workspace") from exc
+    service = ExperimentRpcClient(args.socket, args.token, timeout=900)
+    preflight = service.preflight_controller(controller)
+    if preflight.get("ok") is False:
+        result = materialize_preflight_failure(workspace, preflight, controller_path=controller)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return int(result["runner_exit_code"])
+    evidence = service.run_controller(request_id=f"terminal:{uuid.uuid4()}", controller_path=controller,
+                                      intent=args.intent)
+    result = materialize_trial(service, evidence, workspace, controller_path=controller)
+    write_public_status(service, workspace, evidence)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return int(result["runner_exit_code"])
 
 
 def _run_frozen_candidate(args) -> dict:
@@ -80,34 +117,63 @@ def _llm_base_url(model: str, base_url: str) -> str:
     return base_url
 
 
-def _run_with_failure_feedback(conversation, service, workspace: Path) -> None:
-    """Continue one OpenHands conversation once per newly sealed failure."""
-    from .openhands_tools import materialize_public_evidence
+def _initialize_persistent_workspace(workspace: Path) -> None:
+    """Create the stable project layout exposed to the OpenHands agent.
 
+    The directories are intentionally just ordinary workspace folders. The
+    agent remains free to create, rename, or remove project files through the
+    public Editor/Terminal tools; this helper does not impose a development
+    workflow or register any additional tool.
+    """
+    for name in (
+        "controllers",
+        "capabilities/perception",
+        "capabilities/grasping",
+        "capabilities/planning",
+        "capabilities/control",
+        "models",
+        "services",
+        "robot_sdk",
+        "runtime_adapters",
+        "experiments",
+        "diagnostics",
+        "tests",
+        "configs",
+        "requirements",
+        "task_docs",
+    ):
+        (workspace / name).mkdir(parents=True, exist_ok=True)
+
+
+def _run_with_failure_feedback(conversation, service, workspace: Path, *, max_conversation_turns: int = 80) -> None:
+    """Compatibility helper for callers using the public Conversation API.
+
+    It does not execute robot operations itself; it only appends materialized
+    evidence to the same conversation and lets OpenHands decide the next tool
+    call.  The canonical CLI uses one ``conversation.run()`` with a Stop hook.
+    """
+    from .openhands_tools import materialize_public_evidence
     feedback_ref = None
-    while True:
+    for _ in range(max_conversation_turns):
+        before = len(getattr(getattr(conversation, "state", None), "events", ()))
+        before_trials = int(service.status().get("physical_trials", 0))
         conversation.run()
-        status = service.status()
-        ref = status.get("latest_physical_evidence")
-        if not ref or ref == feedback_ref:
-            return
-        evidence = service.inspect_trial(ref)
-        verified = (evidence.physical_verification or {}).get("verified") is True
-        if verified or status["physical_trials"] >= status["max_trials"]:
-            return
-        feedback_ref = ref
-        public_failure = materialize_public_evidence(
-            service, evidence, workspace
-        )
-        conversation.send_message(
-            "A newly sealed physical trial failed authentic verification. "
-            "Continue this same coding conversation using only the public failure "
-            "evidence below. Inspect the materialized trace, video, and images when "
-            "useful; diagnose the first factual failure before changing code. Hidden "
-            "success-evaluator state and simulator internals remain unavailable.\n\n"
-            + json.dumps(public_failure, indent=2, sort_keys=True),
-            sender="roboforge",
-        )
+        status = service.status(); ref = status.get("latest_physical_evidence")
+        if ref and ref != feedback_ref:
+            evidence = service.inspect_trial(ref); feedback_ref = ref
+            if (evidence.physical_verification or {}).get("verified") is True or status["physical_trials"] >= status["max_trials"]:
+                return
+            conversation.send_message(
+                "A newly sealed physical trial failed. Continue this same conversation using the public files below; inspect trace and first error, then revise code. Hidden success-evaluator state remains unavailable.\n\n"
+                + json.dumps(materialize_public_evidence(service, evidence, workspace), indent=2, sort_keys=True),
+                sender="roboforge",
+            )
+            continue
+        after = len(getattr(getattr(conversation, "state", None), "events", ()))
+        if int(status.get("physical_trials", 0)) == before_trials and after <= before + 1:
+            conversation.send_message("The previous turn did not invoke a tool. Continue now: immediately use observe, Terminal, or file_editor and make a concrete engineering change.", sender="roboforge")
+            continue
+        return
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -119,7 +185,7 @@ def main(argv=None):
     p.add_argument("--state", type=int, default=0); p.add_argument("--run-dir")
     p.add_argument("--asset-root", default="assets"); p.add_argument("--model", default="gpt-5.6-sol")
     p.add_argument("--base-url", default=os.getenv("ROBOFORGE_MODEL_BASE_URL", "https://api.apexin.ai/v1"))
-    p.add_argument("--api-key-env", default="APEX_API_KEY"); p.add_argument("--max-trials", type=int, default=12)
+    p.add_argument("--api-key-env", default="APEX_API_KEY"); p.add_argument("--max-trials", type=int, default=15)
     p.add_argument("--provider", choices=["openai", "apex"],
                    default=os.getenv("ROBOFORGE_MODEL_PROVIDER"))
     p.add_argument("--max-iterations", type=int, default=80)
@@ -147,7 +213,9 @@ def main(argv=None):
         print(json.dumps(checks, indent=2, sort_keys=True)); return 0 if checks["ok"] else 1
     if not a.task or not a.run_dir: p.error("--task and --run-dir are required unless --doctor is used")
     run = Path(a.run_dir).resolve(); workspace = run / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True); controller = workspace / "controller.py"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _initialize_persistent_workspace(workspace)
+    controller = workspace / "controllers" / "controller.py"
     if not controller.exists(): controller.write_text("def run(robot):\n    return robot.observe()\n")
     from openhands.sdk import LLM
     from .rpc import ExperimentRpcClient
@@ -199,27 +267,48 @@ def main(argv=None):
     if a.resume and (run / "openhands").is_dir():
         candidates = sorted(p for p in (run / "openhands").iterdir() if p.is_dir())
         if candidates: conversation_id = uuid.UUID(hex=candidates[-1].name)
-    convo = create_openhands_conversation(llm=llm, workspace=workspace,
-        persistence_dir=run / "openhands", service=service, controller_path=controller,
-        asset_root=a.asset_root, conversation_id=conversation_id,
-        max_iterations=a.max_iterations)
     task_info = service.task_info()
     interface_manual = workspace / "ROBOT_INTERFACE.json"
     interface_manual.write_text(json.dumps(task_info.get("robot_interface") or {}, indent=2,
         sort_keys=True), encoding="utf-8")
+    from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher
+    from .stop_gate import write_public_status
+
+    campaign_status = write_public_status(service, workspace)
+    stop_hook = HookConfig(stop=[HookMatcher(hooks=[HookDefinition(
+        command=(
+            f"PYTHONPATH={shlex.quote(str(Path(__file__).parents[1]))} "
+            f"{shlex.quote(sys.executable)} -m roboforge.stop_gate "
+            f"--status {shlex.quote(str(campaign_status))}"
+        ),
+        timeout=10,
+    )])])
+    convo = create_openhands_conversation(llm=llm, workspace=workspace,
+        persistence_dir=run / "openhands", service=service, controller_path=controller,
+        asset_root=a.asset_root, conversation_id=conversation_id,
+        max_iterations=a.max_iterations, hook_config=stop_hook,
+        terminal_env={
+            "ROBOFORGE_RPC_SOCKET": str(socket_path),
+            "ROBOFORGE_RPC_TOKEN": token,
+            "ROBOFORGE_WORKSPACE": str(workspace),
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+        })
     prompt = f"""Unknown robot task: {task_info.get('instruction') or a.task}
 The public Robot SDK manual is in {interface_manual}. Read relevant sections when needed.
-Work like a coding agent. Observe, inspect files, write and revise controller.py, run physical
-experiments, inspect and compare factual evidence, and continue until authentic verification or
+Work like a coding agent. Inspect files, write and revise controllers/controller.py, and run experiments
+from Terminal with `python -m roboforge trial controllers/controller.py --workspace . --intent '<hypothesis>'`.
+Read `.roboforge/trials/<trial_id>/result.json`, `first_error.json`, `trace.json`, keyframes, video and logs
+with ordinary Terminal/file tools, then continue until authentic verification or
 the physical budget is exhausted. Do not infer hidden simulator state or use task-specific patches.
 Reusable assets are under {Path(a.asset_root).resolve()} and should be searched only when useful."""
-    prompt += "\nYour first response MUST invoke an available tool (observe, terminal, or file_editor); do not reply with planning text alone. Continue using tools until the task is finished or the budget is exhausted."
+    prompt += "\nYour first response MUST invoke terminal or file_editor; do not reply with planning text alone. Continue using tools until the task is finished or the budget is exhausted."
     prompt += "\nBefore the first physical trial, consider whether existing assets are relevant. When asset search returns a relevant result, read that selected asset before deciding whether to reuse or adapt it; a search hit alone is not reuse."
-    prompt += ("\nIf factual evidence reveals a missing reusable software capability, you may "
-               "independently implement or obtain a generic Python utility in the workspace, "
-               "validate and register it with acquire_capability, then read and materialize it "
-               "before importing it in controller.py. Decide whether this is useful yourself; "
-               "the Harness does not select capabilities or trigger acquisition by rule.")
+    prompt += ("\nIf factual evidence reveals a missing reusable software capability, "
+               "independently implement or obtain it as ordinary workspace code, inspect its "
+               "source and license, validate it through Terminal, and integrate it through the "
+               "Robot SDK or a normal Python/service dependency. The external Control Plane "
+               "alone freezes and publishes validated capabilities; there is no Agent-side "
+               "capability acquisition or materialization tool.")
     try:
         if conversation_id is None: convo.send_message(prompt)
         else: convo.send_message(
@@ -231,10 +320,13 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
             "revise, acquire a capability, or run a new Controller experiment. Before another "
             "physical trial, compare the latest failed trials and explicitly determine whether "
             "the unresolved behavior is a reusable software capability gap. If it is, implement "
-            "a generic workspace-local Python capability, validate/register it with "
-            "acquire_capability, then read/materialize and integrate it before physical use."
+            "or obtain generic workspace-local code, validate it with Terminal, and integrate "
+            "it as a normal Python/service dependency before physical use."
         )
-        _run_with_failure_feedback(convo, service, workspace)
+        # One official OpenHands run owns the entire edit→Terminal→inspect→edit
+        # session. The public Stop hook keeps that same run alive after an
+        # unverified trial; RoboForge does not implement a second AgentLoop.
+        convo.run()
     finally:
         convo.close(); worker.terminate()
         try: worker.wait(timeout=10)

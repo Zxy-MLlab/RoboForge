@@ -180,6 +180,7 @@ def _public_execution_diagnostics(execution: Mapping[str, Any]) -> dict[str, Any
         "controller_termination": termination,
         "tool_errors": tool_errors,
         "action_trace": actions,
+        "sanitized_runtime_trace": _bounded_public(execution.get("rpc_events") or []),
     }
     if execution.get("result") is not None:
         result["controller_result"] = _bounded_public(execution["result"])
@@ -232,6 +233,7 @@ class LiberoEpisode:
 
 class LiberoDeployment:
     episodic_trials = True
+    robot_sdk_contract = LIBERO_ROBOT_SDK_CONTRACT
     _OUTPUT_FIELDS = {name: set(spec.get("output_fields") or [])
                       for name, spec in LIBERO_ROBOT_SDK_CONTRACT["methods"].items()}
     def __init__(self, *, episode: LiberoEpisode, artifact_dir: str|Path,
@@ -346,6 +348,14 @@ class LiberoDeployment:
         directory.mkdir(parents=True, exist_ok=True)
         trace_path = directory / "trace.json"
         trace_path.write_text(json.dumps(self.trace, indent=2, default=str) + "\n")
+        trajectory_path = directory / "trajectory.npz"
+        np.savez_compressed(
+            trajectory_path,
+            events=np.asarray(
+                [json.dumps(item, sort_keys=True, default=str) for item in self.trace],
+                dtype=str,
+            ),
+        )
         video_path = directory / "rollout.mp4"
         if self.video:
             h, w = self.video[0].shape[:2]
@@ -354,7 +364,8 @@ class LiberoDeployment:
                 writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             writer.release()
         self._execution_artifacts = {"trace_path": str(trace_path),
-                                     "rollout_path": str(video_path)}
+                                     "rollout_path": str(video_path),
+                                     "trajectory_path": str(trajectory_path)}
 
     def reset_case(self):
         if self.closed:
@@ -994,7 +1005,9 @@ class LiberoDeployment:
                 "final_step":self.step,
                 "final_proprioception":self.canonical_embodied_state()["robot"],
                 "trace_path":self._execution_artifacts.get("trace_path"),
-                "rollout_path":self._execution_artifacts.get("rollout_path"),"benchmark_signal_exposed":False,
+                "rollout_path":self._execution_artifacts.get("rollout_path"),
+                "trajectory_path":self._execution_artifacts.get("trajectory_path"),
+                "benchmark_signal_exposed":False,
                 # Consumed only by the Harness generalization gate.  Keys
                 # prefixed with _harness_ are removed from model evidence.
                 "_harness_case_id":self.episode.case_handle}
@@ -1009,11 +1022,13 @@ class LiberoDeployment:
             verifier_diagnostic = {"error": _sanitize_public_text(outcome["error"])}
         return {
             **_public_execution_diagnostics(execution),
+            "sanitized_trace": _bounded_public(self.trace),
             "outcome_observations": sensor_report.get("outcome_observations"),
             "final_step": sensor_report.get("final_step"),
             "final_proprioception": sensor_report.get("final_proprioception"),
             "trace_path": sensor_report.get("trace_path"),
             "rollout_path": sensor_report.get("rollout_path"),
+            "trajectory_path": sensor_report.get("trajectory_path"),
             "verifier_diagnostic": verifier_diagnostic,
         }
 

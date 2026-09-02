@@ -77,7 +77,9 @@ def _sdk_index(capabilities, verifiers, contracts=None):
         },
         "seed_tool_contracts": {
             name: {"input": compact_schema(contract.get("input_schema")),
-                   "output": compact_schema(contract.get("output_schema"))}
+                   "output": compact_schema(contract.get("output_schema")),
+                   "input_schema": dict(contract.get("input_schema") or {}),
+                   "output_schema": dict(contract.get("output_schema") or {})}
             for name, contract in dict(contracts or {}).items()
         },
         "seed_tools": sorted(capabilities),

@@ -159,11 +159,50 @@ def test_new_runtime_has_no_generic_agent_loop_implementation():
     assert "class Workspace" not in text
     assert "class AgentLoop" not in text
 
+
+def test_distribution_exposes_only_openhands_native_agent_cli():
+    root = Path(__file__).parents[1]
+    project = (root / "pyproject.toml").read_text()
+    assert 'roboforge = "roboforge.cli:main"' in project
+    assert 'roboforge-openhands = "roboforge.cli:main"' in project
+    assert 'embodied_codex = "embodied_codex.cli:main"' not in project
+    public_api = (root / "embodied_codex" / "__init__.py").read_text()
+    assert "AgentLoop" not in public_api
+    compatibility_main = (root / "embodied_codex" / "__main__.py").read_text()
+    assert "Deprecated source-checkout compatibility entry point" in compatibility_main
+    assert "from .cli import main" in compatibility_main
+    assert '"openhands-sdk==1.44.1"' in project
+    assert '"openhands-tools==1.44.1"' in project
+
 def test_openhands_editor_allows_capability_modules_but_remains_workspace_confined():
     runtime = (Path(__file__).parents[1] / "roboforge" / "runtime.py").read_text()
     assert "allowed_edits_files" not in runtime
     assert "class ConfinedFileEditorExecutor" in runtime
     assert "relative_to(self.workspace_root)" in runtime
+
+
+def test_formal_tools_use_public_planning_and_subagent_extensions(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from roboforge.runtime import register_spike_tools
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    controller = workspace / "controller.py"
+    controller.write_text("def run(robot): return {}\n")
+    tools = register_spike_tools(
+        ExperimentService(tmp_path / "run", FakeAdapter()),
+        workspace=workspace,
+        controller_path=controller,
+    )
+    by_name = {tool.name: tool for tool in tools}
+    assert "planning_file_editor" in by_name
+    assert by_name["planning_file_editor"].params == {
+        "plan_path": str(workspace / "PLAN.md")
+    }
+    assert "task_tool_set" in by_name
+    assert "browser_tool_set" not in by_name
+    for embodied_name in ("observe", "run_controller", "inspect_trial", "compare_trials"):
+        assert embodied_name not in by_name
 
 def test_formal_cli_passes_explicit_provider_to_adapter_worker():
     cli = (Path(__file__).parents[1] / "roboforge" / "cli.py").read_text()
@@ -173,7 +212,22 @@ def test_formal_cli_passes_explicit_provider_to_adapter_worker():
     assert '"verifier_provider": provider' in cli
     assert '"--configuration-json"' in cli
     assert "physical_verification.verified=true" in cli
-    assert "Decide whether this is useful yourself" in cli
+    assert "there is no Agent-side" in cli
+    assert "acquire_capability" not in cli
+
+
+def test_canonical_workspace_layout(tmp_path):
+    from roboforge.cli import _initialize_persistent_workspace
+
+    workspace = tmp_path / "workspace"
+    _initialize_persistent_workspace(workspace)
+    expected = {
+        "controllers", "capabilities/perception", "capabilities/grasping",
+        "capabilities/planning", "capabilities/control", "models", "services",
+        "robot_sdk", "runtime_adapters", "experiments", "diagnostics", "tests",
+        "configs", "requirements", "task_docs",
+    }
+    assert all((workspace / path).is_dir() for path in expected)
 
 def test_libero_reset_captures_authentic_before_frame_after_reset():
     source = (Path(__file__).parents[1] / "embodied_codex" / "deployments" / "libero.py").read_text()
@@ -339,6 +393,8 @@ def test_openhands_error_observation_is_structured_and_sanitized():
 
 def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path):
     pytest.importorskip("openhands.sdk")
+    from types import SimpleNamespace
+
     from roboforge.cli import _run_with_failure_feedback
 
     service = ExperimentService(tmp_path / "run", FakeAdapter(), max_trials=3)
@@ -349,6 +405,7 @@ def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path
         def __init__(self):
             self.run_calls = 0
             self.messages = []
+            self.state = SimpleNamespace(events=[])
 
         def run(self):
             self.run_calls += 1
@@ -358,6 +415,8 @@ def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path
                     controller_path=controller,
                     intent="exercise feedback continuation",
                 )
+            else:
+                self.state.events.extend(["action", "observation"])
 
         def send_message(self, message, sender=None):
             self.messages.append((message, sender))
@@ -372,6 +431,82 @@ def test_same_openhands_conversation_continues_after_new_sealed_failure(tmp_path
     assert "physical_verification" in message
     assert "local_path" in message
     assert "hidden success-evaluator state" in message.lower()
+
+
+def test_same_openhands_conversation_recovers_from_noop_acknowledgement(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from types import SimpleNamespace
+
+    from roboforge.cli import _run_with_failure_feedback
+
+    service = ExperimentService(tmp_path / "run", FakeAdapter(), max_trials=3)
+
+    class Conversation:
+        def __init__(self):
+            self.run_calls = 0
+            self.messages = []
+            self.state = SimpleNamespace(events=[])
+
+        def run(self):
+            self.run_calls += 1
+            if self.run_calls == 1:
+                # OpenHands acknowledged the task in prose but emitted no
+                # ActionEvent or physical trial.
+                self.state.events.append("assistant-message")
+            else:
+                # A real tool action is progress; the helper must hand control
+                # back instead of prescribing the next development step.
+                self.state.events.extend(["action", "observation"])
+
+        def send_message(self, message, sender=None):
+            self.messages.append((message, sender))
+
+    conversation = Conversation()
+    _run_with_failure_feedback(conversation, service, tmp_path / "workspace")
+
+    assert conversation.run_calls == 2
+    assert len(conversation.messages) == 1
+    message, sender = conversation.messages[0]
+    assert sender == "roboforge"
+    assert "did not invoke a tool" in message
+    assert "immediately use observe" in message
+
+
+def test_stop_gate_denies_while_trials_remain(tmp_path):
+    from roboforge.stop_gate import stop_decision
+
+    status = tmp_path / "status.json"
+    status.write_text(json.dumps({
+        "physical_trials": 1,
+        "max_physical_trials": 3,
+        "latest_physical_evidence": "experiment://physical-000001",
+        "latest_verified": False,
+    }))
+    decision = stop_decision(status)
+    assert decision["decision"] == "deny"
+    assert "not yet verified" in decision["reason"]
+    assert "experiment://physical-000001" in decision["additionalContext"]
+
+
+def test_stop_gate_allows_verified_or_exhausted_and_denies_missing(tmp_path):
+    from roboforge.stop_gate import stop_decision
+
+    missing = stop_decision(tmp_path / "missing.json")
+    assert missing["decision"] == "deny"
+
+    verified = tmp_path / "verified.json"
+    verified.write_text(json.dumps({
+        "physical_trials": 1, "max_physical_trials": 3,
+        "latest_verified": True,
+    }))
+    assert stop_decision(verified)["decision"] == "allow"
+
+    exhausted = tmp_path / "exhausted.json"
+    exhausted.write_text(json.dumps({
+        "physical_trials": 3, "max_physical_trials": 3,
+        "latest_verified": False,
+    }))
+    assert stop_decision(exhausted)["decision"] == "allow"
 
 
 def test_failure_feedback_stops_on_verified_or_exhausted_trial(tmp_path):

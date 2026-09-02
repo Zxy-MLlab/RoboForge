@@ -3,8 +3,9 @@
 RoboForge's formal entry point is `roboforge-openhands`. It constructs an
 OpenHands SDK `Agent` and `LocalConversation`; OpenHands owns the model loop,
 conversation/event persistence, context, workspace, file editing and generic
-tools. RoboForge contributes only embodied tools (`observe`, `run_controller`,
-`inspect_trial`, `compare_trials`) and the `ExperimentService` that records
+tools. Physical experiments are ordinary Terminal commands (`python -m
+roboforge trial ...`); RoboForge does not register embodied operations as LLM
+tools. The external `ExperimentService` records
 physical budgets, reset generations, immutable Controller snapshots/artifacts,
 authentic Adapter receipts, provenance, crash recovery and idempotency.
 
@@ -16,6 +17,27 @@ runtime. Removing `roboforge/` leaves the normal OpenHands coding agent.
 Assets are stored in `experiences/`, `skills/`, and `capabilities/`. Search
 returns metadata summaries only; implementation details are read explicitly,
 so OpenHands context management can use progressive disclosure.
+
+The installed SDK is OpenHands `1.44.1`, pinned in
+`requirements/openhands-3.12.lock`. The formal tool set resolves the OpenHands
+FileEditor, Terminal, Grep, Glob, workspace-bound `planning_file_editor`, and
+`task_tool_set`. The task tool uses the browser-free built-in `bash-runner`,
+`code-explorer`, and `general-purpose` subagents. Git and package installation
+are ordinary Terminal operations.
+
+Browser/Web is not registered in the verified local environment because the
+OpenHands `BrowserToolSet` is not usable there without `browser-use` and a
+Chromium runtime. No Web invocation is claimed for that environment.
+
+New runs create an ordinary persistent robot project layout containing
+`controllers/`, `capabilities/{perception,grasping,planning,control}/`,
+`models/`, `services/`, `robot_sdk/`, `runtime_adapters/`, `experiments/`,
+`diagnostics/`, `tests/`, `configs/`, `requirements/`, and `task_docs/`.
+OpenHands may modify these folders through its public Editor and Terminal; the
+layout does not prescribe a repair loop. Each Terminal trial writes a complete
+sanitized projection under `.roboforge/trials/<trial-id>/` including
+`manifest.json`, `trace.json`, `first_error.json`, action receipts, keyframes,
+video/trajectory artifacts, logs and `result.json`.
 
 The first real LIBERO campaign at
 `/root/autodl-tmp/experiments/openhands-native-task0-r4` records an unknown-task

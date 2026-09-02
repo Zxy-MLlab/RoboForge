@@ -15,11 +15,11 @@ from openhands.tools.file_editor.impl import FileEditorExecutor
 from openhands.tools.terminal import TerminalTool
 from openhands.tools.grep import GrepTool
 from openhands.tools.glob import GlobTool
+from openhands.tools.preset.default import register_builtins_agents
+from openhands.tools.preset.planning import get_planning_tools
+from openhands.tools.task import TaskToolSet
 
-from .openhands_tools import create_embodied_tools
 from .service import ExperimentService
-from .assets import AssetLibrary
-from .asset_tools import create_asset_tools
 
 class ConfinedFileEditorExecutor(FileEditorExecutor):
     """Keep all reads and writes inside the OpenHands workspace."""
@@ -43,8 +43,9 @@ def register_spike_tools(
     workspace: str | Path,
     controller_path: str | Path,
     asset_root: str | Path | None = None,
+    terminal_env: dict[str, str] | None = None,
 ) -> list[Tool]:
-    """Register the frozen spike surface with OpenHands.
+    """Register only OpenHands' public, generic software-engineering tools.
 
     The file editor is the upstream OpenHands implementation, confined to the
     configured workspace. This permits normal coding work such as creating a
@@ -87,23 +88,27 @@ def register_spike_tools(
     if "terminal" not in registered: register_tool("terminal", TerminalTool)
     if "grep" not in registered: register_tool("grep", GrepTool)
     if "glob" not in registered: register_tool("glob", GlobTool)
+    # Register only public OpenHands extensions. Browser-backed agents stay
+    # disabled until BrowserToolSet.is_usable() succeeds in the installed SDK.
+    register_builtins_agents(enable_browser=False)
+    planning = get_planning_tools(str(workspace_path / "PLAN.md"))
 
-    library = AssetLibrary(asset_root) if asset_root else None
-    embodied = create_embodied_tools(
-        service,
-        controller,
-        asset_library=library,
-        artifact_dir=workspace_path,
-    )
-    asset_tools = create_asset_tools(library, service, str(workspace_path)) if library else []
-    for tool in [*embodied, *asset_tools]: register_tool(tool.name, tool)
+    # ``service``, ``controller`` and ``asset_root`` remain accepted for API
+    # compatibility, but are deliberately not captured by LLM tools. Physical
+    # work happens through the ordinary Terminal and ``python -m roboforge
+    # trial``; artifacts are then ordinary Workspace files.
+    del service, controller, asset_root
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PYTHONNOUSERSITE": "1",
+        **dict(terminal_env or {}),
+    }
 
     return [
         Tool(name="file_editor"),
-        Tool(name="terminal", params={"env": {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "PYTHONNOUSERSITE": "1",
-        }}), Tool(name="grep"), Tool(name="glob"),
-        *(Tool(name=tool.name) for tool in [*embodied, *asset_tools]),
+        Tool(name="terminal", params={"env": environment}),
+        Tool(name="grep"), Tool(name="glob"),
+        *(tool for tool in planning if tool.name not in {"grep", "glob"}),
+        Tool(name=TaskToolSet.name),
     ]

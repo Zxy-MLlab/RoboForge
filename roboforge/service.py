@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 
 from .models import AdapterResult, ArtifactHandle, ExperimentEvidence
 from .store import CorruptStore, ExperimentStore
+from .evidence import derive_status
 
 
 class ProtocolError(RuntimeError):
@@ -116,6 +117,15 @@ class ExperimentService:
         sdk_index = getattr(legacy, "sdk_index", None)
         return {"instruction": str(instruction or ""),
                 "robot_interface": sdk_index if isinstance(sdk_index, dict) else {}}
+
+    def preflight_controller(self, controller_path: str | Path) -> dict[str, Any]:
+        path = Path(controller_path).resolve()
+        if not path.is_file():
+            raise ProtocolError("Controller is not readable")
+        checker = getattr(self.adapter, "preflight", None)
+        if not callable(checker):
+            return {"ok": True, "checked_calls": 0, "unsupported": True}
+        return dict(checker(controller_path=path, controller_sha256=None))
 
     def reconcile_pending(self, request_id: str, *, disposition: str, note: str) -> dict[str, Any]:
         """External-only reconciliation; never executes or refunds an action."""
@@ -258,6 +268,12 @@ class ExperimentService:
         except OSError as exc:
             raise ProtocolError("Controller is not readable") from exc
 
+        # Adapters may expose a pure, machine-readable preflight.  It runs
+        # before reservation and therefore never consumes a physical trial.
+        report = self.preflight_controller(path)
+        if report.get("ok") is False:
+                raise ProtocolError("contract preflight failed: " + json.dumps(report, sort_keys=True))
+
         with self.store.locked():
             self._recover_committed_evidence()
             existing = self._existing_or_pending(
@@ -396,6 +412,10 @@ class ExperimentService:
         assets_used: tuple[str, ...] = (),
     ) -> ExperimentEvidence:
         public = _sanitize_public_value(result.public)
+        lifecycle_source = dict(public)
+        if kind == "physical_trial":
+            lifecycle_source["physical_verification"] = {"verified": bool(verified)}
+        public.setdefault("lifecycle", derive_status(lifecycle_source, execution_error))
         self._assert_public_projection(public)
         handles = tuple(
             ArtifactHandle(**self.store.put_artifact(

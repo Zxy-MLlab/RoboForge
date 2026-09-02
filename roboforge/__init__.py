@@ -16,17 +16,20 @@ from .assets import AssetLibrary
 
 
 def create_openhands_conversation(*, llm, workspace, persistence_dir, service, controller_path,
-                                  asset_root=None, conversation_id=None, max_iterations=500):
-    """Construct an OpenHands LocalConversation with RoboForge embodied tools."""
+                                  asset_root=None, conversation_id=None, max_iterations=500,
+                                  hook_config=None, terminal_env=None):
+    """Construct an OpenHands conversation with native coding tools only."""
     from openhands.sdk import Agent
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
     from .runtime import register_spike_tools
-    tools = register_spike_tools(service, workspace=workspace, controller_path=controller_path, asset_root=asset_root)
+    tools = register_spike_tools(service, workspace=workspace, controller_path=controller_path,
+                                 asset_root=asset_root, terminal_env=terminal_env)
     agent = Agent(llm=llm, tools=tools, include_default_tools=["FinishTool", "ThinkTool"])
     return LocalConversation(agent=agent, workspace=workspace, persistence_dir=persistence_dir,
                              conversation_id=conversation_id,
                              max_iteration_per_run=max_iterations,
-                             visualizer=None, delete_on_close=False)
+                             visualizer=None, delete_on_close=False,
+                             hook_config=hook_config)
 
 __all__ = [
     "AdapterResult",

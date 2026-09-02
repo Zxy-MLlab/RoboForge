@@ -183,6 +183,10 @@ class ObserveExecutor(ToolExecutor[ObserveAction, ExperimentObservation]):
             body = materialize_public_evidence(
                 self.service, evidence, self.artifact_dir
             )
+            if self.artifact_dir is not None:
+                from .stop_gate import write_public_status
+
+                write_public_status(self.service, self.artifact_dir, evidence)
             return ExperimentObservation(
                 operation="observe",
                 result=body,
@@ -228,6 +232,10 @@ class RunControllerExecutor(
             body = materialize_public_evidence(
                 self.service, evidence, self.artifact_dir
             )
+            if self.artifact_dir is not None:
+                from .stop_gate import write_public_status
+
+                write_public_status(self.service, self.artifact_dir, evidence)
             return ExperimentObservation(
                 operation="run_controller",
                 result=body,
@@ -259,6 +267,10 @@ class InspectTrialExecutor(ToolExecutor[InspectTrialAction, ExperimentObservatio
             body = materialize_public_evidence(
                 self.service, evidence, self.artifact_dir
             )
+            if self.artifact_dir is not None:
+                from .stop_gate import write_public_status
+
+                write_public_status(self.service, self.artifact_dir, evidence)
             return ExperimentObservation(
                 operation="inspect_trial",
                 result=body,

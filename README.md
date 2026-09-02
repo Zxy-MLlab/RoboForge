@@ -37,8 +37,10 @@ Python 3.11；正式入口通过带随机 token 的 mode-0600 Unix socket 启动
 authority，OpenHands 进程不加载 LIBERO 或 evaluator。
 
 `embodied_codex/kernel` 是旧版兼容和 embodied implementation 来源，不再是新正式
-OpenHands-native CLI 的 Agent loop。新调用链不导入旧 AgentLoop、provider loop、
-workspace、context builder 或 generic editor。
+OpenHands-native CLI 的 Agent loop。安装包不再暴露旧 `embodied_codex` console
+entry；源码 checkout 中的 `python -m embodied_codex` 仅为历史 run 和回归测试保留，明确
+deprecated，不是新运行入口。新调用链不导入旧 AgentLoop、provider loop、workspace、
+context builder 或 generic editor。
 
 RoboForge 是一个环境无关的 Embodied Coding Agent Harness。它提供持久 workspace、隔离
 Controller runtime、Adapter SDK 合同、结构化证据、事务事件日志和渐进式 Tool/Skill/
@@ -146,12 +148,13 @@ ID，Tool 执行使用该 venv 的 Python，Harness Python 环境不会被安装
 
 ### Embodied 操作
 
-模型可使用稳定的高层操作：`observe` 获取当前公开环境状态，`run_controller` 执行一次
-带完整 provenance 的 physical trial，`inspect_trial` 与 `compare_trials` 查看事实证据及
-状态/行为差异；`find_capability`、`inspect_capability` 和 `acquire_capability` 支持渐进式
-能力检索与获取。普通代码编辑和命令执行继续使用同一套 workspace/file/shell 工具。任务
-策略、失败解释以及是否获取或复用能力始终由模型决定，Harness 负责实验账本、隔离、证据
-和持久化。
+Agent 只使用 OpenHands 原生 Editor、Terminal、文件搜索、规划和任务工具。物理试验是
+workspace 中的普通 CLI：`python -m roboforge trial controllers/controller.py --workspace .
+--intent '<hypothesis>'`。命令直接返回 runner/controller/environment/task 状态，并把
+sanitized trace、通用首错、动作收据、关键帧、视频、轨迹、stdout/stderr 和结果写入
+`.roboforge/trials/<trial-id>/`，OpenHands 再用普通 Terminal/文件工具读取并修改代码。
+RoboForge 不注册 `observe`、`run_controller`、`inspect_trial` 或 `compare_trials` 等高层
+LLM tools，也不存在 Agent 侧固定能力开发流程；外部 Control Plane 负责冻结和发布。
 
 真实 LIBERO campaign 的公开验收记录位于外部实验目录（例如
 `/root/autodl-tmp/experiments/libero-real-20260831-h0009/final-experiment-report.md`）。

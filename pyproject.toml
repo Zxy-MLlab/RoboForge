@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-openhands = ["openhands-sdk>=1.44,<2", "openhands-tools>=1.44,<2"]
+openhands = ["openhands-sdk==1.44.1", "openhands-tools==1.44.1"]
 libero = [
   "numpy<2",
   "torch>=2.0",
@@ -43,7 +43,6 @@ libero = [
 ]
 
 [project.scripts]
-embodied_codex = "embodied_codex.cli:main"
 roboforge = "roboforge.cli:main"
 roboforge-openhands = "roboforge.cli:main"
 roboforge-adapter-worker = "roboforge.rpc_server:main"

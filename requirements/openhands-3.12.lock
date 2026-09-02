@@ -1,0 +1,5 @@
+# RoboForge OpenHands process (Python 3.12)
+# Verified in /root/autodl-tmp/RoboForge-v2-spike/.venv on 2026-09-02.
+openhands-sdk==1.44.1
+openhands-tools==1.44.1
+python-dotenv==1.1.1

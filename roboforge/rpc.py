@@ -72,6 +72,8 @@ class ExperimentRpcServer:
             return self.service.task_info()
         if operation == "experiment_spine":
             return self.service.experiment_spine()
+        if operation == "preflight":
+            return self.service.preflight_controller(self.controller_path)
         if operation == "observe":
             return self.service.observe(request_id=str(request["request_id"])).public_dict()
         if operation == "run_controller":
@@ -188,6 +190,10 @@ class ExperimentRpcClient:
 
     def experiment_spine(self) -> dict[str, Any]:
         return dict(self._call("experiment_spine"))
+
+    def preflight_controller(self, controller_path: str | Path) -> dict[str, Any]:
+        del controller_path
+        return dict(self._call("preflight"))
 
     def observe(self, *, request_id: str) -> ExperimentEvidence:
         return _decode_evidence(dict(self._call("observe", request_id=request_id)))

@@ -45,6 +45,21 @@ class LegacyAdapterBridge:
     def begin_execution(self, kind: str) -> None:
         self.legacy.begin_execution(kind)
 
+    def preflight(
+        self,
+        *,
+        controller_path: Path,
+        controller_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        from .preflight import preflight_controller
+
+        del controller_sha256
+        return preflight_controller(
+            controller_path,
+            capability_contracts=getattr(self.legacy, "capability_contracts", {}),
+            sdk_contract=getattr(self.legacy, "robot_sdk_contract", {}),
+        )
+
     def observe(self) -> AdapterResult:
         value = self.legacy.dispatch("observe", {"channel": "rgbd", "request": {}})
         public = self.legacy.project_rpc_output(
