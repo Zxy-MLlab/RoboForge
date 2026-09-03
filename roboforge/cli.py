@@ -240,6 +240,23 @@ def _conversation_termination_reason(conversation) -> str | None:
     return mapping.get(status)
 
 
+def _public_status_fallback(workspace: Path, max_trials: int) -> dict:
+    """Recover durable public trial counts when an interrupted worker is gone."""
+    path = workspace / ".roboforge" / "campaign-status.json"
+    public: dict = {}
+    try:
+        public = json.loads(path.read_text(encoding="utf-8"))
+        trials = int(public.get("physical_trials", 0))
+        maximum = int(public.get("max_physical_trials", max_trials))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        trials, maximum = 0, max_trials
+    return {
+        "physical_trials": trials,
+        "max_trials": maximum,
+        "latest_physical_evidence": public.get("latest_physical_evidence"),
+    }
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     lifecycle = _lifecycle_main(argv)
@@ -470,7 +487,7 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
     elapsed = time.monotonic() - started
     if wall_time_expired.is_set():
         elapsed = max(elapsed, a.wall_time_budget)
-    status = final_status or {"physical_trials": 0, "max_trials": a.max_trials}
+    status = final_status or _public_status_fallback(workspace, a.max_trials)
     _write_campaign_result(
         workspace,
         status=status,

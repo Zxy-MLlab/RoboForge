@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from roboforge.evidence import derive_status, extract_first_error
-from roboforge.cli import _conversation_termination_reason, _write_campaign_result
+from roboforge.cli import (
+    _conversation_termination_reason,
+    _public_status_fallback,
+    _write_campaign_result,
+)
 from roboforge.fakes import FakeAdapter
 from roboforge.models import AdapterResult, RawArtifact
 from roboforge.preflight import preflight_controller
@@ -191,3 +195,18 @@ def test_campaign_result_records_operator_interrupt(tmp_path):
         run_error="KeyboardInterrupt: interrupted by operator",
     )
     assert campaign["termination_reason"] == "user_interrupted"
+
+
+def test_interrupted_campaign_recovers_public_trial_count(tmp_path):
+    status = tmp_path / ".roboforge" / "campaign-status.json"
+    status.parent.mkdir()
+    status.write_text(json.dumps({
+        "physical_trials": 4,
+        "max_physical_trials": 15,
+        "latest_physical_evidence": "experiment://physical-000004",
+    }))
+    assert _public_status_fallback(tmp_path, 15) == {
+        "physical_trials": 4,
+        "max_trials": 15,
+        "latest_physical_evidence": "experiment://physical-000004",
+    }
