@@ -181,6 +181,8 @@ def _write_campaign_result(
         termination_reason = "physical_trial_budget_exhausted"
     elif elapsed >= wall_time_budget:
         termination_reason = "wall_time_budget_exhausted"
+    elif run_error and run_error.startswith("KeyboardInterrupt"):
+        termination_reason = "user_interrupted"
     elif run_error:
         termination_reason = "openhands_run_error"
     elif conversation_reason:
@@ -434,6 +436,11 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         # AgentLoop; the SDK's own iteration/budget lifecycle is authoritative.
         convo.run()
         conversation_reason = _conversation_termination_reason(convo)
+    except KeyboardInterrupt as exc:
+        # KeyboardInterrupt is a BaseException, so it must be handled
+        # explicitly to preserve the campaign manifest before re-raising it.
+        run_error = "KeyboardInterrupt: interrupted by operator"
+        run_exception = exc
     except Exception as exc:
         # Preserve a machine-readable campaign record even when the public
         # OpenHands session fails (for example, a transient provider outage).

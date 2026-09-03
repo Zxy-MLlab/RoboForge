@@ -178,3 +178,16 @@ def test_campaign_result_distinguishes_agent_finish_from_iteration_budget(tmp_pa
         conversation_reason="agent_finished",
     )
     assert campaign["termination_reason"] == "agent_finished"
+
+
+def test_campaign_result_records_operator_interrupt(tmp_path):
+    campaign = _write_campaign_result(
+        tmp_path,
+        status={"physical_trials": 2, "max_trials": 15},
+        elapsed=12.0,
+        max_iterations=80,
+        wall_time_budget=14400,
+        latest_verified=False,
+        run_error="KeyboardInterrupt: interrupted by operator",
+    )
+    assert campaign["termination_reason"] == "user_interrupted"
