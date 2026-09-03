@@ -478,7 +478,14 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
             )
         except Exception as status_exc:
             status_error = f"{type(status_exc).__name__}: {status_exc}"
-            run_error = f"{run_error}; status collection failed: {status_error}" if run_error else status_error
+            # During SIGINT the worker can receive the signal first and close
+            # its socket.  The public workspace status is still authoritative;
+            # do not obscure the operator-interrupt reason with that expected
+            # transport teardown.
+            if run_error and run_error.startswith("KeyboardInterrupt"):
+                final_status = _public_status_fallback(workspace, a.max_trials)
+            else:
+                run_error = f"{run_error}; status collection failed: {status_error}" if run_error else status_error
             if run_exception is None:
                 run_exception = status_exc
         convo.close(); worker.terminate()
