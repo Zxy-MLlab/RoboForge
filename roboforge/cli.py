@@ -1,6 +1,6 @@
 """Formal OpenHands-native RoboForge entry point."""
 from __future__ import annotations
-import argparse, os, secrets, subprocess, sys, threading, time
+import argparse, os, secrets, shlex, subprocess, sys, threading, time
 import uuid
 import json
 from pathlib import Path
@@ -337,10 +337,33 @@ def main(argv=None):
     interface_manual = workspace / "ROBOT_INTERFACE.json"
     interface_manual.write_text(json.dumps(task_info.get("robot_interface") or {}, indent=2,
         sort_keys=True), encoding="utf-8")
+    from openhands.sdk.event import ActionEvent
+    from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher
+    from .stop_gate import write_tool_activity
+
+    activity_path = write_tool_activity(workspace, 0)
+    activity_count = 0
+
+    def record_public_tool(event) -> None:
+        nonlocal activity_count
+        if isinstance(event, ActionEvent):
+            activity_count += 1
+            write_tool_activity(workspace, activity_count)
+
+    execution_hook = HookConfig(stop=[HookMatcher(hooks=[HookDefinition(
+        command=(
+            f"PYTHONPATH={shlex.quote(str(Path(__file__).parents[1]))} "
+            f"{shlex.quote(sys.executable)} -m roboforge.stop_gate "
+            f"--tool-activity {shlex.quote(str(activity_path))} "
+            f"--workspace {shlex.quote(str(workspace))}"
+        ),
+        timeout=10,
+    )])])
     convo = create_openhands_conversation(llm=llm, workspace=workspace,
         persistence_dir=run / "openhands", service=service, controller_path=controller,
         asset_root=a.asset_root, conversation_id=conversation_id,
         max_iterations=a.max_iterations, max_budget_per_run=a.max_agent_budget,
+        hook_config=execution_hook, callbacks=[record_public_tool],
         terminal_env={
             "ROBOFORGE_RPC_SOCKET": str(socket_path),
             "ROBOFORGE_RPC_TOKEN": token,
@@ -359,6 +382,10 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
                "Trial preflight results, execution traces, images, logs and artifacts are available "
                "in the workspace; inspect whichever evidence is useful before deciding your next edit "
                "or experiment. Continue until you explicitly finish or an SDK/runtime budget is reached.")
+    prompt += ("\nThis is an execution task, not a request for a plan or acknowledgement. "
+               "Your next response must invoke a public workspace or Terminal tool to inspect the "
+               "current project and task context. Do not send a prose-only response. Before finishing, "
+               "run the current Controller once; only then may you decide whether the task is complete.")
     prompt += ("\nIf factual evidence reveals a missing reusable software capability, "
                "independently implement or obtain it as ordinary workspace code, inspect its "
                "source and license, validate it through Terminal, and integrate it through the "
@@ -390,6 +417,8 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         if conversation_id is None: convo.send_message(prompt)
         else: convo.send_message(
             "Resume the unknown robot task from durable physical evidence and current Controller. "
+            "If the current workspace has no trial result yet, use the public Terminal now to run "
+            "the current Controller through the ordinary trial CLI before considering completion. "
             "Do not repeat committed physical actions. A task is complete only when immutable "
             "physical evidence has physical_verification.verified=true; partial attachment, "
             "transport, geometric, or visual evidence must not override a false authentic "

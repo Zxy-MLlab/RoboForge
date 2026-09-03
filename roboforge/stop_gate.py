@@ -16,6 +16,99 @@ from .models import ExperimentEvidence
 from .service import ExperimentService, ProtocolError
 
 
+def write_tool_activity(workspace: str | Path, count: int = 0) -> Path:
+    """Persist non-secret session progress consumed by the public Stop hook."""
+    root = Path(workspace).resolve()
+    target = (root / ".roboforge" / "tool-activity.json").resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ProtocolError("tool activity escaped workspace") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    current = 0
+    if target.is_file():
+        try:
+            current = int(json.loads(target.read_text()).get("tool_calls", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            current = 0
+    payload = {"schema_version": 1, "tool_calls": max(current, int(count))}
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(target)
+    return target
+
+
+def execution_task_stop_decision(activity_path: str | Path, workspace: str | Path) -> dict[str, Any]:
+    """Gate Finish using only public workspace progress and campaign state.
+
+    A failed physical trial is useful feedback, but it is not completion.  The
+    conversation must continue while budget remains; only a verified receipt
+    or an explicitly exhausted physical-trial budget permits Finish.
+    """
+    try:
+        activity = json.loads(Path(activity_path).read_text(encoding="utf-8"))
+        count = int(activity.get("tool_calls", 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        count = 0
+    root = Path(workspace).resolve()
+    trial_root = (root / ".roboforge" / "trials").resolve()
+    trial_root.relative_to(root)
+    records = []
+    if trial_root.is_dir():
+        for result_path in sorted(trial_root.glob("*/result.json")):
+            try:
+                value = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict): records.append((result_path, value))
+    physical = [item for item in records if item[1].get("physical_trial_consumed") is not False
+                and not str(item[1].get("trial_id", "")).startswith("preflight-")]
+    status_path = root / ".roboforge" / "campaign-status.json"
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        status = {}
+    if status.get("latest_verified") is True:
+        return {"decision": "allow", "reason": "latest sealed physical receipt is verified"}
+    try:
+        trials = int(status.get("physical_trials", len(physical)))
+        maximum = int(status.get("max_physical_trials", 0))
+    except (TypeError, ValueError):
+        trials, maximum = len(physical), 0
+    if maximum > 0 and trials >= maximum:
+        return {"decision": "allow", "reason": "physical trial budget is exhausted"}
+    if physical:
+        directory = physical[-1][0].parent
+        return {"decision": "deny", "reason": "latest physical trial is not verified",
+                "additionalContext": (
+                    f"Read {directory / 'result.json'}, {directory / 'first_error.json'} and "
+                    f"{directory / 'trace.json'}, then continue the same conversation with a "
+                    "new hypothesis and ordinary Terminal trial."
+                )}
+    if records:
+        directory = records[-1][0].parent
+        return {"decision": "deny", "reason": "only a non-physical trial result exists",
+                "additionalContext": (
+                    f"Read {directory / 'first_error.json'} and {directory / 'trace.json'}, "
+                    "fix the public contract error and rerun the ordinary Terminal trial command."
+                )}
+    if count > 0:
+        return {"decision": "deny", "reason": "tools were used but no local trial result exists",
+                "additionalContext": (
+                    "Run the current Controller through `python -m roboforge trial ...` in "
+                    "Terminal, then inspect the materialized result before finishing."
+                )}
+    return {
+        "decision": "deny",
+        "reason": "execution task has no tool activity",
+        "additionalContext": (
+            "This is an execution task. Use an available public OpenHands coding "
+            "tool to inspect the workspace and run the Controller through the ordinary Terminal "
+            "trial CLI before deciding whether to finish."
+        ),
+    }
+
+
 def write_public_status(
     service: ExperimentService,
     workspace: str | Path,
@@ -88,9 +181,16 @@ def stop_decision(status_path: str | Path) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--status", required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--status")
+    group.add_argument("--tool-activity")
+    parser.add_argument("--workspace")
     args = parser.parse_args(argv)
-    print(json.dumps(stop_decision(args.status), sort_keys=True))
+    if args.tool_activity and not args.workspace:
+        parser.error("--workspace is required with --tool-activity")
+    decision = (execution_task_stop_decision(args.tool_activity, args.workspace)
+                if args.tool_activity else stop_decision(args.status))
+    print(json.dumps(decision, sort_keys=True))
     return 0
 
 

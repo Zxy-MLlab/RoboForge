@@ -528,6 +528,31 @@ def test_stop_gate_allows_verified_or_exhausted_and_denies_missing(tmp_path):
     assert stop_decision(exhausted)["decision"] == "allow"
 
 
+def test_execution_task_gate_requires_local_terminal_trial(tmp_path):
+    from roboforge.stop_gate import execution_task_stop_decision, write_tool_activity
+
+    activity = write_tool_activity(tmp_path, 0)
+    assert execution_task_stop_decision(activity, tmp_path)["decision"] == "deny"
+    write_tool_activity(tmp_path, 1)
+    assert execution_task_stop_decision(activity, tmp_path)["decision"] == "deny"
+    failed = tmp_path / ".roboforge" / "trials" / "preflight-invalid"; failed.mkdir(parents=True)
+    (failed / "result.json").write_text(json.dumps({"trial_id": failed.name, "physical_trial_consumed": False}))
+    assert "non-physical" in execution_task_stop_decision(activity, tmp_path)["reason"]
+    physical = tmp_path / ".roboforge" / "trials" / "physical-000001"; physical.mkdir(parents=True)
+    (physical / "result.json").write_text(json.dumps({"trial_id": physical.name, "physical_trial_consumed": True,
+                                                       "task_success": False}))
+    denied = execution_task_stop_decision(activity, tmp_path)
+    assert denied["decision"] == "deny"
+    assert "not verified" in denied["reason"]
+    status = tmp_path / ".roboforge" / "campaign-status.json"
+    status.write_text(json.dumps({"physical_trials": 1, "max_physical_trials": 2,
+                                  "latest_verified": True}))
+    assert execution_task_stop_decision(activity, tmp_path)["decision"] == "allow"
+    status.write_text(json.dumps({"physical_trials": 2, "max_physical_trials": 2,
+                                  "latest_verified": False}))
+    assert execution_task_stop_decision(activity, tmp_path)["decision"] == "allow"
+
+
 def _legacy_stop_feedback_test_removed(tmp_path):
     pytest.importorskip("openhands.sdk")
     from roboforge.cli import _run_with_failure_feedback
