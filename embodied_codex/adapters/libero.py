@@ -85,6 +85,7 @@ def _sdk_index(capabilities, verifiers, contracts=None):
         "seed_tools": sorted(capabilities),
         "seed_tool_index": [tool_index(name) for name in sorted(capabilities)],
         "verifiers": sorted(verifiers),
+        "controller_api": LIBERO_ROBOT_SDK_CONTRACT["controller_api"],
     }
 
 
@@ -332,9 +333,10 @@ def create(*, task: str, state: int = 0, root: str | Path,
            configuration: dict | None = None):
     paths = _paths(); package_root = paths["package_root"]
     config = os.environ.get("LIBERO_CONFIG_PATH")
-    episode = LiberoEpisode("libero_spatial", int(task), int(state), config_path=config,
-                            case_handle=f"libero-task-{task}-state-{state}")
     adapter_configuration = dict(configuration or {})
+    episode = LiberoEpisode("libero_spatial", int(task), int(state), config_path=config,
+                            case_handle=f"libero-task-{task}-state-{state}",
+                            controller_mode=str(adapter_configuration.get("controller_mode") or "OSC_POSE"))
     model_name = str(adapter_configuration.get("verifier_model")
                      or os.environ.get("ROBOFORGE_MODEL", "gpt-5.6-sol"))
     perception = OpenVocabularyRGBD(groundingdino_root=paths["groundingdino_root"],

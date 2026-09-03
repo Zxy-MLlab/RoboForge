@@ -27,6 +27,8 @@ class RobotDeployment(Protocol):
     def close(self) -> None: ...
 
 
-ALLOWED_RPC = frozenset({"observe", "act", "use", "verify", "record"})
+# One transport verb exposes the Controller's ordinary Python Robot SDK.
+# Individual embodied primitives remain SDK methods, not OpenHands tools.
+ALLOWED_RPC = frozenset({"observe", "act", "use", "verify", "record", "sdk"})
 
 __all__ = ["ALLOWED_RPC", "RobotDeployment"]

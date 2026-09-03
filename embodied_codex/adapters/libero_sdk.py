@@ -60,6 +60,9 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                               "geometric_source_vacated","source_transport_verified","source_vacancy_method"]},
         "record":{"signature":"robot.record(event)","returns":"{recorded: true}",
                   "output_fields":["recorded"]},
+        "sdk":{"signature":"robot.sdk(method, *args, **kwargs)",
+                "returns":"native Controller Python API return value",
+                "output_fields":["method","result"]},
     },
     "actions":{
         "move_to_point":{
@@ -135,6 +138,38 @@ LIBERO_ROBOT_SDK_CONTRACT = {
                        "target_query":"<support>","source_ref":"<source point_ref>",
                        "transport_ref":"<successfully attached point_ref>",
                        "target_ref":"<target point_ref>"}},
+    },
+    "controller_api": {
+        "source_repositories": {
+            "aspire": {"commit": "f4c8939aab0af9b97690c561bd80e282940f7886", "license": "Apache-2.0/MIT"},
+            "cap-x": {"commit": "53e9966d7a8e2fa7494676772bccc35280f5c0ed", "license": "MIT"},
+        },
+        "class": "FrankaLiberoApi",
+        "methods": [
+            "get_observation", "segment_sam3_point_prompt", "segment_sam3_text_prompt",
+            "point_prompt_molmo", "get_oriented_bounding_box_from_3d_points", "goto_pose",
+            "open_gripper", "close_gripper", "get_object_pose", "sample_grasp_pose",
+            "get_object_3d_points_and_masks_from_language", "goto_home_joint_position",
+            "subsample_point_cloud", "filter_noise", "plan_grasp", "plan_grasp_from_point_clouds",
+            "parse_grasp_poses_for_curobo", "create_curobo_world_from_depth",
+            "create_curobo_world_from_pointcloud", "create_curobo_world_from_observation",
+            "update_curobo_world", "plan_grasp_trajectory", "execute_joint_trajectory",
+            "update_curobo_world_with_object", "plan_with_grasped_object", "solve_ik",
+            "move_to_joints", "traj_plan", "move_along_trajectory",
+            "move_to_joints_both", "solve_ik_arm0", "solve_ik_arm1",
+            "mask_to_world_points", "pixel_to_world_point",
+            "decompose_transform", "rotation_matrix_to_quaternion", "depth_to_pointcloud",
+            "depth_to_point_cloud",
+            "transform_points", "interpolate_segment", "normalize_vector", "select_top_down_grasp",
+            "task_language", "supports_dual_arm", "move_to_joints_arm0", "move_to_joints_arm1",
+            "get_arm0_gripper_pose", "get_arm1_gripper_pose",
+            "open_gripper_arm0", "close_gripper_arm0", "open_gripper_arm1", "close_gripper_arm1",
+            "goto_pose_arm0", "goto_pose_arm1", "goto_pose_both",
+        ],
+        "upstream_files": {
+            "aspire": "aspire/sim/cap/integrations/franka/libero.py; aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py; aspire/sim/cap/integrations/vision/{sam3,molmo,graspnet}.py; aspire/sim/cap/integrations/motion/pyroki.py",
+            "cap-x": "capx/integrations/franka/libero.py; capx/integrations/franka/libero_reduced_skill_library.py; capx/integrations/vision/{sam3,molmo,graspnet}.py; capx/integrations/motion/pyroki.py",
+        },
     },
     "reference_rules":[
         "point_ref and pose_ref are opaque Adapter-issued strings",

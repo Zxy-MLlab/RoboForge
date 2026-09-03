@@ -6,6 +6,7 @@ simulator identities, object state, or task-specific controller logic.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import hashlib
 import json
 import os
@@ -229,6 +230,7 @@ class LiberoEpisode:
     # Opaque Harness-owned identity.  The benchmark state index remains sealed
     # deployment metadata and never becomes controller/model evidence.
     case_handle: str|None=None
+    controller_mode: str = "OSC_POSE"
 
 
 class LiberoDeployment:
@@ -259,7 +261,8 @@ class LiberoDeployment:
         self._suite = suite
         self.env=OffScreenRenderEnv(bddl_file_name=bddl,camera_names=list(CAMERAS),
             camera_heights=episode.image_size,camera_widths=episode.image_size,
-            camera_depths=True,ignore_done=True,horizon=episode.horizon)
+            camera_depths=True,ignore_done=True,horizon=episode.horizon,
+            controller=str(episode.controller_mode))
         self.env.seed(episode.seed);self.obs=None
         self._instruction=str(task.language);self.capabilities=dict(capabilities or {})
         self._native_capability_ids = frozenset(str(key) for key in self.capabilities)
@@ -291,6 +294,7 @@ class LiberoDeployment:
         # deployment adapter, not learned task logic.  Reward/done/info remain
         # discarded exactly as during controller execution.
         self._warmup_steps=int(np.clip(episode.warmup_steps,0,60))
+        self._gripper_fraction = 1.0
         self._reset_to_initial_condition()
         (self.artifact_dir/"deployment.json").write_text(json.dumps({
             "protocol":"embodied-codex-libero-deployment-v1","suite":episode.suite,
@@ -303,6 +307,97 @@ class LiberoDeployment:
 
     @property
     def instruction(self): return self._instruction
+
+    @property
+    def sim(self):
+        # Internal adapter convenience.  Controller code receives only the
+        # projected observation; the SDK never exposes this property through
+        # its public method catalog.
+        return self.env.sim
+
+    def get_franka_libero_observation(self):
+        """Return the ASPIRE/CaP-X FrankaLiberoEnv observation contract.
+
+        This adapter-side projection is intentionally the only place that
+        touches MuJoCo camera/body transforms.  The Controller receives the
+        resulting robot-base-frame values, never ``sim.data``/``sim.model``.
+        """
+        from scipy.spatial.transform import Rotation
+        from robosuite.utils.camera_utils import get_camera_intrinsic_matrix, get_real_depth_map
+        sim = self.env.sim
+        base_id = sim.model.body_name2id("robot0_base")
+        base = np.eye(4, dtype=np.float64)
+        base[:3, :3] = np.asarray(sim.data.xmat[base_id]).reshape(3, 3)
+        base[:3, 3] = np.asarray(sim.data.xpos[base_id])
+        base_inv = np.linalg.inv(base)
+        out: dict[str, Any] = {}
+        for name in CAMERAS:
+            rgb = np.ascontiguousarray(self.obs[f"{name}_image"][::-1])
+            depth_raw = np.asarray(self.obs[f"{name}_depth"][::-1]).squeeze()
+            # Match ASPIRE's FrankaLiberoEnv exactly: use MuJoCo's raw camera
+            # pose, then apply the two frame rotations it uses (Ry(pi) and
+            # Rz(pi)).  robosuite.get_camera_extrinsic_matrix applies a
+            # different Rx(pi) correction and is therefore not interchangeable.
+            cam = np.eye(4, dtype=np.float64)
+            cam_id = sim.model.camera_name2id(name)
+            cam[:3, :3] = np.asarray(sim.data.cam_xmat[cam_id]).reshape(3, 3)
+            cam[:3, 3] = np.asarray(sim.data.cam_xpos[cam_id])
+            ry = np.diag([-1.0, 1.0, -1.0, 1.0])
+            rz = np.diag([-1.0, -1.0, 1.0, 1.0])
+            pose = base_inv @ cam @ ry @ rz
+            depth = get_real_depth_map(sim, depth_raw)
+            K = get_camera_intrinsic_matrix(sim, name, rgb.shape[1], rgb.shape[0])
+            out[name] = {"images": {"rgb": rgb, "depth": depth},
+                         "intrinsics": np.asarray(K), "pose_mat": pose,
+                         "pose": np.r_[pose[:3, 3], self._matrix_to_wxyz(pose[:3, :3])].copy()}
+        gripper_id = sim.model.body_name2id("gripper0_eef")
+        gripper = np.eye(4, dtype=np.float64)
+        gripper[:3, :3] = np.asarray(sim.data.xmat[gripper_id]).reshape(3, 3)
+        gripper[:3, 3] = np.asarray(sim.data.xpos[gripper_id])
+        hand = base_inv @ gripper
+        tool = np.eye(4, dtype=np.float64)
+        tool[:3, :3] = Rotation.from_euler("z", 90, degrees=True).as_matrix()
+        tool[:3, 3] = [0.0, 0.0, -0.107]
+        eef = hand @ tool
+        grip = float(np.asarray(self.obs["robot0_gripper_qpos"]).reshape(-1)[0] / 0.04)
+        out["robot_joint_pos"] = np.r_[np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64), grip]
+        out["robot_cartesian_pos"] = np.r_[eef[:3, 3], self._matrix_to_wxyz(eef[:3, :3]), grip]
+        return out
+
+    @staticmethod
+    def _matrix_to_wxyz(matrix):
+        from scipy.spatial.transform import Rotation
+        q = Rotation.from_matrix(np.asarray(matrix, dtype=np.float64)).as_quat()
+        return np.array([q[3], q[0], q[1], q[2]], dtype=np.float64)
+
+    @property
+    def home_joint_position(self):
+        return getattr(self, "_home_joint_position", None)
+
+    def _set_gripper(self, fraction: float) -> None:
+        self._gripper_fraction = float(np.clip(fraction, 0.0, 1.0))
+
+    def _step_once(self) -> None:
+        dof = 7 if str(self.episode.controller_mode) == "JOINT_POSITION" else 6
+        self._sim_step(np.r_[np.zeros(dof), 1.0 - 2.0 * self._gripper_fraction])
+
+    def move_to_joints_blocking(self, joints, *, tolerance: float = 0.01,
+                                max_steps: int = 120) -> None:
+        controller = getattr(self.env.robots[0], "controller", None)
+        if controller is None or str(getattr(controller, "name", "")) != "JOINT_POSITION":
+            raise LiberoDeploymentError(
+                "blocking joint control requires controller_mode='JOINT_POSITION'"
+            )
+        target = np.asarray(joints, dtype=np.float64).reshape(7)
+        for _ in range(int(max_steps)):
+            current = np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64)[:7]
+            if np.linalg.norm(target - current) < float(tolerance):
+                break
+            action = np.r_[(target - current) * 20.0,
+                           1.0 - 2.0 * self._gripper_fraction]
+            self._sim_step(action)
+        else:
+            raise LiberoDeploymentError("blocking joint control did not converge")
 
     def execution_identity(self):
         return {"adapter":"libero","episode_id":self.episode.case_handle or
@@ -379,6 +474,12 @@ class LiberoDeployment:
         self._retired_references.update(getattr(self, "references", {}).keys())
         self.obs = self.env.reset()
         self.obs = self.env.set_init_state(self._init_states[self.episode.initial_state_index])
+        if isinstance(self.obs, Mapping) and "robot0_joint_pos" in self.obs:
+            self._home_joint_position = np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64)[:7].copy()
+        else:
+            # Lightweight test/development providers may not expose joints;
+            # home control will then fail explicitly when requested.
+            self._home_joint_position = None
         self.environment_generation = uuid.uuid4().hex
         self.step = 0; self.warmup_control_steps = 0; self.controller_control_steps = 0
         self.frame = 0; self.trace = []; self.video = []
@@ -393,7 +494,8 @@ class LiberoDeployment:
         if self._warmup_steps:
             self._in_warmup = True
             for _ in range(self._warmup_steps):
-                self._sim_step(np.r_[np.zeros(6),-1.0])
+                dof = 7 if str(self.episode.controller_mode) == "JOINT_POSITION" else 6
+                self._sim_step(np.r_[np.zeros(dof),-1.0])
             self._in_warmup = False
             self.trace.append({"event":"adapter_warmup","steps":self._warmup_steps,
                                "controller_visible":True})
@@ -630,7 +732,41 @@ class LiberoDeployment:
         if method=="verify":return self._verify(str(arguments.get("verifier") or ""),arguments.get("payload") or {})
         if method=="record":
             self.trace.append({"event":"controller_record","payload":arguments.get("event")});return {"recorded":True}
+        if method=="sdk":
+            name = str(arguments.get("method") or "")
+            if not name or name.startswith("_"):
+                raise LiberoDeploymentError("invalid Robot SDK method")
+            if not hasattr(self, "_controller_sdk"):
+                from ..adapters.franka_libero_api import FrankaLiberoApi
+                self._controller_sdk = FrankaLiberoApi(self)
+            fn = self._controller_sdk.functions().get(name)
+            if not callable(fn):
+                raise LiberoDeploymentError(f"unknown Robot SDK method: {name}")
+            args = arguments.get("args") or []
+            kwargs = arguments.get("kwargs") or {}
+            if not isinstance(args, list) or not isinstance(kwargs, Mapping):
+                raise LiberoDeploymentError("sdk args/kwargs must be JSON containers")
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                self.trace.append({"event": "sdk_call", "method": name,
+                                   "status": "error", "error_type": type(exc).__name__,
+                                   "error": str(exc)[:1000]})
+                raise
+            self.trace.append({"event": "sdk_call", "method": name, "status": "ok"})
+            return {"method": name, "result": result}
         raise LiberoDeploymentError(f"unsupported method: {method}")
+
+    @staticmethod
+    def sdk_consequence(method: str) -> str:
+        mutating = {
+            "goto_pose", "open_gripper", "close_gripper", "goto_home_joint_position",
+            "move_to_joints", "execute_joint_trajectory", "move_to_joints_arm0",
+            "move_to_joints_arm1", "open_gripper_arm0", "close_gripper_arm0",
+            "open_gripper_arm1", "close_gripper_arm1", "goto_pose_arm0",
+            "goto_pose_arm1", "goto_pose_both",
+        }
+        return "PHYSICAL_CONTROL" if str(method) in mutating else "READ_ONLY"
 
     def project_rpc_output(self,method,arguments,result):
         """Positive projection of every Adapter response visible to Controller/GPT."""
@@ -643,11 +779,29 @@ class LiberoDeployment:
                    if str(key) in self._OUTPUT_FIELDS[method]}
         required={"observe":{"step"},"act":{"type","step","reached"},
                   "use":{"tool_id","step","result"},"verify":{"verified"},
-                  "record":{"recorded"}}[method]
+                  "record":{"recorded"},"sdk":{"method","result"}}[method]
         missing=required-set(projected)
         if missing:raise LiberoDeploymentError(
             f"missing {method} output fields: {sorted(missing)}")
+        if method == "sdk":
+            projected["result"] = self._encode_sdk_result(projected["result"])
         return projected
+
+    @classmethod
+    def _encode_sdk_result(cls, value):
+        """Losslessly encode ndarray type/shape for the isolated Controller."""
+        if isinstance(value, np.ndarray):
+            array = np.ascontiguousarray(value)
+            return {"__roboforge_ndarray__": True, "dtype": str(array.dtype),
+                    "shape": list(array.shape),
+                    "data_base64": base64.b64encode(array.tobytes()).decode("ascii")}
+        if isinstance(value, np.generic): return value.item()
+        if isinstance(value, Mapping):
+            return {str(key): cls._encode_sdk_result(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._encode_sdk_result(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)): return value
+        raise LiberoDeploymentError(f"Robot SDK returned unsupported type: {type(value).__name__}")
 
     def _observe(self,channel,request):
         if channel=="proprioception":

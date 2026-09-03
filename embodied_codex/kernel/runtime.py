@@ -21,10 +21,33 @@ class ControllerRuntimeError(RuntimeError):
 
 
 _CHILD = r'''
-import json,os,sys,types
+import base64,json,os,sys,types
+try:
+ import numpy as np
+except ImportError:
+ np = None
 sys.dont_write_bytecode=True
+def _pack(value):
+    if np is not None and isinstance(value,np.ndarray):
+        data=np.ascontiguousarray(value)
+        return {"__roboforge_ndarray__":True,"dtype":str(data.dtype),"shape":list(data.shape),
+                "data_base64":base64.b64encode(data.tobytes()).decode("ascii")}
+    if np is not None and isinstance(value,np.generic): return value.item()
+    if isinstance(value,dict): return {str(k):_pack(v) for k,v in value.items()}
+    if isinstance(value,(list,tuple)): return [_pack(v) for v in value]
+    return value
+def _unpack(value):
+    if isinstance(value,dict) and value.get("__roboforge_ndarray__"):
+        if "data_base64" in value:
+            if np is None: raise RuntimeError("numpy is required to decode Robot SDK arrays")
+            raw=base64.b64decode(value["data_base64"])
+            return np.frombuffer(raw,dtype=value["dtype"]).reshape(value["shape"]).copy()
+        return np.asarray(value["data"],dtype=value.get("dtype"))
+    if isinstance(value,dict): return {k:_unpack(v) for k,v in value.items()}
+    if isinstance(value,list): return [_unpack(v) for v in value]
+    return value
 def emit(value):
-    sys.stdout.write(json.dumps(value,separators=(",",":"))+"\n");sys.stdout.flush()
+    sys.stdout.write(json.dumps(_pack(value),separators=(",",":"))+"\n");sys.stdout.flush()
 class Robot:
     def __init__(self,instruction): self.instruction=instruction;self.request_id=0
     def _rpc(self,method,arguments):
@@ -34,7 +57,7 @@ class Robot:
         response=json.loads(line)
         if response.get("id")!=self.request_id: raise RuntimeError("RPC response mismatch")
         if not response.get("ok"): raise RuntimeError(str(response.get("error") or "RPC failed"))
-        return response.get("result")
+        return _unpack(response.get("result"))
     def observe(self,channel="rgbd",request=None): return self._rpc("observe",{"channel":channel,"request":request or {}})
     def act(self,action): return self._rpc("act",{"action":action})
     def use(self,tool_id,payload):
@@ -43,6 +66,14 @@ class Robot:
         return receipt
     def verify(self,verifier,payload): return self._rpc("verify",{"verifier":verifier,"payload":payload})
     def record(self,event): return self._rpc("record",{"event":event})
+    def sdk(self,method,*args,**kwargs):
+        receipt=self._rpc("sdk",{"method":str(method),"args":list(args),"kwargs":dict(kwargs)})
+        if not isinstance(receipt,dict) or receipt.get("method")!=str(method):
+            raise RuntimeError("Adapter sdk() violated Robot SDK contract")
+        return receipt.get("result")
+    def __getattr__(self,name):
+        if name.startswith("_"): raise AttributeError(name)
+        return lambda *args,**kwargs:self.sdk(name,*args,**kwargs)
 try:
     path=os.path.abspath(sys.argv[1]);sys.path.insert(0,os.path.dirname(path))
     module=types.ModuleType("task_controller");module.__file__=path
@@ -56,7 +87,7 @@ except BaseException as exc:
 
 _ARGUMENT_KEYS = {"observe": {"channel", "request"}, "act": {"action"},
                   "use": {"tool_id", "payload"}, "verify": {"verifier", "payload"},
-                  "record": {"event"}}
+                  "record": {"event"}, "sdk": {"method", "args", "kwargs"}}
 
 
 def _assert_json(value: Any, path: str = "result") -> None:
@@ -70,6 +101,19 @@ def _assert_json(value: Any, path: str = "result") -> None:
         json.dumps(value, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ControllerRuntimeError(f"RPC output is not strict JSON at {path}") from exc
+
+
+def _decode_controller_value(value: Any) -> Any:
+    if isinstance(value, Mapping) and value.get("__roboforge_ndarray__"):
+        import numpy as np
+        raw = value.get("data_base64")
+        if raw is not None:
+            import base64
+            return np.frombuffer(base64.b64decode(raw), dtype=value["dtype"]).reshape(value["shape"]).copy()
+        return np.asarray(value.get("data"), dtype=value.get("dtype"))
+    if isinstance(value, Mapping): return {str(k): _decode_controller_value(v) for k, v in value.items()}
+    if isinstance(value, list): return [_decode_controller_value(v) for v in value]
+    return value
 
 
 def _rpc_arguments(method: str, value: Any):
@@ -161,7 +205,7 @@ class ControllerRuntime:
                                     raise ControllerRuntimeError(f"unsupported RPC: {method}")
                                 if len(events) >= self.max_rpc_calls:
                                     raise ControllerRuntimeError("RPC budget exceeded")
-                                arguments = _rpc_arguments(method, message.get("arguments") or {})
+                                arguments = _rpc_arguments(method, _decode_controller_value(message.get("arguments") or {}))
                                 if execution_kind == "diagnostic":
                                     if method == "act":
                                         raise ControllerRuntimeError("diagnostic execution forbids physical act")
@@ -170,6 +214,15 @@ class ControllerRuntime:
                                         consequence = checker(str(arguments.get("tool_id") or "")) if callable(checker) else None
                                         if not isinstance(consequence, str) or consequence.upper() != "READ_ONLY":
                                             raise ControllerRuntimeError("diagnostic execution forbids mutating capability")
+                                    if method == "sdk":
+                                        checker = getattr(deployment, "sdk_consequence", None)
+                                        consequence = checker(str(arguments.get("method") or "")) if callable(checker) else None
+                                        if not isinstance(consequence, str) or consequence.upper() != "READ_ONLY":
+                                            raise ControllerRuntimeError("diagnostic execution forbids mutating Robot SDK method")
+                                if method == "sdk":
+                                    sdk_method = str(arguments.get("method") or "")
+                                    if not sdk_method or sdk_method.startswith("_"):
+                                        raise ControllerRuntimeError("invalid Robot SDK method")
                                 event = {"method": method, "arguments": arguments}
                                 capture_state = getattr(deployment, "canonical_embodied_state", None)
                                 state_before = capture_state() if method == "act" and callable(capture_state) else None
