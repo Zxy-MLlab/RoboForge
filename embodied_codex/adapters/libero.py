@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,95 @@ from .libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 
 
 DOCTOR_TASK = "0"
+
+
+def _controller_api_index() -> dict:
+    """Project the deployed Controller API into a directly usable manual.
+
+    The method catalog is derived from the real implementation so signatures
+    cannot silently drift from the RPC surface.  The examples are generic
+    upstream usage patterns, not a task policy or an OpenHands tool wrapper.
+    """
+    from .franka_libero_api import FrankaLiberoApi
+
+    base = dict(LIBERO_ROBOT_SDK_CONTRACT["controller_api"])
+    catalog = {}
+    for name in base["methods"]:
+        method = getattr(FrankaLiberoApi, name)
+        signature = str(inspect.signature(method))
+        if signature.startswith("(self, "):
+            signature = "(" + signature[len("(self, "):]
+        elif signature.startswith("(self)"):
+            signature = "()" + signature[len("(self)"):]
+        doc = inspect.getdoc(method) or ""
+        catalog[name] = {
+            "call": f"robot.{name}{signature}",
+            "signature": signature,
+            "summary": doc.split("\n\n", 1)[0],
+        }
+    base.update({
+        "invocation": {
+            "preferred": "robot.<method>(*args, **kwargs)",
+            "equivalent": "robot.sdk('<method>', *args, **kwargs)",
+            "returns": "The native Python return value; numpy arrays are preserved across the RPC boundary.",
+            "rule": "Controller API methods are Python methods on robot, not OpenHands tools and not robot.use capability IDs.",
+        },
+        "method_catalog": catalog,
+        "upstream_usage_examples": [
+            {
+                "source": "ASPIRE aspire/sim/cap/envs/tasks/franka/franka_lift.py",
+                "purpose": "sample a grasp and execute blocking pose/gripper control",
+                "code": (
+                    "grasp_pos, grasp_quat = robot.sample_grasp_pose(object_name)\n"
+                    "robot.open_gripper()\n"
+                    "robot.goto_pose(grasp_pos, grasp_quat, z_approach=0.1)\n"
+                    "robot.close_gripper()\n"
+                    "lift_pos = grasp_pos.copy(); lift_pos[2] += 0.15\n"
+                    "robot.goto_pose(lift_pos, grasp_quat)"
+                ),
+            },
+            {
+                "source": "ASPIRE aspire/sim/cap/envs/tasks/franka/franka_pick_place.py",
+                "purpose": "generic pick-and-place composition using public perception and blocking control",
+                "code": (
+                    "pick_pos, pick_quat = robot.sample_grasp_pose(object_name)\n"
+                    "place_pos, _ = robot.get_object_pose(target_name)\n"
+                    "robot.open_gripper()\n"
+                    "robot.goto_pose(pick_pos, pick_quat, z_approach=0.1)\n"
+                    "robot.close_gripper()\n"
+                    "post_pick = pick_pos.copy(); post_pick[2] += 0.15\n"
+                    "robot.goto_pose(post_pick, pick_quat)\n"
+                    "robot.goto_pose(place_pos, pick_quat, z_approach=0.1)\n"
+                    "robot.open_gripper()"
+                ),
+            },
+        ],
+    })
+    return base
+
+
+def _runtime_controller_mode_index(mode: str) -> dict:
+    blocking = mode == "JOINT_POSITION"
+    return {
+        "controller_mode": mode,
+        "blocking_joint_control_available": blocking,
+        "motion_api": (
+            {
+                "use": ["robot.goto_pose", "robot.solve_ik", "robot.move_to_joints",
+                        "robot.open_gripper", "robot.close_gripper"],
+                "do_not_use": ["robot.act(move_to_point)", "robot.act(move_to_pose)",
+                               "robot.act(osc_delta)", "robot.act(gripper)", "robot.act(settle)"],
+                "reason": "JOINT_POSITION expects 7 arm joints plus one gripper command; use the upstream-compatible blocking Controller API.",
+            }
+            if blocking else
+            {
+                "use": ["robot.act(move_to_point)", "robot.act(move_to_pose)",
+                        "robot.act(osc_delta)", "robot.act(gripper)", "robot.act(settle)"],
+                "do_not_use": ["robot.goto_pose", "robot.move_to_joints"],
+                "reason": "OSC_POSE accepts Cartesian OSC actions; blocking joint control is unavailable.",
+            }
+        ),
+    }
 
 
 _CHECKPOINT_SHA256 = {
@@ -85,7 +175,7 @@ def _sdk_index(capabilities, verifiers, contracts=None):
         "seed_tools": sorted(capabilities),
         "seed_tool_index": [tool_index(name) for name in sorted(capabilities)],
         "verifiers": sorted(verifiers),
-        "controller_api": LIBERO_ROBOT_SDK_CONTRACT["controller_api"],
+        "controller_api": _controller_api_index(),
     }
 
 
@@ -373,4 +463,7 @@ def create(*, task: str, state: int = 0, root: str | Path,
         capabilities=capabilities, capability_contracts=contracts, verifiers=verifiers,
         outcome_verifier=outcome)
     deployment.sdk_index = _sdk_index(capabilities, verifiers, contracts)
+    deployment.sdk_index["runtime_configuration"] = _runtime_controller_mode_index(
+        episode.controller_mode
+    )
     return deployment

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "classification": "bootstrap_api_and_control_integration_incomplete",
+  "authentic_task_success": false,
+  "experiment_path": "/root/autodl-tmp/roboforge-task4-api-discovery-v3-20260904",
+  "conversation_id": "16ac88c0-9696-48a0-91e4-a4481743c5fa",
+  "task": {
+    "suite": "libero_spatial",
+    "task_index": 4,
+    "state_index": 0,
+    "instruction": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate"
+  },
+  "budgets": {
+    "physical_trials": 15,
+    "openhands_iterations": 80,
+    "wall_time_seconds": 14400
+  },
+  "campaign_result": {
+    "termination_reason": "physical_trial_budget_exhausted",
+    "latest_verified": false,
+    "campaign_result_path": "/root/autodl-tmp/roboforge-task4-api-discovery-v3-20260904/workspace/.roboforge/campaign-result.json",
+    "campaign_result_sha256": "73a0322a5e673de4705e94152f54fd4589dad246c49d15f7213f84c66af875b5",
+    "campaign_status_path": "/root/autodl-tmp/roboforge-task4-api-discovery-v3-20260904/workspace/.roboforge/campaign-status.json",
+    "campaign_status_sha256": "98440eec57bca0b01e2baf108572e9a04ad2783c70c5800d412d8d87d6b16b11"
+  },
+  "controller_evolution": {
+    "initial_sha256": "32bfdf80886360fd76e83447fd58308f58716ef3756dae7e3886c7ee3b572cce",
+    "final_sha256": "7b808185c9ba36074271bc0b16530fac968c96863e7b17cc1dbd91760fb11888",
+    "distinct_trial_controller_count": 14,
+    "generated_by_openhands": true,
+    "manually_edited_by_harness_operator": false
+  },
+  "key_trials": [
+    {
+      "trial_id": "physical-000004",
+      "controller_sha256": "9cba2e3531168bf4cfbb365a495bc17f214c08eeb048b97d9260539a8ff61327",
+      "result": "real Cartesian control executed for 180 environment steps but did not reach the target"
+    },
+    {
+      "trial_id": "physical-000012",
+      "controller_sha256": "7ef021444c1fb01fbd74b7ad2cce786ac1e6e194de38fce6db1bb1892e218ab1",
+      "result": "blocking waypoint did not converge",
+      "initial_error_rad": 0.182557,
+      "final_error_rad": 0.017269,
+      "steps": 120
+    },
+    {
+      "trial_id": "physical-000013",
+      "controller_sha256": "b44a629d3b53f283ad2567d7e4e142d361ddb0edca4bf59988931648ee167d3b",
+      "result": "harness infrastructure failure: RPC event log exceeded the byte limit"
+    },
+    {
+      "trial_id": "physical-000014",
+      "controller_sha256": "150cc5470a479afaa326359a5565ddaf2419b608a42420ce370c0d1ffa6284a2",
+      "result": "array payload fingerprinting prevented the prior event-log exhaustion; blocking waypoint still did not converge",
+      "initial_error_rad": 0.173763,
+      "final_error_rad": 0.05555,
+      "steps": 120
+    },
+    {
+      "trial_id": "physical-000015",
+      "controller_sha256": "7b808185c9ba36074271bc0b16530fac968c96863e7b17cc1dbd91760fb11888",
+      "result": "blocking joint control did not converge; task was not successful"
+    }
+  ],
+  "evidence": {
+    "openhands_events_path": "/root/autodl-tmp/roboforge-task4-api-discovery-v3-20260904/openhands/16ac88c0969648a091e4a4481743c5fa/events",
+    "openhands_events_aggregate_sha256": "2974ef33c43ee66de57355dfb599b207c3c5b6450e40a4bb179fd150d9fb255f",
+    "trial_artifacts_path": "/root/autodl-tmp/roboforge-task4-api-discovery-v3-20260904/workspace/.roboforge/trials",
+    "trial_result_trace_error_aggregate_sha256": "ceda020b7cf407782e4c44ca5f1a51a535b5e39884fe3340631017bb0664a825"
+  },
+  "downstream_validation": {
+    "held_out_evaluation_run": false,
+    "capability_created": false,
+    "promotion_attempted": false,
+    "reason": "No development trial produced authentic task success."
+  },
+  "tests": {
+    "python311_full": {
+      "command": "/root/autodl-tmp/mj311/bin/python -m pytest -q tests evaluation",
+      "result": "338 passed, 8 skipped, 3 warnings",
+      "exit_code": 0,
+      "note": "The skips are OpenHands-only tests in the Python 3.11 LIBERO environment and are covered without skips below.",
+      "log_path": "/root/autodl-tmp/roboforge-pytest-full-20260904.log",
+      "log_sha256": "58c250bc42d17617ecf1ef92885c66af2f4881d03744d7d4960c255c52af08a0"
+    },
+    "openhands_native_python312": {
+      "command": "/root/autodl-tmp/RoboForge-v2-spike/.venv/bin/python -m pytest -q tests/test_openhands_native.py",
+      "result": "35 passed",
+      "exit_code": 0,
+      "skipped": 0,
+      "log_path": "/root/autodl-tmp/roboforge-openhands-native-20260904.log",
+      "log_sha256": "0ff9a6063f6c8cc0eb9195ab10b77d168b1a42942cd4fdd288ac68499b746f2a"
+    },
+    "compileall_exit_code": 0,
+    "git_diff_check_exit_code": 0
+  }
+}

@@ -381,6 +381,17 @@ class LiberoDeployment:
         dof = 7 if str(self.episode.controller_mode) == "JOINT_POSITION" else 6
         self._sim_step(np.r_[np.zeros(dof), 1.0 - 2.0 * self._gripper_fraction])
 
+    def _panda_joint_positions(self) -> np.ndarray:
+        """Read the live MuJoCo joint state used by upstream ASPIRE/CaP-X."""
+        sim = getattr(self.env, "sim", None)
+        if sim is not None:
+            addresses = []
+            for index in range(1, 8):
+                address = sim.model.get_joint_qpos_addr(f"robot0_joint{index}")
+                addresses.append(int(address[0] if isinstance(address, tuple) else address))
+            return np.asarray(sim.data.qpos[addresses], dtype=np.float64)
+        return np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64)[:7]
+
     def move_to_joints_blocking(self, joints, *, tolerance: float = 0.01,
                                 max_steps: int = 120) -> None:
         controller = getattr(self.env.robots[0], "controller", None)
@@ -389,15 +400,23 @@ class LiberoDeployment:
                 "blocking joint control requires controller_mode='JOINT_POSITION'"
             )
         target = np.asarray(joints, dtype=np.float64).reshape(7)
+        initial = self._panda_joint_positions()
+        control_freq = float(getattr(self.env, "control_freq", 20.0))
         for _ in range(int(max_steps)):
-            current = np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64)[:7]
+            current = self._panda_joint_positions()
             if np.linalg.norm(target - current) < float(tolerance):
                 break
-            action = np.r_[(target - current) * 20.0,
+            action = np.r_[(target - current) * control_freq,
                            1.0 - 2.0 * self._gripper_fraction]
             self._sim_step(action)
         else:
-            raise LiberoDeploymentError("blocking joint control did not converge")
+            final = self._panda_joint_positions()
+            raise LiberoDeploymentError(
+                "blocking joint control did not converge; "
+                f"initial_error_rad={np.linalg.norm(target - initial):.6f}; "
+                f"final_error_rad={np.linalg.norm(target - final):.6f}; "
+                f"steps={int(max_steps)}"
+            )
 
     def execution_identity(self):
         return {"adapter":"libero","episode_id":self.episode.case_handle or

@@ -280,6 +280,12 @@ def main(argv=None):
     p.add_argument("--max-output-tokens", type=int, default=12000)
     p.add_argument("--adapter-python", default=os.getenv("ROBOFORGE_ADAPTER_PYTHON"))
     p.add_argument(
+        "--controller-mode",
+        choices=["OSC_POSE", "JOINT_POSITION"],
+        default="OSC_POSE",
+        help="LIBERO controller mode; use JOINT_POSITION for blocking ASPIRE/CaP-X pose APIs",
+    )
+    p.add_argument(
         "--forbid-path",
         action="append",
         default=[],
@@ -327,7 +333,8 @@ def main(argv=None):
         raise SystemExit("--provider is required when --api-key-env is not a standard provider key")
     adapter_configuration = {"verifier_provider": provider,
                              "verifier_base_url": a.base_url,
-                             "verifier_model": a.model}
+                             "verifier_model": a.model,
+                             "controller_mode": a.controller_mode}
     command = [adapter_python, "-m", "roboforge.rpc_server", "--adapter", a.adapter,
         "--task", a.task, "--state", str(a.state), "--run-root", str(run / "adapter-worker"),
         "--controller-path", str(controller), "--socket", str(socket_path),
@@ -411,7 +418,11 @@ def main(argv=None):
             "PYTHONPATH": str(Path(__file__).parents[1]),
         })
     prompt = f"""Unknown robot task: {task_info.get('instruction') or a.task}
-The public Robot SDK manual is in {interface_manual}. Read relevant sections when needed.
+The public Robot SDK manual is in {interface_manual}. Start with
+runtime_configuration.motion_api, controller_api.invocation, controller_api.method_catalog, and
+controller_api.upstream_usage_examples: they are generated from the deployed
+API and show directly executable robot.<method>(...) calls. Read implementation
+source only when those contracts are insufficient.
 The complete Controller API implementation and exact upstream-compatible signatures are in
 {Path(__file__).parents[1] / 'embodied_codex/adapters/franka_libero_api.py'}.
 Work like a coding agent. Inspect files, write and revise controllers/controller.py, and run experiments
@@ -466,6 +477,8 @@ Reusable assets are under {Path(a.asset_root).resolve()} and should be searched 
         if conversation_id is None: convo.send_message(prompt)
         else: convo.send_message(
             "Resume the unknown robot task from durable physical evidence and current Controller. "
+            "First re-read ROBOT_INTERFACE.json runtime_configuration.motion_api; it describes "
+            "the currently restarted worker and supersedes assumptions inferred from older trials. "
             "If the current workspace has no trial result yet, use the public Terminal now to run "
             "the current Controller through the ordinary trial CLI before considering completion. "
             "Do not repeat committed physical actions. A task is complete only when immutable "

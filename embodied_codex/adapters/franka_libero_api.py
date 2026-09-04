@@ -620,7 +620,12 @@ class FrankaLiberoApi:
         quat = np.asarray(quaternion_wxyz, dtype=float).reshape(4)
         target = np.r_[quat, pos]
         data = _post(f"{PYROKI_URL.rstrip('/')}/ik", {"target_pose_wxyz_xyz": _jsonable(target), "prev_cfg": _jsonable(prev_cfg)})
-        return np.asarray(data["joint_positions"], dtype=np.float64)
+        joints = np.asarray(data["joint_positions"], dtype=np.float64).reshape(-1)
+        if joints.size < 7:
+            raise RuntimeError(f"PyRoKi returned {joints.size} joints; Franka requires 7")
+        # Keep the optional eighth gripper coordinate for the next PyRoKi
+        # warm-start.  Only the blocking Franka arm boundary consumes seven.
+        return joints
 
     def move_to_joints(self, joints: np.ndarray) -> None:
         env = self._env
@@ -635,7 +640,7 @@ class FrankaLiberoApi:
 
     def _goto_pose_once(self, pos, q):
         joints = self._solve_ik_with_prev(pos, q, self.cfg); self.cfg = joints
-        self.move_to_joints(joints)
+        self.move_to_joints(joints[:7])
 
     def open_gripper(self) -> None:
         if hasattr(self._env, "_set_gripper"):

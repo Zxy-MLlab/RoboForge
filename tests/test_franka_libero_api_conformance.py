@@ -1,5 +1,6 @@
-import inspect
 import base64
+import hashlib
+import inspect
 import io
 from pathlib import Path
 import sys
@@ -12,7 +13,11 @@ from embodied_codex.adapters.franka_libero_api import (
     depth_to_pointcloud, mask_to_world_points,
 )
 from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
-from embodied_codex.kernel.runtime import ControllerRuntime
+from embodied_codex.adapters.libero import (
+    _controller_api_index,
+    _runtime_controller_mode_index,
+)
+from embodied_codex.kernel.runtime import ControllerRuntime, _trace_value
 from embodied_codex.kernel.sandbox import default_sandbox
 
 
@@ -36,6 +41,53 @@ def test_public_api_contains_upstream_methods_and_signatures():
     assert names.issubset(api.functions())
     assert str(inspect.signature(api.goto_pose)) == "(position: 'np.ndarray', quaternion_wxyz: 'np.ndarray', z_approach: 'float' = 0.0) -> 'None'"
     assert str(inspect.signature(api.get_object_pose)) == "(object_name: 'str', use_multiview: 'bool' = True)"
+
+
+def test_controller_manual_is_derived_from_real_callable_signatures():
+    manual = _controller_api_index()
+    assert manual["invocation"]["preferred"] == "robot.<method>(*args, **kwargs)"
+    assert manual["method_catalog"]["sample_grasp_pose"]["call"].startswith(
+        "robot.sample_grasp_pose(object_name: 'str'"
+    )
+    assert "z_approach" in manual["method_catalog"]["goto_pose"]["signature"]
+    assert "robot.sample_grasp_pose(object_name)" in manual["upstream_usage_examples"][0]["code"]
+    assert set(manual["method_catalog"]) == set(manual["methods"])
+
+
+def test_runtime_manual_selects_only_mode_compatible_motion_api():
+    joint = _runtime_controller_mode_index("JOINT_POSITION")
+    assert "robot.goto_pose" in joint["motion_api"]["use"]
+    assert "robot.act(move_to_pose)" in joint["motion_api"]["do_not_use"]
+    osc = _runtime_controller_mode_index("OSC_POSE")
+    assert "robot.act(move_to_pose)" in osc["motion_api"]["use"]
+    assert "robot.goto_pose" in osc["motion_api"]["do_not_use"]
+
+
+def test_rpc_trace_fingerprints_bulk_arrays_without_losing_semantics():
+    array = np.arange(256 * 256 * 3, dtype=np.uint8).reshape(256, 256, 3)
+    encoded = base64.b64encode(array.tobytes()).decode("ascii")
+    traced = _trace_value({
+        "method": "get_observation",
+        "result": {
+            "rgb": {
+                "__roboforge_ndarray__": True,
+                "dtype": str(array.dtype),
+                "shape": list(array.shape),
+                "data_base64": encoded,
+            },
+            "robot_joint_pos": np.arange(7, dtype=np.float64),
+        },
+    })
+    assert traced["method"] == "get_observation"
+    assert traced["result"]["rgb"] == {
+        "__roboforge_ndarray__": True,
+        "dtype": "uint8",
+        "shape": [256, 256, 3],
+        "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
+        "byte_length": array.nbytes,
+    }
+    assert traced["result"]["robot_joint_pos"]["shape"] == [7]
+    assert "data_base64" not in str(traced)
 
 
 def test_upstream_frame_math_and_tcp_offset_semantics():
@@ -168,6 +220,25 @@ def test_upstream_http_service_semantics_are_preserved(monkeypatch):
     masks = api.segment_sam3_point_prompt(rgb, (1.0, 0.0))
     assert masks[0]["mask"].dtype == bool and masks[0]["mask"].shape == (2, 3)
     np.testing.assert_allclose(api.solve_ik(np.array([.1, .2, .3]), np.array([1., 0, 0, 0])), np.zeros(7))
+
+
+def test_goto_pose_discards_pyroki_gripper_coordinate(monkeypatch):
+    env = Env()
+    api = FrankaLiberoApi(env)
+    previous = []
+
+    def fake_post(url, payload, timeout=120):
+        assert url.endswith("/ik")
+        previous.append(payload["prev_cfg"])
+        return {"joint_positions": list(range(8))}
+
+    monkeypatch.setattr("embodied_codex.adapters.franka_libero_api._post", fake_post)
+    api.goto_pose(np.array([.1, .2, .3]), np.array([1., 0, 0, 0]), z_approach=.1)
+    assert env.calls[0][0] == "move_to_joints_blocking"
+    np.testing.assert_array_equal(env.calls[0][1], np.arange(7))
+    np.testing.assert_array_equal(api.cfg, np.arange(8))
+    assert previous[0] is None
+    assert previous[1] == list(range(8))
 
 
 def test_contact_graspnet_pointcloud_payload_and_post_transform(monkeypatch):

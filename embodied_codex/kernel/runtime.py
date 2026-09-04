@@ -1,6 +1,7 @@
 """Network-isolated Controller runtime and generic Robot RPC boundary."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -116,6 +117,45 @@ def _decode_controller_value(value: Any) -> Any:
     return value
 
 
+def _trace_value(value: Any) -> Any:
+    """Keep RPC trace semantics without duplicating bulk array payloads.
+
+    The full projected value is still returned to the isolated Controller.
+    Only the retained event log replaces ndarray bytes with a stable content
+    fingerprint, shape, and dtype.  This prevents legitimate perception and
+    feedback-control loops from exhausting the bounded event log merely by
+    reading public observations repeatedly.
+    """
+    if isinstance(value, Mapping):
+        if value.get("__roboforge_ndarray__") is True:
+            encoded = value.get("data_base64")
+            if isinstance(encoded, str):
+                raw = base64.b64decode(encoded, validate=True)
+                return {
+                    "__roboforge_ndarray__": True,
+                    "dtype": str(value.get("dtype") or ""),
+                    "shape": list(value.get("shape") or []),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "byte_length": len(raw),
+                }
+        return {str(key): _trace_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_trace_value(item) for item in value]
+    # RPC arguments have already been decoded and may therefore contain numpy
+    # arrays.  Avoid importing numpy in the generic runtime just for tracing.
+    if (type(value).__module__.startswith("numpy") and hasattr(value, "tobytes")
+            and hasattr(value, "shape") and hasattr(value, "dtype")):
+        raw = value.tobytes(order="C")
+        return {
+            "__roboforge_ndarray__": True,
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "byte_length": len(raw),
+        }
+    return value
+
+
 def _rpc_arguments(method: str, value: Any):
     if not isinstance(value, Mapping):
         raise ControllerRuntimeError("RPC arguments must be an object")
@@ -223,7 +263,8 @@ class ControllerRuntime:
                                     sdk_method = str(arguments.get("method") or "")
                                     if not sdk_method or sdk_method.startswith("_"):
                                         raise ControllerRuntimeError("invalid Robot SDK method")
-                                event = {"method": method, "arguments": arguments}
+                                event = {"method": method,
+                                         "arguments": _trace_value(arguments)}
                                 capture_state = getattr(deployment, "canonical_embodied_state", None)
                                 state_before = capture_state() if method == "act" and callable(capture_state) else None
                                 if state_before is not None:
@@ -250,7 +291,7 @@ class ControllerRuntime:
                                         if state_after is not None:
                                             event["state_after"] = state_after
                                     response = {"id": message.get("id"), "ok": True, "result": rpc_result}
-                                    event["result"] = rpc_result
+                                    event["result"] = _trace_value(rpc_result)
                                 except Exception as exc:
                                     response = {"id": message.get("id"), "ok": False,
                                                 "error": f"{type(exc).__name__}: {exc}"}
