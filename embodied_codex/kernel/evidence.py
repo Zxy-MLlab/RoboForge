@@ -129,7 +129,7 @@ def build_execution_digest(execution: Mapping[str, Any], *,
             if event.get("error"):
                 action["result"]["error"] = _bounded_public(event.get("error"))
             digest["actions"].append(action)
-        elif method == "verify":
+        elif method in {"verify", "check_observable_condition"}:
             public_result = result if isinstance(result, Mapping) else {}
             # The Adapter projection is the authoritative public boundary.
             # Core bounds that result mechanically without maintaining a

@@ -1,4 +1,10 @@
-"""Production RoboForge CLI backed by the canonical Kernel."""
+"""Deprecated source-checkout compatibility CLI.
+
+The installed ``roboforge`` entry point is the canonical OpenHands-native
+workflow.  This module remains importable solely for historical manifests and
+regression tests; its legacy AgentLoop imports are intentionally isolated under
+``embodied_codex.legacy`` and are never registered by the canonical runtime.
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,9 +20,9 @@ import tempfile
 
 from .adapters import adapter_doctor_task, adapter_preflight, load_adapter
 from .kernel.assets import CapabilityGapLibrary, CapabilityLibrary, ExperienceLibrary, SkillLibrary
-from .kernel.agent_loop import AgentLoop, LoopBudget
+from .legacy.agent_loop import AgentLoop, LoopBudget
 from .kernel.capability_manager import CapabilityManager
-from .kernel.campaign import CampaignAdapter, CampaignRunner
+from .legacy.campaign import CampaignAdapter, CampaignRunner
 from .kernel.context import ContextBuilder
 from .kernel.events import EventStore
 from .kernel.runtime import ControllerRuntime

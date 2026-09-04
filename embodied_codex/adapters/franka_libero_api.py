@@ -26,6 +26,9 @@ from sklearn.cluster import DBSCAN
 
 
 _TCP_OFFSET = np.array([0.0, 0.0, -0.1], dtype=np.float64)
+_PYROKI_TO_LIBERO_ARM_OFFSET = np.array(
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, np.pi / 2.0], dtype=np.float64
+)
 SAM3_URL = os.environ.get("ROBOFORGE_SAM3_URL", "http://127.0.0.1:8114")
 MOLMO_URL = os.environ.get("ROBOFORGE_MOLMO_URL", "http://127.0.0.1:8122/v1")
 GRASPNET_URL = os.environ.get("ROBOFORGE_GRASPNET_URL", os.environ.get("GRASPNET_SERVICE_URL", "http://127.0.0.1:8115"))
@@ -246,7 +249,7 @@ class FrankaLiberoApi:
             "depth_to_pointcloud", "depth_to_point_cloud", "select_top_down_grasp", "solve_ik", "move_to_joints",
             "traj_plan", "move_along_trajectory", "move_to_joints_both",
             "rotation_matrix_to_quaternion", "transform_points", "interpolate_segment", "normalize_vector",
-            "task_language", "supports_dual_arm", "move_to_joints_arm0", "move_to_joints_arm1",
+            "task_language", "get_task_language", "supports_dual_arm", "move_to_joints_arm0", "move_to_joints_arm1",
             "get_arm0_gripper_pose", "get_arm1_gripper_pose",
             "open_gripper_arm0", "close_gripper_arm0", "open_gripper_arm1", "close_gripper_arm1",
             "solve_ik_arm0", "solve_ik_arm1",
@@ -346,6 +349,10 @@ class FrankaLiberoApi:
 
     def task_language(self) -> str:
         return str(getattr(self._env, "instruction", getattr(self._env, "_instruction", "")))
+
+    def get_task_language(self) -> str:
+        """Return the same public instruction exposed by the upstream environment."""
+        return self.task_language()
 
     def segment_sam3_point_prompt(self, rgb: np.ndarray, point_coords: tuple[float, float]) -> list[dict[str, Any]]:
         try:
@@ -601,19 +608,83 @@ class FrankaLiberoApi:
         quat = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(4)
         rot = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
         offset_pos = pos + rot.apply(self._TCP_OFFSET)
-        # ASPIRE's non-real LIBERO adapter uses the shared convergence helper:
-        # five warm-started calls, stopping early once the configuration is
-        # stable to 1e-3.  Keep this behavior rather than reducing IK to a
-        # single request (which changes both convergence and service load).
-        result = self.cfg
-        previous = self.cfg
-        for _ in range(5):
-            result = self._solve_ik_with_prev(offset_pos, quat, previous)
-            if previous is not None and np.allclose(result, previous, atol=1e-3):
-                break
-            previous = result
-        self.cfg = result
-        return np.asarray(result, dtype=np.float64).reshape(-1)[:7]
+        if self.cfg is None:
+            self.cfg = self._current_pyroki_configuration()
+        orientations = (
+            ("requested", quat),
+            ("top-down", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)),
+            ("45-tilt", np.array([0.707, 0.707, 0.0, 0.0], dtype=np.float64)),
+            ("side-approach", np.array([0.707, 0.0, 0.707, 0.0], dtype=np.float64)),
+        )
+        failures = []
+        for label, candidate_quat in orientations:
+            candidate_offset = (
+                offset_pos if label == "requested"
+                else pos + Rotation.from_quat([
+                    candidate_quat[1], candidate_quat[2],
+                    candidate_quat[3], candidate_quat[0],
+                ]).apply(self._TCP_OFFSET)
+            )
+            try:
+                previous = self.cfg
+                result = previous
+                for _ in range(5):
+                    result = self._solve_ik_with_prev(
+                        candidate_offset, candidate_quat, previous
+                    )
+                    if previous is not None and np.allclose(
+                        result, previous, atol=1e-3
+                    ):
+                        break
+                    previous = result
+                self.cfg = np.asarray(result, dtype=np.float64).reshape(-1)
+                return self._pyroki_arm_to_libero(self.cfg)
+            except Exception as exc:
+                failures.append(f"{label}: {type(exc).__name__}: {exc}")
+        raise RuntimeError(
+            f"IK failed for position {pos.tolist()} with all orientation fallbacks: "
+            + "; ".join(failures)
+        )
+
+    def _current_pyroki_configuration(self) -> np.ndarray | None:
+        """Map live LIBERO qpos into the installed panda URDF convention."""
+        try:
+            value = np.asarray(
+                self.get_observation()["robot_joint_pos"], dtype=np.float64
+            )
+        except Exception:
+            return None
+        if value.size < 7:
+            return None
+        arm = value[:7].copy()
+        arm[6] -= np.pi / 2.0
+        if arm[6] < -2.8973:
+            arm[6] += 2.0 * np.pi
+        if arm[6] > 2.8973:
+            arm[6] -= 2.0 * np.pi
+        gripper_m = (
+            float(np.clip(value[7], 0.0, 1.0) * 0.04)
+            if value.size > 7 else 0.02
+        )
+        return np.r_[arm, gripper_m]
+
+    @staticmethod
+    def _pyroki_arm_to_libero(configuration: np.ndarray) -> np.ndarray:
+        """Map panda URDF joints into the installed robosuite MJCF qpos.
+
+        Both models order arm joints 1..7 in radians. Their fixed hand-frame
+        convention differs by +pi/2 on joint 7; an optional eighth PyRoKi
+        coordinate is the gripper prismatic joint and never enters arm control.
+        """
+        value = np.asarray(configuration, dtype=np.float64).reshape(-1)
+        if value.size < 7:
+            raise RuntimeError(f"PyRoKi returned {value.size} joints; Franka requires 7")
+        arm = value[:7] + _PYROKI_TO_LIBERO_ARM_OFFSET
+        if arm[6] > 2.8973:
+            arm[6] -= 2.0 * np.pi
+        if arm[6] < -2.8973:
+            arm[6] += 2.0 * np.pi
+        return arm
 
     def _solve_ik_with_prev(self, position: np.ndarray, quaternion_wxyz: np.ndarray, prev_cfg: np.ndarray | None = None) -> np.ndarray:
         pos = np.asarray(position, dtype=float).reshape(3)
@@ -633,25 +704,32 @@ class FrankaLiberoApi:
         env.move_to_joints_blocking(np.asarray(joints, dtype=float).reshape(7))
 
     def goto_pose(self, position: np.ndarray, quaternion_wxyz: np.ndarray, z_approach: float = 0.0) -> None:
-        pos = np.asarray(position, float).reshape(3); q = np.asarray(quaternion_wxyz, float).reshape(4)
-        rot = Rotation.from_quat([q[1], q[2], q[3], q[0]]); target = pos + rot.apply(self._TCP_OFFSET)
-        if z_approach: self._goto_pose_once(target + rot.apply([0, 0, -z_approach]), q)
-        self._goto_pose_once(target, q)
+        pos = np.asarray(position, float).reshape(3)
+        q = np.asarray(quaternion_wxyz, float).reshape(4)
+        # Preserve ASPIRE/CaP-X LIBERO semantics: z_approach is a positive
+        # world-Z offset, while solve_ik() alone owns the panda_hand TCP
+        # correction. The previous adapter applied a second, tool-frame
+        # offset and therefore commanded the wrong Cartesian pose.
+        if z_approach > 0.0:
+            approach_pos = pos.copy()
+            approach_pos[2] += float(z_approach)
+            self.move_to_joints(self.solve_ik(approach_pos, q))
+        self.move_to_joints(self.solve_ik(pos, q))
 
     def _goto_pose_once(self, pos, q):
         joints = self._solve_ik_with_prev(pos, q, self.cfg); self.cfg = joints
-        self.move_to_joints(joints[:7])
+        self.move_to_joints(self._pyroki_arm_to_libero(joints))
 
     def open_gripper(self) -> None:
         if hasattr(self._env, "_set_gripper"):
             self._env._set_gripper(1.0)
-            for _ in range(40): self._env._step_once()
+            for _ in range(30): self._env._step_once()
         else: self._dispatch_act({"type": "gripper", "command": "open", "repeat": 40})
 
     def close_gripper(self) -> None:
         if hasattr(self._env, "_set_gripper"):
             self._env._set_gripper(0.0)
-            for _ in range(60): self._env._step_once()
+            for _ in range(30): self._env._step_once()
         else: self._dispatch_act({"type": "gripper", "command": "close", "repeat": 60})
 
     def goto_home_joint_position(self) -> None:
@@ -676,7 +754,9 @@ class FrankaLiberoApi:
         waypoints = np.asarray(data.get("waypoints"), dtype=np.float64)
         if waypoints.ndim != 2 or waypoints.shape[1] < 7:
             raise RuntimeError(f"PyRoKi returned invalid trajectory shape {waypoints.shape}")
-        return waypoints[:, :7]
+        return np.asarray([
+            self._pyroki_arm_to_libero(waypoint) for waypoint in waypoints
+        ])
 
     def move_along_trajectory(self, trajectory: np.ndarray) -> None:
         """Execute each trajectory waypoint with blocking joint control."""
@@ -872,6 +952,8 @@ class FrankaLiberoApi:
     def solve_ik_arm0(self, position: np.ndarray,
                       quaternion_wxyz: np.ndarray) -> np.ndarray:
         """Solve arm-0 IK with the upstream TCP-offset convention."""
+        if self.cfg is None:
+            self.cfg = self._current_pyroki_configuration()
         pos = np.asarray(position, dtype=np.float64).reshape(3)
         quat = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(4)
         rot = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
@@ -884,7 +966,7 @@ class FrankaLiberoApi:
                 break
             previous = result
         self.cfg = result
-        return np.asarray(result, dtype=np.float64).reshape(-1)[:7]
+        return self._pyroki_arm_to_libero(result)
 
     def solve_ik_arm1(self, position: np.ndarray,
                       quaternion_wxyz: np.ndarray) -> np.ndarray:
@@ -920,7 +1002,7 @@ class FrankaLiberoApi:
                 break
             previous = result
         self.cfg = result
-        return np.asarray(result, dtype=np.float64).reshape(-1)[:7]
+        return self._pyroki_arm_to_libero(result)
     def goto_pose_arm0(self, position, quaternion_wxyz, z_approach=0.0): return self.goto_pose(position, quaternion_wxyz, z_approach)
     def goto_pose_arm1(self, position, quaternion_wxyz, z_approach=0.0): raise RuntimeError("dual-arm arm1 pose control unavailable")
     def goto_pose_both(self, position0, quaternion_wxyz0, position1, quaternion_wxyz1, z_approach=0.0):

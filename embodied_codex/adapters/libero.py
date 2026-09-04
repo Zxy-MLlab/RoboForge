@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import inspect
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 from ..capabilities import (GraspNetRGBD, OpenVocabularyRGBD,
@@ -348,6 +350,74 @@ def _sha256(path: Path):
     return digest.hexdigest()
 
 
+def _runtime_metadata(paths: dict[str, Path], contracts: dict[str, dict]) -> dict:
+    """Return stable, secret-free provenance for the executing Provider."""
+    package_root = paths["package_root"]
+    implementation_root = Path(__file__).resolve().parents[2]
+    sources = [
+        Path(__file__).resolve(),
+        implementation_root / "embodied_codex/adapters/franka_libero_api.py",
+        implementation_root / "embodied_codex/adapters/libero_sdk.py",
+        implementation_root / "embodied_codex/deployments/libero.py",
+        implementation_root / "embodied_codex/kernel/runtime.py",
+        implementation_root / "roboforge/bridge.py",
+    ]
+    digest = hashlib.sha256()
+    for source in sorted(sources):
+        digest.update(source.relative_to(implementation_root).as_posix().encode())
+        digest.update(hashlib.sha256(source.read_bytes()).digest())
+
+    versions = {}
+    for distribution in ("libero", "robosuite", "mujoco", "numpy", "scipy", "torch"):
+        try:
+            versions[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[distribution] = None
+    source_control = {"commit": None, "dirty": None, "dirty_patch_sha256": None}
+    try:
+        source_control["commit"] = subprocess.run(
+            ["git", "-C", str(implementation_root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        patch = subprocess.run(
+            ["git", "-C", str(implementation_root), "diff", "--binary", "HEAD", "--"],
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+        status = subprocess.run(
+            ["git", "-C", str(implementation_root), "status", "--porcelain=v1", "-uall"],
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+        source_control["dirty"] = bool(status)
+        source_control["dirty_patch_sha256"] = hashlib.sha256(patch + status).hexdigest()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    model_digests = {}
+    for name, key in (("groundingdino", "groundingdino_checkpoint"),
+                      ("sam", "sam_checkpoint"), ("graspnet", "graspnet_checkpoint")):
+        checkpoint = paths[key]
+        model_digests[name] = _sha256(checkpoint) if checkpoint.is_file() else None
+    return {
+        "runtime_provider_digest": digest.hexdigest(),
+        "runtime_api_version": LIBERO_ROBOT_SDK_CONTRACT["protocol"],
+        "capability_versions": {
+            name: hashlib.sha256(
+                json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            for name, contract in contracts.items()
+        },
+        "model_artifact_digests": model_digests,
+        "model_services": {
+            "sam3": os.environ.get("ROBOFORGE_SAM3_URL", "http://127.0.0.1:8114"),
+            "molmo": os.environ.get("ROBOFORGE_MOLMO_URL", "http://127.0.0.1:8122/v1"),
+            "contact_graspnet": os.environ.get("ROBOFORGE_GRASPNET_URL", "http://127.0.0.1:8115"),
+            "pyroki": os.environ.get("ROBOFORGE_PYROKI_URL", "http://127.0.0.1:8116"),
+            "curobo": os.environ.get("ROBOFORGE_CUROBO_URL", "http://127.0.0.1:8117"),
+        },
+        "package_versions": versions,
+        "source_control": source_control,
+    }
+
+
 def _paths():
     package_root = Path(__file__).resolve().parents[2]
     configuration = _vendor_configuration()
@@ -466,4 +536,5 @@ def create(*, task: str, state: int = 0, root: str | Path,
     deployment.sdk_index["runtime_configuration"] = _runtime_controller_mode_index(
         episode.controller_mode
     )
+    deployment._candidate_runtime_metadata = _runtime_metadata(paths, contracts)
     return deployment

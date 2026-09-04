@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def _lifecycle_main(argv: list[str]) -> int | None:
-    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit"}:
+    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit", "validate-controller-api"}:
         return None
     from .control_plane import compare, environment_info, replay, submit
     root = argparse.ArgumentParser(prog="roboforge")
@@ -37,6 +37,16 @@ def _lifecycle_main(argv: list[str]) -> int | None:
     submit_parser.add_argument("--asset-root", required=True)
     submit_parser.add_argument("--evidence", action="append", required=True)
     submit_parser.add_argument("--note", required=True)
+    conformance_parser = commands.add_parser(
+        "validate-controller-api",
+        help="Run the external real-LIBERO ASPIRE/CaP-X API conformance gate",
+    )
+    conformance_parser.add_argument("--runtime", default="libero", choices=["libero"])
+    conformance_parser.add_argument("--task", type=int, required=True)
+    conformance_parser.add_argument("--states", type=int, nargs="+", required=True)
+    conformance_parser.add_argument("--output", type=Path, required=True)
+    conformance_parser.add_argument("--molmo-target", default="black bowl")
+    conformance_parser.add_argument("--model-check-state", type=int)
     args = root.parse_args(argv)
     exit_code = 0
     if args.command == "env": value = environment_info()
@@ -47,7 +57,19 @@ def _lifecycle_main(argv: list[str]) -> int | None:
         return _run_active_trial(args)
     elif args.command == "replay": value = replay(args.trial)
     elif args.command == "compare": value = compare(args.baseline, args.candidate)
-    else: value = submit(args.asset_root, args.candidate_version, args.evidence, note=args.note)
+    elif args.command == "submit":
+        value = submit(args.asset_root, args.candidate_version, args.evidence, note=args.note)
+    else:
+        from scripts.validate_libero_api_conformance import main as validate_controller_api
+        command = [
+            "--task", str(args.task),
+            "--states", *(str(state) for state in args.states),
+            "--output", str(args.output),
+            "--molmo-target", args.molmo_target,
+        ]
+        if args.model_check_state is not None:
+            command.extend(["--model-check-state", str(args.model_check_state)])
+        return validate_controller_api(command)
     print(json.dumps(value, indent=2, sort_keys=True))
     return exit_code
 
@@ -127,6 +149,9 @@ def _runtime_worker_env(token: str) -> dict[str, str]:
         "ROBOFORGE_VENDOR_ROOT", "ROBOFORGE_LIBERO_VENDOR_CONFIG",
         "ROBOFORGE_GROUNDINGDINO_CHECKPOINT", "ROBOFORGE_SAM_CHECKPOINT",
         "ROBOFORGE_GRASPNET_CHECKPOINT", "ROBOFORGE_PYTHON",
+        "ROBOFORGE_SAM3_URL", "ROBOFORGE_MOLMO_URL", "ROBOFORGE_MOLMO_MODEL",
+        "ROBOFORGE_GRASPNET_URL", "GRASPNET_SERVICE_URL",
+        "ROBOFORGE_PYROKI_URL", "ROBOFORGE_CUROBO_URL",
         "HF_HOME", "TOKENIZERS_PARALLELISM",
     }
     env = {key: value for key, value in os.environ.items() if key in allowed}

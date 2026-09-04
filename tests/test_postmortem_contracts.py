@@ -11,7 +11,7 @@ from embodied_codex.deployments.libero import (
     LiberoDeployment,
     _public_execution_diagnostics,
 )
-from embodied_codex.kernel.campaign import CampaignAdapter
+from embodied_codex.legacy.campaign import CampaignAdapter
 
 
 def _canonical_frame(tmp_path):

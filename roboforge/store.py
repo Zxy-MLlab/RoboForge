@@ -76,6 +76,7 @@ class ExperimentStore:
                         "schema_version": 1,
                         "max_trials": max_trials,
                         "max_diagnostics": max_diagnostics,
+                        "physical_attempts": 0,
                         "physical_trials": 0,
                         "diagnostics": 0,
                         "requests": {},
@@ -119,6 +120,17 @@ class ExperimentStore:
         value.setdefault("latest_evidence", None)
         value.setdefault("latest_diagnostic_evidence", None)
         value.setdefault("latest_physical_evidence", None)
+        request_indexes = [
+            int(record.get("index", 0))
+            for record in value["requests"].values()
+            if isinstance(record, dict)
+            and record.get("kind") == "physical_trial"
+            and isinstance(record.get("index"), int)
+        ]
+        value.setdefault(
+            "physical_attempts",
+            max([int(value["physical_trials"]), *request_indexes], default=0),
+        )
         return value
 
     def save_state(self, state: dict[str, Any]) -> None:

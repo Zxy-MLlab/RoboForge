@@ -16,7 +16,7 @@ from embodied_codex.adapters.factory import adapter_preflight
 from embodied_codex.adapters.libero import _sdk_index
 from embodied_codex.capabilities.graspnet_rgbd import GraspNetRGBD
 from embodied_codex.fake_adapter import FakeAdapter
-from embodied_codex.kernel.agent_loop import AgentLoop, LoopBudget, ProtocolError
+from embodied_codex.legacy.agent_loop import AgentLoop, LoopBudget, ProtocolError
 from embodied_codex.kernel.assets import (CapabilityGapLibrary, CapabilityLibrary,
     ExperienceLibrary, SkillLibrary)
 from embodied_codex.kernel.capability_manager import CapabilityManager

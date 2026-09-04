@@ -7,7 +7,7 @@ import pytest
 from embodied_codex.fake_adapter import FakeAdapter
 from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 from embodied_codex.deployments.libero import LiberoDeployment
-from embodied_codex.kernel.agent_loop import AgentLoop, LoopBudget, ProtocolError
+from embodied_codex.legacy.agent_loop import AgentLoop, LoopBudget, ProtocolError
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.embodied_state import Frame, Pose, relative_pose_in_frames

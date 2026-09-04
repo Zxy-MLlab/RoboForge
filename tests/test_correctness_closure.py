@@ -10,7 +10,7 @@ import pytest
 
 from embodied_codex import cli
 from embodied_codex.fake_adapter import FakeAdapter
-from embodied_codex.kernel.agent_loop import AgentLoop, ProtocolError
+from embodied_codex.legacy.agent_loop import AgentLoop, ProtocolError
 from embodied_codex.kernel.assets import CapabilityLibrary
 from embodied_codex.kernel.capability_manager import CapabilityError, CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder

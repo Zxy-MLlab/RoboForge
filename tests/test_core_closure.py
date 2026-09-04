@@ -9,7 +9,7 @@ from typing import Mapping
 import pytest
 
 from embodied_codex.fake_adapter import FakeAdapter
-from embodied_codex.kernel.agent_loop import AgentLoop, LoopBudget, ProtocolError
+from embodied_codex.legacy.agent_loop import AgentLoop, LoopBudget, ProtocolError
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.context_window import ContextWindowManager, ResourceBudgets
@@ -333,7 +333,7 @@ def test_controller_versions_are_inspectable_comparable_and_restorable(tmp_path)
 
 
 def test_campaign_run_controller_is_episodic_and_preserves_learning(tmp_path):
-    from embodied_codex.kernel.campaign import CampaignAdapter
+    from embodied_codex.legacy.campaign import CampaignAdapter
 
     class EpisodicFake(FakeAdapter):
         episodic_trials = True

@@ -30,6 +30,7 @@ def _decode_evidence(value: dict[str, Any]) -> ExperimentEvidence:
         "assets_used": (),
         "physical_verification": None,
         "execution_error": None,
+        "candidate_bundle_digest": None,
     }
     optional.update({key: value.get(key) for key in optional})
     optional["assets_used"] = tuple(value.get("assets_used") or ())

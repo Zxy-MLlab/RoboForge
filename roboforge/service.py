@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import difflib
+import inspect
 import re
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .models import AdapterResult, ArtifactHandle, ExperimentEvidence
+from .candidate_bundle import CandidateBundleError, CandidateBundleStore
+from .models import AdapterResult, ArtifactHandle, ExperimentEvidence, RawArtifact
 from .store import CorruptStore, ExperimentStore
 from .evidence import derive_status
 
@@ -37,6 +39,8 @@ class EmbodiedAdapter(Protocol):
         controller_path: Path,
         controller_sha256: str,
         environment_generation: str,
+        candidate_bundle_digest: str | None = None,
+        candidate_source_root: Path | None = None,
     ) -> AdapterResult: ...
 
     def validate_receipt(
@@ -45,6 +49,7 @@ class EmbodiedAdapter(Protocol):
         *,
         controller_sha256: str,
         environment_generation: str,
+        candidate_bundle_digest: str | None = None,
     ) -> bool: ...
 
 
@@ -94,12 +99,16 @@ class ExperimentService:
         )
         self.adapter = adapter
         self.crash_hook = crash_hook or (lambda _point: None)
+        self.bundle_store = CandidateBundleStore(
+            self.store.root / "candidate_bundles"
+        )
 
     def status(self) -> dict[str, Any]:
         with self.store.locked():
             self._recover_committed_evidence()
             state = self.store.load_state()
             return {
+                "physical_attempts": state["physical_attempts"],
                 "physical_trials": state["physical_trials"],
                 "max_trials": state["max_trials"],
                 "diagnostics": state["diagnostics"],
@@ -138,6 +147,12 @@ class ExperimentService:
                 raise ProtocolError("request is not a pending physical experiment")
             state["requests"][request_id] = {**record, "status": disposition,
                 "reconciliation_note": note}
+            if (
+                disposition == "confirmed_executed_without_evidence"
+                and not record.get("budget_counted")
+            ):
+                state["physical_trials"] += 1
+                state["requests"][request_id]["budget_counted"] = True
             self.store.save_state(state)
             return dict(state["requests"][request_id])
 
@@ -180,6 +195,7 @@ class ExperimentService:
             )
             return {
                 "schema_version": 1,
+                "physical_attempts": int(state["physical_attempts"]),
                 "physical_trials": int(state["physical_trials"]),
                 "max_physical_trials": int(state["max_trials"]),
                 "remaining_physical_trials": max(
@@ -197,6 +213,10 @@ class ExperimentService:
                 "latest_physical_evidence": state.get("latest_physical_evidence"),
                 "latest_controller_sha256": (
                     latest_physical.get("controller_sha256")
+                    if latest_physical else None
+                ),
+                "latest_candidate_bundle_digest": (
+                    latest_physical.get("candidate_bundle_digest")
                     if latest_physical else None
                 ),
                 "physical_verification": (
@@ -245,6 +265,7 @@ class ExperimentService:
             kind="diagnostic",
             index=index,
             controller_sha256=None,
+            candidate_bundle_digest=None,
             environment_generation=None,
             intent=None,
             result=result,
@@ -263,14 +284,28 @@ class ExperimentService:
         path = Path(controller_path).resolve()
         if not intent.strip():
             raise ProtocolError("physical experiment intent must be non-empty")
+        workspace = path.parent.parent if path.parent.name == "controllers" else path.parent
+        metadata_provider = getattr(self.adapter, "candidate_runtime_metadata", None)
+        runtime_metadata = (
+            dict(metadata_provider()) if callable(metadata_provider) else {}
+        )
         try:
-            source = path.read_bytes()
-        except OSError as exc:
-            raise ProtocolError("Controller is not readable") from exc
+            bundle = self.bundle_store.freeze(
+                workspace=workspace,
+                entrypoint=path,
+                runtime_metadata=runtime_metadata,
+                excluded_roots=(self.store.root,),
+            )
+            candidate_bundle_digest = str(bundle["candidate_bundle_digest"])
+            frozen_path = self.bundle_store.entrypoint(candidate_bundle_digest)
+            frozen_root = self.bundle_store.source_root(candidate_bundle_digest)
+            source = frozen_path.read_bytes()
+        except (OSError, CandidateBundleError) as exc:
+            raise ProtocolError(f"Candidate Bundle freeze failed: {exc}") from exc
 
         # Adapters may expose a pure, machine-readable preflight.  It runs
         # before reservation and therefore never consumes a physical trial.
-        report = self.preflight_controller(path)
+        report = self.preflight_controller(frozen_path)
         if report.get("ok") is False:
                 raise ProtocolError("contract preflight failed: " + json.dumps(report, sort_keys=True))
 
@@ -302,54 +337,108 @@ class ExperimentService:
             if state["physical_trials"] >= state["max_trials"]:
                 raise BudgetExhausted("physical trial budget exhausted")
             controller_sha = self.store.put_controller(source)
-            index = state["physical_trials"] + 1
-            state["physical_trials"] = index
+            if controller_sha != bundle["controller_digest"]:
+                raise CorruptStore("Candidate Bundle Controller digest mismatch")
+            index = state["physical_attempts"] + 1
+            state["physical_attempts"] = index
             state["requests"][request_id] = {
                 "kind": "physical_trial",
                 "status": "pending",
                 "index": index,
                 "controller_sha256": controller_sha,
+                "candidate_bundle_digest": candidate_bundle_digest,
+                "budget_counted": False,
             }
             self.store.save_state(state)
 
+        generation = None
+        failure_class = None
+        controller_started = False
         self.crash_hook("physical_reserved")
-        self.adapter.begin_execution("physical_trial")
-        generation = self.adapter.reset_to_s0()
-        self.crash_hook("physical_reset")
         try:
-            result = self.adapter.execute_controller(
-                controller_path=self.store.controller_dir / f"{controller_sha}.py",
-                controller_sha256=controller_sha,
-                environment_generation=generation,
-            )
+            self.adapter.begin_execution("physical_trial")
+            self.crash_hook("physical_begun")
+            try:
+                generation = self.adapter.reset_to_s0()
+            except Exception:
+                failure_class = "environment_failure"
+                raise
+            self.crash_hook("physical_reset")
+            controller_started = True
+            execute_kwargs: dict[str, Any] = {
+                "controller_path": frozen_path,
+                "controller_sha256": controller_sha,
+                "environment_generation": generation,
+            }
+            if self._accepts_keyword(self.adapter.execute_controller, "candidate_bundle_digest"):
+                execute_kwargs["candidate_bundle_digest"] = candidate_bundle_digest
+            if self._accepts_keyword(self.adapter.execute_controller, "candidate_source_root"):
+                execute_kwargs["candidate_source_root"] = frozen_root
+            result = self.adapter.execute_controller(**execute_kwargs)
+            if "controller_termination" in result.public:
+                controller_started = bool(
+                    result.public.get("controller_termination") == "completed"
+                    or result.public.get("sanitized_runtime_trace")
+                    or result.public.get("sanitized_trace")
+                    or result.public.get("action_trace")
+                )
             receipt = result.private_receipt
+            validate_kwargs: dict[str, Any] = {
+                "controller_sha256": controller_sha,
+                "environment_generation": generation,
+            }
+            if self._accepts_keyword(self.adapter.validate_receipt, "candidate_bundle_digest"):
+                validate_kwargs["candidate_bundle_digest"] = candidate_bundle_digest
             verified = bool(
                 receipt is not None
                 and self.adapter.validate_receipt(
                     receipt,
-                    controller_sha256=controller_sha,
-                    environment_generation=generation,
+                    **validate_kwargs,
                 )
             )
             execution_error = None
             if receipt is not None:
                 self.store.put_private_receipt(request_id, receipt)
         except Exception as exc:
-            result = AdapterResult(public={"execution_status": "error"})
+            if failure_class is None:
+                text = str(exc).casefold()
+                failure_class = (
+                    "service_failure"
+                    if any(marker in text for marker in (
+                        "connection refused", "service unavailable", "rpc disconnected",
+                        "model service", "broken pipe",
+                    ))
+                    else "controller_failure" if controller_started else "harness_failure"
+                )
+            result = AdapterResult(public={
+                "execution_status": "error",
+                "environment_status": (
+                    "error" if failure_class == "environment_failure" else "ok"
+                ),
+                "failure_class": failure_class,
+            })
             verified = False
             execution_error = f"{type(exc).__name__}: {exc}"
+        result = AdapterResult(
+            public=result.public,
+            artifacts=result.artifacts + self._bundle_artifacts(candidate_bundle_digest),
+            private_receipt=result.private_receipt,
+        )
         self.crash_hook("physical_executed")
         return self._commit(
             request_id=request_id,
             kind="physical_trial",
             index=index,
             controller_sha256=controller_sha,
+            candidate_bundle_digest=candidate_bundle_digest,
             environment_generation=generation,
             intent=intent,
             result=result,
             verified=verified,
             execution_error=execution_error,
             assets_used=tuple(assets_used or ()),
+            failure_class=failure_class,
+            controller_started=controller_started,
         )
 
     def inspect_trial(self, ref: str) -> ExperimentEvidence:
@@ -404,18 +493,29 @@ class ExperimentService:
         kind: str,
         index: int,
         controller_sha256: str | None,
+        candidate_bundle_digest: str | None,
         environment_generation: str | None,
         intent: str | None,
         result: AdapterResult,
         verified: bool | None,
         execution_error: str | None,
         assets_used: tuple[str, ...] = (),
+        failure_class: str | None = None,
+        controller_started: bool | None = None,
     ) -> ExperimentEvidence:
         public = _sanitize_public_value(result.public)
         lifecycle_source = dict(public)
         if kind == "physical_trial":
             lifecycle_source["physical_verification"] = {"verified": bool(verified)}
-        public.setdefault("lifecycle", derive_status(lifecycle_source, execution_error))
+        public.setdefault(
+            "lifecycle",
+            derive_status(
+                lifecycle_source,
+                execution_error,
+                failure_class=failure_class,
+                controller_started=controller_started,
+            ),
+        )
         self._assert_public_projection(public)
         handles = tuple(
             ArtifactHandle(**self.store.put_artifact(
@@ -440,6 +540,7 @@ class ExperimentService:
             physical_trial_index=index if kind == "physical_trial" else None,
             environment_generation=environment_generation,
             controller_sha256=controller_sha256,
+            candidate_bundle_digest=candidate_bundle_digest,
             intent=intent,
             public=public,
             assets_used=assets_used,
@@ -469,6 +570,11 @@ class ExperimentService:
                 "status": "committed",
                 "ref": ref,
             }
+            if kind == "physical_trial":
+                consumed = bool(public["lifecycle"].get("task_budget_consumed"))
+                if consumed and not state["requests"][request_id].get("budget_counted"):
+                    state["physical_trials"] += 1
+                state["requests"][request_id]["budget_counted"] = consumed
             state["latest_evidence"] = ref
             if kind == "diagnostic":
                 state["latest_diagnostic_evidence"] = ref
@@ -526,6 +632,12 @@ class ExperimentService:
                 "status": "committed",
                 "ref": ref,
             }
+            if body["execution_kind"] == "physical_trial":
+                lifecycle = dict((body.get("public") or {}).get("lifecycle") or {})
+                consumed = bool(lifecycle.get("task_budget_consumed"))
+                if consumed and not record.get("budget_counted"):
+                    state["physical_trials"] += 1
+                state["requests"][request_id]["budget_counted"] = consumed
             state["latest_evidence"] = ref
             if body["execution_kind"] == "diagnostic":
                 state["latest_diagnostic_evidence"] = ref
@@ -572,6 +684,7 @@ class ExperimentService:
             "physical_trial_index",
             "environment_generation",
             "controller_sha256",
+            "candidate_bundle_digest",
             "intent",
             "assets_used",
             "physical_verification",
@@ -583,6 +696,36 @@ class ExperimentService:
             ArtifactHandle(**artifact) for artifact in value.get("artifacts", ())
         )
         return ExperimentEvidence(**value)
+
+    @staticmethod
+    def _accepts_keyword(function: Callable[..., Any], name: str) -> bool:
+        """Use new bundle bindings without broadening legacy test adapters."""
+        try:
+            parameters = inspect.signature(function).parameters
+        except (TypeError, ValueError):
+            return False
+        return name in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        )
+
+    def _bundle_artifacts(self, digest: str) -> tuple[RawArtifact, ...]:
+        """Expose the exact frozen source used by a development trial."""
+        manifest = self.bundle_store.verify(digest)
+        root = self.bundle_store.source_root(digest)
+        artifacts = [RawArtifact(
+            name="candidate_bundle/manifest.json",
+            media_type="application/vnd.roboforge.candidate-bundle+json",
+            data=(self.bundle_store.root / digest / "manifest.json").read_bytes(),
+        )]
+        for item in manifest["files"]:
+            relative = str(item["path"])
+            artifacts.append(RawArtifact(
+                name=f"candidate_bundle/files/{relative}",
+                media_type="application/octet-stream",
+                data=(root / relative).read_bytes(),
+            ))
+        return tuple(artifacts)
 
     @staticmethod
     def _diff(first: Any, second: Any, path: str = "") -> list[dict[str, Any]]:

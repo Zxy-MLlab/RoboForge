@@ -2,10 +2,10 @@ import json
 
 from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
 from embodied_codex.fake_adapter import FakeAdapter
-from embodied_codex.kernel.agent_loop import LoopBudget
+from embodied_codex.legacy.agent_loop import LoopBudget
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.tools import ToolRegistry
-from embodied_codex.kernel.campaign import CampaignAdapter
+from embodied_codex.legacy.campaign import CampaignAdapter
 
 
 def _make_loop(tmp_path):
@@ -173,7 +173,7 @@ def test_campaign_unknown_consequence_is_not_readonly(tmp_path):
 def test_manifest_persistence_uses_replace_and_fsync(tmp_path, monkeypatch):
     loop = _make_loop(tmp_path)
     calls = []
-    import embodied_codex.kernel.agent_loop as module
+    import embodied_codex.legacy.agent_loop as module
     real_replace = module.os.replace
     real_fsync = module.os.fsync
     monkeypatch.setattr(module.os, "replace", lambda *args: (calls.append("replace"), real_replace(*args))[1])

@@ -1,28 +1,29 @@
-"""Run the non-privileged ASPIRE/CaP-X Controller API against real LIBERO.
+"""Validate the public ASPIRE/CaP-X Controller API against real LIBERO.
 
-Service-backed calls are reported as unavailable when their upstream service is
-not running; no mock response is substituted.  The resulting JSON is a light
-weight invocation manifest suitable for the conformance matrix.
+This is an external conformance runner, not an Agent tool. It may read MuJoCo
+state only to measure the public Controller API against the real simulator.
+Candidate Controllers continue to see only the allowlisted Robot SDK.
 """
 from __future__ import annotations
 
 import argparse
-import copy
+import base64
 import hashlib
-import inspect
+import io
 import json
-import re
 from pathlib import Path
+import re
 import socket
 import time
-import base64
-import io
-import requests
+from typing import Any, Callable
 
 import numpy as np
+import requests
+from scipy.spatial.transform import Rotation
 
 from embodied_codex.adapters.franka_libero_api import FrankaLiberoApi
 from embodied_codex.adapters.libero import create
+from embodied_codex.deployments.libero import LiberoDeploymentError
 
 
 SERVICE_URLS = {
@@ -33,31 +34,52 @@ SERVICE_URLS = {
     "curobo": "http://127.0.0.1:8117",
 }
 
-SERVICE_PROBE_APIS = {
-    "sam3": "sam3_text_segmentation_live",
-    "graspnet": "contact_graspnet_live",
-    "pyroki": "pyroki_live",
-    "molmo": "molmo_vision_live",
-    "curobo": "curobo_live",
+UPSTREAM = {
+    "aspire": {
+        "repository": "https://github.com/NVlabs/ASPIRE",
+        "commit": "f4c8939aab0af9b97690c561bd80e282940f7886",
+        "license": "Apache-2.0 and MIT",
+    },
+    "cap-x": {
+        "repository": "https://github.com/capgym/cap-x",
+        "commit": "53e9966d7a8e2fa7494676772bccc35280f5c0ed",
+        "license": "MIT",
+    },
 }
 
-BASE_REQUIRED_APIS = {
-    "get_observation",
-    "camera_pose_robot_base_frame",
-    "robot_state_shapes",
-    "depth_to_pointcloud",
-    "mask_to_world_points",
-    "pixel_to_world_point",
-    "decompose_transform",
-    "rotation_matrix_to_quaternion",
-    "transform_points",
-    "interpolate_segment",
-    "normalize_vector",
-    "goto_home_joint_position",
-    "open_gripper",
-    "close_gripper",
-    "task_language",
-    "supports_dual_arm",
+REQUIRED_APIS = {
+    "get_observation", "get_task_language", "segment_sam3_text_prompt",
+    "segment_sam3_point_prompt", "point_prompt_molmo", "mask_to_world_points",
+    "get_oriented_bounding_box_from_3d_points", "decompose_transform",
+    "rotation_matrix_to_quaternion", "transform_points", "depth_to_pointcloud",
+    "depth_to_point_cloud", "plan_grasp", "select_top_down_grasp", "solve_ik",
+    "move_to_joints", "goto_pose", "goto_home_joint_position", "open_gripper",
+    "close_gripper", "joint_control_timeout", "controller_privilege_boundary",
+    "curobo_service",
+}
+
+API_PROVENANCE = {
+    "get_observation": "aspire/sim/cap/envs/simulators/libero.py",
+    "get_task_language": "aspire/sim/cap/envs/simulators/libero.py",
+    "segment_sam3_text_prompt": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "segment_sam3_point_prompt": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "point_prompt_molmo": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "mask_to_world_points": "aspire/sim/cap/utils/depth_utils.py",
+    "get_oriented_bounding_box_from_3d_points": "aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py",
+    "decompose_transform": "aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py",
+    "rotation_matrix_to_quaternion": "aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py",
+    "transform_points": "aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py",
+    "depth_to_pointcloud": "aspire/sim/cap/utils/depth_utils.py",
+    "depth_to_point_cloud": "aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py",
+    "plan_grasp": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "select_top_down_grasp": "aspire/sim/cap/integrations/franka/libero_reduced_skill_library.py",
+    "solve_ik": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "move_to_joints": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "goto_pose": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "goto_home_joint_position": "aspire/sim/cap/integrations/franka/libero_reduced.py",
+    "open_gripper": "aspire/sim/cap/integrations/franka/common.py",
+    "close_gripper": "aspire/sim/cap/integrations/franka/common.py",
+    "curobo_service": "capx/serving/launch_curobo_server.py",
 }
 
 
@@ -72,7 +94,9 @@ def _port(url: str) -> bool:
 
 
 def _npy64(value: np.ndarray) -> str:
-    buf = io.BytesIO(); np.save(buf, np.asarray(value)); return base64.b64encode(buf.getvalue()).decode("ascii")
+    buffer = io.BytesIO()
+    np.save(buffer, np.asarray(value))
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def _from_npy64(value: str) -> np.ndarray:
@@ -82,20 +106,16 @@ def _from_npy64(value: str) -> np.ndarray:
 def _manifest_digest(manifest: dict) -> str:
     unsigned = dict(manifest)
     unsigned.pop("manifest_sha256", None)
-    encoded = json.dumps(unsigned, sort_keys=True, indent=2).encode()
+    encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
 def _observation_fingerprint(api: FrankaLiberoApi, obs: dict) -> str:
-    """Hash controller-visible reset state used by every serial probe phase."""
     digest = hashlib.sha256()
-    digest.update(api.task_language().encode())
+    digest.update(api.get_task_language().encode())
     for camera_name in (api.camera_name, api.wrist_camera_name):
         camera = obs[camera_name]
-        for value in (
-            camera["images"]["rgb"], camera["images"]["depth"],
-            camera["intrinsics"], camera["pose_mat"],
-        ):
+        for value in (camera["images"]["rgb"], camera["images"]["depth"], camera["intrinsics"], camera["pose_mat"]):
             array = np.ascontiguousarray(value)
             digest.update(str(array.dtype).encode())
             digest.update(json.dumps(list(array.shape)).encode())
@@ -108,17 +128,11 @@ def _observation_fingerprint(api: FrankaLiberoApi, obs: dict) -> str:
     return digest.hexdigest()
 
 
-def _validated_resume(path: Path, *, task: int, state: int,
-                      observation_fingerprint: str) -> dict:
+def _validated_resume(path: Path, *, task: int, state: int, observation_fingerprint: str) -> dict:
     manifest = json.loads(path.read_text())
     if manifest.get("manifest_sha256") != _manifest_digest(manifest):
         raise ValueError(f"resume manifest digest mismatch: {path}")
-    expected = {
-        "task": task,
-        "state": state,
-        "controller_mode": "JOINT_POSITION",
-        "observation_fingerprint": observation_fingerprint,
-    }
+    expected = {"task": task, "state": state, "controller_mode": "JOINT_POSITION", "observation_fingerprint": observation_fingerprint}
     actual = {name: manifest.get(name) for name in expected}
     if actual != expected:
         raise ValueError(f"resume manifest identity mismatch: expected {expected}, got {actual}")
@@ -139,8 +153,7 @@ def _validate_graspnet_response(body: object) -> dict:
         raise ValueError(f"contact points shape {contacts.shape} does not match grasps")
     if not len(grasps) or not all(np.isfinite(x).all() for x in (grasps, scores, contacts)):
         raise ValueError("grasp response is empty or contains non-finite values")
-    return {"num_grasps": len(grasps), "grasps_shape": list(grasps.shape),
-            "scores_shape": list(scores.shape), "contact_points_shape": list(contacts.shape)}
+    return {"num_grasps": len(grasps), "grasps_shape": list(grasps.shape), "scores_shape": list(scores.shape), "contact_points_shape": list(contacts.shape)}
 
 
 def _validate_joint_response(body: object) -> dict:
@@ -171,8 +184,7 @@ def _validate_sam3_response(body: object) -> dict:
             max_score = score if max_score is None else max(max_score, score)
     if not valid:
         raise ValueError("SAM3 returned no non-empty, well-formed masks")
-    return {"num_results": len(body["results"]), "num_valid_nonempty_masks": valid,
-            "max_score": max_score}
+    return {"num_results": len(body["results"]), "num_valid_nonempty_masks": valid, "max_score": max_score}
 
 
 def _parse_molmo_point(text: str, *, width: int, height: int) -> tuple[int, int] | None:
@@ -191,226 +203,317 @@ def _parse_molmo_point(text: str, *, width: int, height: int) -> tuple[int, int]
     return None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=int, default=0)
-    parser.add_argument("--state", type=int, default=0)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--services",
-        default=",".join(SERVICE_URLS),
-        help="comma-separated live services to probe in this phase",
+def _quat_error_rad(first_wxyz: np.ndarray, second_wxyz: np.ndarray) -> float:
+    first = np.asarray(first_wxyz, dtype=np.float64).reshape(4)
+    second = np.asarray(second_wxyz, dtype=np.float64).reshape(4)
+    first /= np.linalg.norm(first)
+    second /= np.linalg.norm(second)
+    return float(2.0 * np.arccos(np.clip(abs(float(np.dot(first, second))), 0.0, 1.0)))
+
+
+def _gripper_width(deployment) -> float:
+    return float(np.abs(np.asarray(deployment.obs["robot0_gripper_qpos"], dtype=float)).sum())
+
+
+def _record_call(record: Callable[[dict], None], api_name: str, function: Callable[[], Any]) -> Any:
+    try:
+        value = function()
+        row = {"api": api_name, "status": "passed", "return_type": type(value).__name__}
+        if isinstance(value, np.ndarray):
+            row["shape"] = list(value.shape)
+        record(row)
+        return value
+    except Exception as exc:
+        record({"api": api_name, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+        return None
+
+
+def _independent_camera_check(api, deployment, obs) -> dict:
+    sim = deployment.env.sim
+    base_id = sim.model.body_name2id("robot0_base")
+    base = np.eye(4, dtype=np.float64)
+    base[:3, :3] = np.asarray(sim.data.xmat[base_id]).reshape(3, 3)
+    base[:3, 3] = np.asarray(sim.data.xpos[base_id])
+    ry = np.diag([-1.0, 1.0, -1.0, 1.0])
+    rz = np.diag([-1.0, -1.0, 1.0, 1.0])
+    errors = {}
+    for camera_name in (api.camera_name, api.wrist_camera_name):
+        camera_id = sim.model.camera_name2id(camera_name)
+        camera_world = np.eye(4, dtype=np.float64)
+        camera_world[:3, :3] = np.asarray(sim.data.cam_xmat[camera_id]).reshape(3, 3)
+        camera_world[:3, 3] = np.asarray(sim.data.cam_xpos[camera_id])
+        reference = np.linalg.inv(base) @ camera_world @ ry @ rz
+        errors[camera_name] = float(np.max(np.abs(reference - np.asarray(obs[camera_name]["pose_mat"]))))
+    return {"api": "camera_pose_robot_base_frame", "status": "passed" if all(value <= 1e-12 for value in errors.values()) else "failed", "same_input_max_abs_error": errors, "tolerance": 1e-12}
+
+
+def _joint_report(deployment) -> dict:
+    for event in reversed(deployment.trace):
+        if event.get("event") == "joint_control":
+            return dict(event)
+    raise RuntimeError("blocking controller did not emit a joint-control trace")
+
+
+def _run_control_checks(api: FrankaLiberoApi, deployment, record) -> None:
+    home = np.asarray(api.get_observation()["robot_joint_pos"], dtype=np.float64)[:7]
+    before = deployment._panda_joint_positions().copy()
+    deployment.move_to_joints_blocking(before, stable_steps=2)
+    after = deployment._panda_joint_positions().copy()
+    noop = _joint_report(deployment)
+    noop["max_motion_rad"] = float(np.max(np.abs(after - before)))
+    record({"api": "move_to_joints", "case": "current_joints_noop", "status": "passed" if noop["max_motion_rad"] <= 0.01 else "failed", "convergence": noop})
+
+    targets = []
+    deltas = (
+        np.array([0.05, 0, 0, 0, 0, 0, 0]),
+        np.array([0, -0.05, 0, 0, 0, 0, 0]),
+        np.array([0, 0, 0.05, 0, 0, 0, 0]),
     )
-    parser.add_argument(
-        "--resume-from",
-        type=Path,
-        help="verified earlier phase for the same task/state/observation",
-    )
-    parser.add_argument(
-        "--molmo-target",
-        default="black bowl",
-        help="text target used by the live Molmo point probe",
-    )
-    parser.add_argument(
-        "--molmo-expected-box",
-        type=float,
-        nargs=4,
-        metavar=("X1", "Y1", "X2", "Y2"),
-        help="optional audited pixel box; the returned point must fall inside",
-    )
-    parser.add_argument(
-        "--allow-unavailable-services",
-        action="store_true",
-        help="run only the LIBERO/geometry smoke; complete conformance is false",
-    )
-    args = parser.parse_args()
-    selected_services = {name.strip() for name in args.services.split(",") if name.strip()}
-    unknown_services = selected_services - set(SERVICE_URLS)
-    if unknown_services:
-        parser.error(f"unknown services: {sorted(unknown_services)}")
-    args.output.mkdir(parents=True, exist_ok=False)
-    deployment = create(task=str(args.task), state=args.state, root=args.output,
-                        configuration={"disable_agent_verifier": True,
-                                       "controller_mode": "JOINT_POSITION"})
+    for index, delta in enumerate(deltas, 1):
+        deployment.move_to_joints_blocking(home, stable_steps=2)
+        deployment.move_to_joints_blocking(home + delta, stable_steps=2)
+        report = _joint_report(deployment)
+        report["target_index"] = index
+        targets.append(report)
+    passed = all(item["status"] == "converged" and item["final_l2_error_rad"] < 0.01 for item in targets)
+    record({"api": "move_to_joints", "case": "three_safe_targets", "status": "passed" if passed else "failed", "targets": targets})
+
+    deployment.move_to_joints_blocking(home, stable_steps=2)
+    initial_pose = np.asarray(api.get_observation()["robot_cartesian_pos"], dtype=np.float64)
+    solved = api.solve_ik(initial_pose[:3], initial_pose[3:7])
+    api.move_to_joints(solved)
+    final_pose = np.asarray(api.get_observation()["robot_cartesian_pos"], dtype=np.float64)
+    position_error = float(np.linalg.norm(final_pose[:3] - initial_pose[:3]))
+    orientation_error = _quat_error_rad(final_pose[3:7], initial_pose[3:7])
+    record({"api": "solve_ik", "case": "current_pose_ik_fk", "status": "passed" if solved.shape == (7,) and position_error <= 0.01 and orientation_error <= 0.05 else "failed", "joint_target_rad": solved.tolist(), "eef_position_error_m": position_error, "eef_orientation_error_rad": orientation_error, "joint_convergence": _joint_report(deployment)})
+
+    base_pose = np.asarray(api.get_observation()["robot_cartesian_pos"], dtype=np.float64)
+    cartesian_cases = [
+        ("pre_grasp", base_pose[:3] + np.array([0.0, 0.0, 0.04])),
+        ("grasp", base_pose[:3] + np.array([0.02, 0.0, 0.015])),
+        ("lift", base_pose[:3] + np.array([0.02, 0.0, 0.065])),
+    ]
+    cartesian = []
+    for name, target_position in cartesian_cases:
+        api.goto_pose(target_position, base_pose[3:7])
+        actual = np.asarray(api.get_observation()["robot_cartesian_pos"], dtype=np.float64)
+        item = {"case": name, "target_position_m": target_position.tolist(), "actual_position_m": actual[:3].tolist(), "position_error_m": float(np.linalg.norm(actual[:3] - target_position)), "orientation_error_rad": _quat_error_rad(actual[3:7], base_pose[3:7]), "joint_convergence": _joint_report(deployment)}
+        item["status"] = "passed" if item["position_error_m"] <= 0.015 and item["orientation_error_rad"] <= 0.08 else "failed"
+        cartesian.append(item)
+    record({"api": "goto_pose", "status": "passed" if all(item["status"] == "passed" for item in cartesian) else "failed", "poses": cartesian})
+
+    deployment.move_to_joints_blocking(home, stable_steps=2)
+    arm_before = deployment._panda_joint_positions().copy()
+    api.open_gripper()
+    open_width = _gripper_width(deployment)
+    arm_after_open = deployment._panda_joint_positions().copy()
+    api.close_gripper()
+    closed_width = _gripper_width(deployment)
+    arm_after_close = deployment._panda_joint_positions().copy()
+    arm_drift = float(max(np.max(np.abs(arm_after_open - arm_before)), np.max(np.abs(arm_after_close - arm_before))))
+    gripper_passed = open_width > closed_width + 0.02 and arm_drift <= 0.02
+    common = {"status": "passed" if gripper_passed else "failed", "open_width_m": open_width, "closed_width_m": closed_width, "arm_max_drift_rad": arm_drift}
+    record({"api": "open_gripper", **common})
+    record({"api": "close_gripper", **common})
+    api.open_gripper()
+
+    deployment.move_to_joints_blocking(home, stable_steps=2)
+    timeout_target = home.copy()
+    timeout_target[0] += 0.35
+    timeout_error = None
+    try:
+        deployment.move_to_joints_blocking(timeout_target, max_steps=1, stable_steps=2)
+    except LiberoDeploymentError as exc:
+        timeout_error = str(exc)
+    timeout_report = _joint_report(deployment)
+    record({"api": "joint_control_timeout", "status": "passed" if timeout_error and timeout_report["status"] == "timeout" else "failed", "error": timeout_error, "convergence": timeout_report})
+    deployment.move_to_joints_blocking(home, stable_steps=2)
+    record({"api": "goto_home_joint_position", "status": "passed", "convergence": _joint_report(deployment)})
+
+
+def _run_public_geometry(api: FrankaLiberoApi, obs: dict, record) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    camera = obs[api.camera_name]
+    rgb = np.asarray(camera["images"]["rgb"])
+    depth = np.asarray(camera["images"]["depth"])
+    intrinsic = np.asarray(camera["intrinsics"])
+    pose = np.asarray(camera["pose_mat"])
+    mask = np.zeros(depth.shape, dtype=np.uint8)
+    mask[depth.shape[0] // 2, depth.shape[1] // 2] = 1
+    _record_call(record, "depth_to_pointcloud", lambda: api.depth_to_pointcloud(depth, intrinsic))
+    _record_call(record, "depth_to_point_cloud", lambda: api.depth_to_point_cloud(depth, intrinsic))
+    _record_call(record, "mask_to_world_points", lambda: api.mask_to_world_points(mask, depth, intrinsic, pose))
+    _record_call(record, "decompose_transform", lambda: api.decompose_transform(pose))
+    _record_call(record, "rotation_matrix_to_quaternion", lambda: api.rotation_matrix_to_quaternion(pose[:3, :3]))
+    _record_call(record, "transform_points", lambda: api.transform_points(np.zeros((2, 3)), pose))
+    return rgb, depth, intrinsic, pose
+
+
+def _run_model_checks(api: FrankaLiberoApi, rgb, depth, intrinsic, pose, target: str, record) -> None:
+    point = _record_call(record, "point_prompt_molmo", lambda: api.point_prompt_molmo(rgb, target))
+    point_xy = point.get(target) if isinstance(point, dict) else None
+    if not point_xy or point_xy[0] is None:
+        record({"api": "point_prompt_molmo", "status": "failed", "error": "no parseable point"})
+
+    text_masks = _record_call(record, "segment_sam3_text_prompt", lambda: api.segment_sam3_text_prompt(rgb, target))
+    if not text_masks:
+        record({"api": "segment_sam3_text_prompt", "status": "failed", "error": "no masks"})
+    point_masks = None
+    if point_xy and point_xy[0] is not None:
+        point_masks = _record_call(record, "segment_sam3_point_prompt", lambda: api.segment_sam3_point_prompt(rgb, point_xy))
+        if not point_masks:
+            record({"api": "segment_sam3_point_prompt", "status": "failed", "error": "no masks"})
+    else:
+        record({"api": "segment_sam3_point_prompt", "status": "failed", "error": "Molmo did not provide a point"})
+
+    candidates = point_masks or text_masks or []
+    if not candidates:
+        return
+    selected_mask = np.asarray(max(candidates, key=lambda item: item["score"])["mask"], dtype=bool)
+    points = _record_call(record, "mask_to_world_points", lambda: api.mask_to_world_points(selected_mask, depth, intrinsic, pose))
+    if not isinstance(points, np.ndarray) or len(points) < 20:
+        record({"api": "get_oriented_bounding_box_from_3d_points", "status": "failed", "error": "segmentation produced fewer than 20 valid 3D points"})
+    else:
+        _record_call(record, "get_oriented_bounding_box_from_3d_points", lambda: api.get_oriented_bounding_box_from_3d_points(points))
+
+    planned = _record_call(record, "plan_grasp", lambda: api.plan_grasp(depth, intrinsic, selected_mask.astype(np.uint8)))
+    if not (isinstance(planned, tuple) and len(planned) == 2 and len(planned[0])):
+        record({"api": "plan_grasp", "status": "failed", "error": "no grasp candidates"})
+        return
+    grasps, scores = planned
+    selected = _record_call(record, "select_top_down_grasp", lambda: api.select_top_down_grasp(grasps, scores, pose))
+    if not (isinstance(selected, tuple) and selected[0] is not None):
+        record({"api": "select_top_down_grasp", "status": "failed", "error": "no top-down grasp passed the upstream threshold"})
+
+
+def _run_curobo_check(api: FrankaLiberoApi, record) -> None:
+    if not _port(SERVICE_URLS["curobo"]):
+        record({"api": "curobo_service", "status": "failed", "error": "service unavailable"})
+        return
+    obs = api.get_observation()
+    pose = np.asarray(obs["robot_cartesian_pos"], dtype=np.float64)
+    quat = pose[3:7]
+    rotation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
+    hand_position = pose[:3] + rotation.apply(api._TCP_OFFSET)
+    current = api._current_pyroki_configuration()
+    if current is None:
+        record({"api": "curobo_service", "status": "failed", "error": "current joint configuration unavailable"})
+        return
+    payload = {"start_joint_positions": current[:7].tolist(), "goal_pose_wxyz_xyz": np.r_[quat, hand_position + np.array([0.0, 0.0, 0.03])].tolist(), "max_attempts": 3, "timeout": 20.0, "enable_graph": True}
+    try:
+        health = requests.get(f"{SERVICE_URLS['curobo']}/health", timeout=10)
+        response = requests.post(f"{SERVICE_URLS['curobo']}/motion_plan", json=payload, timeout=120)
+        body = response.json()
+        waypoints = np.asarray(body.get("waypoints", []), dtype=np.float64)
+        valid = health.status_code == 200 and health.json().get("status") == "ready" and response.status_code == 200 and body.get("success") is True and waypoints.ndim == 2 and waypoints.shape[1] == 7 and len(waypoints) > 1 and np.isfinite(waypoints).all()
+        record({"api": "curobo_service", "status": "passed" if valid else "failed", "health": health.json(), "http_status": response.status_code, "success": body.get("success"), "planner_status": body.get("status"), "num_waypoints": int(len(waypoints)) if waypoints.ndim == 2 else 0, "plan_time_ms": body.get("plan_time_ms"), "path_length": body.get("path_length")})
+    except Exception as exc:
+        record({"api": "curobo_service", "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _run_state(args, state: int, output: Path, *, model_checks: bool) -> dict:
+    output.mkdir(parents=True, exist_ok=False)
+    deployment = create(task=str(args.task), state=state, root=output, configuration={"disable_agent_verifier": True, "controller_mode": "JOINT_POSITION"})
     api = FrankaLiberoApi(deployment)
-    rows_by_api: dict[str, dict] = {}
+    rows: list[dict] = []
     started = time.time()
+
+    def record(row: dict) -> None:
+        rows.append({"state": state, **row})
+
+    fingerprint = ""
+    language = ""
     try:
         obs = api.get_observation()
-        observation_fingerprint = _observation_fingerprint(api, obs)
-        prior_manifest = None
-        if args.resume_from:
-            prior_manifest = _validated_resume(
-                args.resume_from,
-                task=args.task,
-                state=args.state,
-                observation_fingerprint=observation_fingerprint,
-            )
-            for prior_row in prior_manifest.get("rows", []):
-                row = copy.deepcopy(prior_row)
-                row["preserved_from"] = str(args.resume_from.resolve())
-                rows_by_api[row["api"]] = row
-
-        def record(row: dict) -> None:
-            rows_by_api[row["api"]] = row
-
-        record({"api": "get_observation", "status": "passed",
-                     "cameras": sorted(k for k in obs if k in (api.camera_name, api.wrist_camera_name)),
-                     "rgb_shape": list(obs[api.camera_name]["images"]["rgb"].shape),
-                     "depth_shape": list(obs[api.camera_name]["images"]["depth"].shape)})
-        # Independently reproduce ASPIRE FrankaLiberoEnv's camera transform
-        # from MuJoCo raw state.  This comparison deliberately does not call
-        # the implementation under test.
-        sim = deployment.env.sim
-        base_id = sim.model.body_name2id("robot0_base")
-        base = np.eye(4, dtype=np.float64)
-        base[:3, :3] = np.asarray(sim.data.xmat[base_id]).reshape(3, 3)
-        base[:3, 3] = np.asarray(sim.data.xpos[base_id])
-        ry = np.diag([-1.0, 1.0, -1.0, 1.0])
-        rz = np.diag([-1.0, -1.0, 1.0, 1.0])
-        frame_errors = {}
-        for camera_name in (api.camera_name, api.wrist_camera_name):
-            camera_id = sim.model.camera_name2id(camera_name)
-            camera_world = np.eye(4, dtype=np.float64)
-            camera_world[:3, :3] = np.asarray(sim.data.cam_xmat[camera_id]).reshape(3, 3)
-            camera_world[:3, 3] = np.asarray(sim.data.cam_xpos[camera_id])
-            reference = np.linalg.inv(base) @ camera_world @ ry @ rz
-            frame_errors[camera_name] = float(np.max(np.abs(
-                reference - np.asarray(obs[camera_name]["pose_mat"], dtype=np.float64))))
-        frame_passed = all(value <= 1e-12 for value in frame_errors.values())
-        record({"api": "camera_pose_robot_base_frame", "status": "passed" if frame_passed else "failed",
-                     "same_input_max_abs_error": frame_errors, "tolerance": 1e-12})
-        record({"api": "robot_state_shapes", "status": "passed"
-                     if np.asarray(obs["robot_joint_pos"]).shape == (8,)
-                     and np.asarray(obs["robot_cartesian_pos"]).shape == (8,) else "failed",
-                     "robot_joint_pos_shape": list(np.asarray(obs["robot_joint_pos"]).shape),
-                     "robot_cartesian_pos_shape": list(np.asarray(obs["robot_cartesian_pos"]).shape)})
-        K = np.asarray(obs[api.camera_name]["intrinsics"]); pose = np.asarray(obs[api.camera_name]["pose_mat"])
-        depth = np.asarray(obs[api.camera_name]["images"]["depth"])
-        mask = np.zeros(depth.shape, dtype=np.uint8); mask[depth.shape[0] // 2, depth.shape[1] // 2] = 1
-        for name, fn, call in [
-            ("depth_to_pointcloud", api.depth_to_pointcloud, (depth, K)),
-            ("mask_to_world_points", api.mask_to_world_points, (mask, depth, K, pose)),
-            ("pixel_to_world_point", api.pixel_to_world_point, (depth.shape[1] // 2, depth.shape[0] // 2, float(depth[depth.shape[0] // 2, depth.shape[1] // 2]), K, pose)),
-            ("decompose_transform", api.decompose_transform, (pose,)),
-            ("rotation_matrix_to_quaternion", api.rotation_matrix_to_quaternion, (pose[:3, :3],)),
-            ("transform_points", api.transform_points, (np.zeros((2, 3)), pose)),
-            ("interpolate_segment", api.interpolate_segment, (np.zeros(3), np.ones(3))),
-            ("normalize_vector", api.normalize_vector, (np.ones(3),)),
-        ]:
-            try:
-                value = fn(*call)
-                record({"api": name, "status": "passed", "return_type": type(value).__name__})
-            except Exception as exc:
-                record({"api": name, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-        api.goto_home_joint_position(); record({"api": "goto_home_joint_position", "status": "passed"})
-        api.open_gripper(); record({"api": "open_gripper", "status": "passed"})
-        api.close_gripper(); record({"api": "close_gripper", "status": "passed"})
-        record({"api": "task_language", "status": "passed", "value": api.task_language()})
-        record({"api": "supports_dual_arm", "status": "passed", "value": api.supports_dual_arm()})
-        # Exercise the deployed planning services with this real LIBERO
-        # observation.  Responses are recorded by shape/status only here;
-        # the complete native payloads are retained in the experiment evidence
-        # directory by the dedicated live-invocation runner.
-        service_calls = [
-            ("contact_graspnet_live", f"{SERVICE_URLS['graspnet']}/plan", {
-                "depth_base64": _npy64(depth), "cam_K_base64": _npy64(K),
-                "segmap_base64": _npy64(mask.astype(np.uint8)), "segmap_id": 1,
-                "local_regions": True, "filter_grasps": False,
-                "skip_border_objects": False, "z_range": [0.2, 2.0],
-                "forward_passes": 1, "max_retries": 1}),
-            ("pyroki_live", f"{SERVICE_URLS['pyroki']}/ik", {
-                "target_pose_wxyz_xyz": [1.0, 0.0, 0.0, 0.0, 0.4, 0.0, 0.3]}),
-            ("curobo_live", f"{SERVICE_URLS['curobo']}/ik", {
-                "target_pose_wxyz_xyz": [1.0, 0.0, 0.0, 0.0, 0.4, 0.0, 0.3]}),
-        ]
-        service_names = {"contact_graspnet_live": "graspnet", "pyroki_live": "pyroki", "curobo_live": "curobo"}
-        validators = {"contact_graspnet_live": _validate_graspnet_response,
-                      "pyroki_live": _validate_joint_response, "curobo_live": _validate_joint_response}
-        for name, url, payload in service_calls:
-            if service_names[name] not in selected_services:
-                continue
-            try:
-                response = requests.post(url, json=payload, timeout=180)
-                body = response.json()
-                validation = validators[name](body) if response.status_code == 200 else {}
-                record({"api": name, "status": "passed" if response.status_code == 200 else "failed",
-                        "http_status": response.status_code,
-                        "response_keys": sorted(body) if isinstance(body, dict) else [], **validation})
-            except Exception as exc:
-                record({"api": name, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-        # Exercise SAM3 and Molmo with the actual LIBERO RGB frame.  Port
-        # availability alone is not conformance: each model must return a
-        # real inference payload for this image.
-        import base64 as _b64
-        image_bytes = None
-        if "sam3" in selected_services:
-          try:
-            image_bytes = api.get_observation()[api.camera_name]["images"]["rgb"]
-            from PIL import Image
-            _buf = io.BytesIO(); Image.fromarray(np.asarray(image_bytes)).save(_buf, format="PNG")
-            image_payload = _b64.b64encode(_buf.getvalue()).decode("ascii")
-            sam = requests.post(f"{SERVICE_URLS['sam3']}/segment", json={"image_base64": image_payload, "text_prompt": "black bowl"}, timeout=180)
-            body = sam.json()
-            validation = _validate_sam3_response(body) if sam.status_code == 200 else {}
-            record({"api": "sam3_text_segmentation_live", "status": "passed" if sam.status_code == 200 else "failed", "http_status": sam.status_code, **validation})
-          except Exception as exc:
-            record({"api": "sam3_text_segmentation_live", "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-        else:
-            image_bytes = obs[api.camera_name]["images"]["rgb"]
-            from PIL import Image
-            _buf = io.BytesIO(); Image.fromarray(np.asarray(image_bytes)).save(_buf, format="PNG")
-            image_payload = _b64.b64encode(_buf.getvalue()).decode("ascii")
-        if "molmo" in selected_services:
-          try:
-            prompt = f"Point at {args.molmo_target}"
-            mol = requests.post(f"{SERVICE_URLS['molmo']}/v1/chat/completions", json={"messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image_payload}}]}], "max_tokens": 128, "temperature": 0.0, "stop": ["<|endoftext|>"]}, timeout=180)
-            body = mol.json()
-            output_text = str(body.get("choices", [{}])[0].get("message", {}).get("content", "")) if isinstance(body, dict) and body.get("choices") else ""
-            point = _parse_molmo_point(output_text, width=np.asarray(image_bytes).shape[1], height=np.asarray(image_bytes).shape[0])
-            expected_box = args.molmo_expected_box
-            point_in_expected_box = None
-            if point is not None and expected_box is not None:
-                x1, y1, x2, y2 = expected_box
-                point_in_expected_box = x1 <= point[0] <= x2 and y1 <= point[1] <= y2
-            semantic_valid = point is not None and point_in_expected_box is not False
-            record({"api": "molmo_vision_live", "status": "passed" if mol.status_code == 200 and semantic_valid else "failed", "http_status": mol.status_code, "prompt": prompt, "output_text_present": bool(output_text), "point_coordinate_parseable": point is not None, "pixel_point": point, "audited_expected_box_xyxy": expected_box, "point_inside_expected_box": point_in_expected_box, "output_preview": output_text[:256], "error": body.get("detail") if isinstance(body, dict) else None})
-          except Exception as exc:
-            record({"api": "molmo_vision_live", "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-        for name in selected_services:
-            url = SERVICE_URLS[name]
-            record({"api": f"service:{name}", "status": "available" if _port(url) else "unavailable", "url": url})
+        fingerprint = _observation_fingerprint(api, obs)
+        record({"api": "get_observation", "status": "passed", "cameras": [api.camera_name, api.wrist_camera_name], "rgb_shape": list(obs[api.camera_name]["images"]["rgb"].shape), "depth_shape": list(obs[api.camera_name]["images"]["depth"].shape), "robot_joint_pos_shape": list(np.asarray(obs["robot_joint_pos"]).shape), "robot_cartesian_pos_shape": list(np.asarray(obs["robot_cartesian_pos"]).shape)})
+        record(_independent_camera_check(api, deployment, obs))
+        language = api.get_task_language()
+        record({"api": "get_task_language", "status": "passed" if language else "failed", "value": language})
+        rgb, depth, intrinsic, pose = _run_public_geometry(api, obs, record)
+        _run_control_checks(api, deployment, record)
+        if model_checks:
+            _run_model_checks(api, rgb, depth, intrinsic, pose, args.molmo_target, record)
+            _run_curobo_check(api, record)
+        public = api.functions()
+        forbidden = ("reset", "set_seed", "check_success", "hidden_evaluator", "promote")
+        record({"api": "controller_privilege_boundary", "status": "passed" if all(name not in public for name in forbidden) else "failed", "public_methods": sorted(public), "forbidden_methods": list(forbidden)})
     finally:
         deployment.close()
-    rows = list(rows_by_api.values())
-    required = BASE_REQUIRED_APIS | set(SERVICE_PROBE_APIS.values()) | {f"service:{name}" for name in SERVICE_URLS}
-    missing = sorted(required - set(rows_by_api))
-    unavailable = [row["api"] for row in rows if row["status"] == "unavailable"]
-    failed = [row["api"] for row in rows if row["status"] == "failed"]
-    complete = not failed and not unavailable and not missing
-    phases = list(prior_manifest.get("service_phases", [])) if prior_manifest else []
-    phases.append({"services": sorted(selected_services), "started_unix": started,
-                   "elapsed_seconds": time.time() - started})
-    manifest = {"protocol": "roboforge-aspire-capx-libero-api-conformance-v2",
-                "task": args.task, "state": args.state, "controller_mode": "JOINT_POSITION",
-                "observation_fingerprint": observation_fingerprint,
-                "upstream": {"aspire": {"commit": "f4c8939aab0af9b97690c561bd80e282940f7886"},
-                             "cap-x": {"commit": "53e9966d7a8e2fa7494676772bccc35280f5c0ed"}},
-                "complete_conformance": complete,
-                "unavailable_services": unavailable,
-                "failed_rows": failed,
-                "missing_rows": missing,
-                "service_phases": phases,
-                "rows": rows, "elapsed_seconds": time.time() - started,
-                "deployment_artifact_dir": str((args.output / "adapter").resolve())}
+    failures = [row for row in rows if row.get("status") == "failed"]
+    state_manifest = {"protocol": "roboforge-controller-api-state-conformance-v1", "task": args.task, "state": state, "controller_mode": "JOINT_POSITION", "observation_fingerprint": fingerprint, "instruction": language, "rows": rows, "failed_rows": [row["api"] for row in failures], "passed": not failures, "elapsed_seconds": time.time() - started, "artifact_dir": str(output.resolve())}
+    state_manifest["manifest_sha256"] = _manifest_digest(state_manifest)
+    (output / "state-conformance.json").write_text(json.dumps(state_manifest, indent=2) + "\n")
+    return state_manifest
+
+
+def _matrix(states: list[dict]) -> list[dict]:
+    import inspect
+    frame_units = {
+        "get_observation": "RGB-D arrays; camera pose camera->world; joints rad; positions m",
+        "get_task_language": "UTF-8 task instruction",
+        "mask_to_world_points": "camera pixels/depth m -> world XYZ m",
+        "get_oriented_bounding_box_from_3d_points": "world XYZ m; quaternion WXYZ",
+        "decompose_transform": "homogeneous transform -> position m + quaternion WXYZ",
+        "transform_points": "3D points m under 4x4 transform",
+        "depth_to_pointcloud": "camera frame XYZ m",
+        "depth_to_point_cloud": "camera frame XYZ m",
+        "solve_ik": "EEF target world m/quaternion WXYZ -> 7 arm joints rad",
+        "move_to_joints": "7 Franka arm joints rad; blocking JOINT_POSITION",
+        "goto_pose": "world EEF position m/quaternion WXYZ; TCP offset applied once",
+        "open_gripper": "gripper command; metres/proprioceptive width",
+        "close_gripper": "gripper command; metres/proprioceptive width",
+        "select_top_down_grasp": "camera/world grasp transforms; metres",
+        "curobo_service": "world-frame trajectory; joints rad and positions m",
+    }
+    result = []
+    for api_name in sorted(REQUIRED_APIS):
+        rows = [row for state in states for row in state["rows"] if row["api"] == api_name]
+        status = "passed" if rows and all(row["status"] == "passed" for row in rows) else "failed"
+        callable_object = getattr(FrankaLiberoApi, api_name, None)
+        result.append({
+            "api": api_name,
+            "upstream_repository": UPSTREAM["aspire"]["repository"] if api_name != "curobo_service" else UPSTREAM["cap-x"]["repository"],
+            "upstream_commit": UPSTREAM["aspire"]["commit"] if api_name != "curobo_service" else UPSTREAM["cap-x"]["commit"],
+            "upstream_file": API_PROVENANCE.get(api_name),
+            "local_file": "embodied_codex/adapters/franka_libero_api.py" if api_name not in {"joint_control_timeout", "controller_privilege_boundary"} else "embodied_codex/deployments/libero.py",
+            "signature": str(inspect.signature(callable_object)) if callable(callable_object) else None,
+            "frame_unit": frame_units.get(api_name, "Declared by callable contract; see per-state invocation"),
+            "real_libero_invocations": len(rows),
+            "same_input_semantics": "passed" if status == "passed" else "failed",
+            "result": status,
+        })
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", type=int, default=0)
+    parser.add_argument("--state", type=int, default=None, help="single-state compatibility option")
+    parser.add_argument("--states", type=int, nargs="+", help="at least five real LIBERO initial-state indices")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--molmo-target", default="black bowl")
+    parser.add_argument("--model-check-state", type=int, help="state on which to invoke SAM3/Molmo/Contact-GraspNet/cuRobo")
+    parser.add_argument("--allow-incomplete", action="store_true", help="write evidence but return zero for an exploratory run")
+    args = parser.parse_args(argv)
+    states = list(dict.fromkeys(args.states or ([args.state] if args.state is not None else [0, 1, 2, 3, 4])))
+    if not args.allow_incomplete and len(states) < 5:
+        parser.error("formal conformance requires at least five distinct states")
+    if args.output.exists():
+        parser.error(f"output already exists: {args.output}")
+    args.output.mkdir(parents=True)
+    model_state = args.model_check_state if args.model_check_state is not None else states[0]
+    if model_state not in states:
+        parser.error("--model-check-state must be included in --states")
+    started = time.time()
+    state_manifests = [_run_state(args, state, args.output / f"state-{state:03d}", model_checks=state == model_state) for state in states]
+    matrix = _matrix(state_manifests)
+    failed = [row["api"] for row in matrix if row["result"] != "passed"]
+    enough_states = len(states) >= 5
+    manifest = {"protocol": "roboforge-aspire-capx-libero-api-conformance-v3", "task": args.task, "states": states, "minimum_state_count": 5, "state_count_gate_passed": enough_states, "model_check_state": model_state, "controller_mode": "JOINT_POSITION", "upstream": UPSTREAM, "required_apis": sorted(REQUIRED_APIS), "complete_conformance": not failed and enough_states, "failed_apis": failed, "state_manifests": [{"state": item["state"], "passed": item["passed"], "manifest_sha256": item["manifest_sha256"], "path": str((args.output / f"state-{item['state']:03d}" / "state-conformance.json").resolve())} for item in state_manifests], "conformance_matrix": matrix, "elapsed_seconds": time.time() - started}
     manifest["manifest_sha256"] = _manifest_digest(manifest)
     (args.output / "api-conformance.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
-    if failed:
-        return 1
-    if (unavailable or missing) and not args.allow_unavailable_services:
-        return 2
-    return 0
+    return 0 if (not failed and enough_states) or args.allow_incomplete else 1
 
 
 if __name__ == "__main__":

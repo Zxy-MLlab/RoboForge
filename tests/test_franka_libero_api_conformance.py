@@ -39,6 +39,7 @@ def test_public_api_contains_upstream_methods_and_signatures():
     names = set(LIBERO_ROBOT_SDK_CONTRACT["controller_api"]["methods"])
     api = FrankaLiberoApi(Env())
     assert names.issubset(api.functions())
+    assert api.get_task_language() == api.task_language()
     assert str(inspect.signature(api.goto_pose)) == "(position: 'np.ndarray', quaternion_wxyz: 'np.ndarray', z_approach: 'float' = 0.0) -> 'None'"
     assert str(inspect.signature(api.get_object_pose)) == "(object_name: 'str', use_multiview: 'bool' = True)"
 
@@ -153,7 +154,7 @@ def test_interpolate_segment_matches_upstream_zero_distance_semantics():
 def test_gripper_is_blocking_and_dual_arm_fails_explicitly_when_unavailable():
     env = Env(); api = FrankaLiberoApi(env)
     api.open_gripper(); api.close_gripper()
-    assert [x[0] for x in env.calls].count("step") == 100
+    assert [x[0] for x in env.calls].count("step") == 60
     assert api.supports_dual_arm() is False
     try:
         api.goto_pose_arm1(np.zeros(3), np.array([1., 0, 0, 0]))
@@ -219,7 +220,11 @@ def test_upstream_http_service_semantics_are_preserved(monkeypatch):
     monkeypatch.setattr("embodied_codex.adapters.franka_libero_api._post", fake_post)
     masks = api.segment_sam3_point_prompt(rgb, (1.0, 0.0))
     assert masks[0]["mask"].dtype == bool and masks[0]["mask"].shape == (2, 3)
-    np.testing.assert_allclose(api.solve_ik(np.array([.1, .2, .3]), np.array([1., 0, 0, 0])), np.zeros(7))
+    expected = np.zeros(7); expected[6] = np.pi / 2.0
+    np.testing.assert_allclose(
+        api.solve_ik(np.array([.1, .2, .3]), np.array([1., 0, 0, 0])),
+        expected,
+    )
 
 
 def test_goto_pose_discards_pyroki_gripper_coordinate(monkeypatch):
@@ -230,15 +235,17 @@ def test_goto_pose_discards_pyroki_gripper_coordinate(monkeypatch):
     def fake_post(url, payload, timeout=120):
         assert url.endswith("/ik")
         previous.append(payload["prev_cfg"])
-        return {"joint_positions": list(range(8))}
+        return {"joint_positions": [0, 1, 2, 3, 4, 5, -0.7, 0.02]}
 
     monkeypatch.setattr("embodied_codex.adapters.franka_libero_api._post", fake_post)
     api.goto_pose(np.array([.1, .2, .3]), np.array([1., 0, 0, 0]), z_approach=.1)
     assert env.calls[0][0] == "move_to_joints_blocking"
-    np.testing.assert_array_equal(env.calls[0][1], np.arange(7))
-    np.testing.assert_array_equal(api.cfg, np.arange(8))
+    np.testing.assert_allclose(
+        env.calls[0][1], [0, 1, 2, 3, 4, 5, -0.7 + np.pi / 2.0]
+    )
+    np.testing.assert_allclose(api.cfg, [0, 1, 2, 3, 4, 5, -0.7, 0.02])
     assert previous[0] is None
-    assert previous[1] == list(range(8))
+    assert previous[1] == [0, 1, 2, 3, 4, 5, -0.7, 0.02]
 
 
 def test_contact_graspnet_pointcloud_payload_and_post_transform(monkeypatch):
@@ -362,11 +369,12 @@ def test_dual_arm_methods_forward_only_when_provider_supports_them(monkeypatch):
     api.move_to_joints_both(np.zeros(7), np.ones(7))
     api.move_to_joints_arm1(np.ones(7))
     assert [x[0] for x in env.calls] == ["both", "arm1"]
-    api._solve_ik_with_prev = lambda position, quaternion_wxyz, prev_cfg=None: np.arange(7.)
-    np.testing.assert_array_equal(api.solve_ik_arm0(np.zeros(3), np.array([1., 0, 0, 0])), np.arange(7.))
+    api._solve_ik_with_prev = lambda position, quaternion_wxyz, prev_cfg=None: np.array([0., 1., 2., 3., 4., 5., -0.7, 0.02])
+    expected = np.array([0., 1., 2., 3., 4., 5., -0.7 + np.pi / 2.0])
+    np.testing.assert_allclose(api.solve_ik_arm0(np.zeros(3), np.array([1., 0, 0, 0])), expected)
 
     class TransformDual(DualEnv):
         arm0_to_arm1_transform = np.eye(4)
     api = FrankaLiberoApi(TransformDual())
-    api._solve_ik_with_prev = lambda position, quaternion_wxyz, prev_cfg=None: np.arange(7.)
-    np.testing.assert_array_equal(api.solve_ik_arm1(np.zeros(3), np.array([1., 0, 0, 0])), np.arange(7.))
+    api._solve_ik_with_prev = lambda position, quaternion_wxyz, prev_cfg=None: np.array([0., 1., 2., 3., 4., 5., -0.7, 0.02])
+    np.testing.assert_allclose(api.solve_ik_arm1(np.zeros(3), np.array([1., 0, 0, 0])), expected)

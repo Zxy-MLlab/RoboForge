@@ -127,6 +127,7 @@ def write_public_status(
     maximum = int(status.get("max_trials", 0))
     payload: dict[str, Any] = {
         "schema_version": 1,
+        "physical_attempts": int(status.get("physical_attempts", trials)),
         "physical_trials": trials,
         "max_physical_trials": maximum,
         "remaining_physical_trials": max(0, maximum - trials),

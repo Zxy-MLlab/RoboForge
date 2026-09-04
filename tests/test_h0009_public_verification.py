@@ -3,7 +3,7 @@ import json
 import pytest
 
 from embodied_codex.fake_adapter import FakeAdapter
-from embodied_codex.kernel.agent_loop import AgentLoop, LoopBudget, ProtocolError
+from embodied_codex.legacy.agent_loop import AgentLoop, LoopBudget, ProtocolError
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore

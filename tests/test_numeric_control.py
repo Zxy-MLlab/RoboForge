@@ -94,6 +94,7 @@ def test_blocking_joint_control_reads_live_sim_qpos_like_upstream():
     )
     deployment.obs = {"robot0_joint_pos": np.full(7, 99.0)}
     deployment._gripper_fraction = 1.0
+    deployment.trace = []
 
     def step(action):
         # The JOINT_POSITION controller receives a scaled delta; emulate one
@@ -104,3 +105,36 @@ def test_blocking_joint_control_reads_live_sim_qpos_like_upstream():
     deployment._sim_step = step
     deployment.move_to_joints_blocking(np.arange(7) / 10.0, max_steps=2)
     np.testing.assert_allclose(qpos, np.arange(7) / 10.0)
+    report = deployment.trace[-1]
+    assert report["event"] == "joint_control"
+    assert report["status"] == "converged"
+    assert report["steps_commanded"] == 1
+    assert report["final_l2_error_rad"] == pytest.approx(0.0)
+    assert len(report["samples"]) == 2
+
+
+def test_blocking_joint_control_timeout_is_explicit_and_traced():
+    deployment = object.__new__(LiberoDeployment)
+    qpos = np.zeros(7, dtype=float)
+
+    class Model:
+        @staticmethod
+        def get_joint_qpos_addr(name):
+            return int(name.removeprefix("robot0_joint")) - 1
+
+    deployment.env = SimpleNamespace(
+        sim=SimpleNamespace(model=Model(), data=SimpleNamespace(qpos=qpos)),
+        robots=[SimpleNamespace(controller=SimpleNamespace(name="JOINT_POSITION"))],
+        control_freq=20,
+    )
+    deployment.obs = {"robot0_joint_pos": qpos}
+    deployment._gripper_fraction = 1.0
+    deployment.trace = []
+    deployment._sim_step = lambda _action: None
+
+    with pytest.raises(LiberoDeploymentError, match="did not converge"):
+        deployment.move_to_joints_blocking(np.ones(7) * 0.1, max_steps=2)
+    report = deployment.trace[-1]
+    assert report["status"] == "timeout"
+    assert report["steps_commanded"] == 2
+    assert report["final_l2_error_rad"] > 0.0

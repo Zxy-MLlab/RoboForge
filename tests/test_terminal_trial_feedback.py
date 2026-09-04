@@ -58,6 +58,48 @@ def test_preflight_failure_does_not_consume_physical_trial(tmp_path):
     assert adapter.reset_count == adapter.controller_runs == 0
 
 
+class ResetFailureAdapter(FakeAdapter):
+    def reset_to_s0(self):
+        self.reset_count += 1
+        raise RuntimeError("simulator reset failed")
+
+
+def test_environment_failure_is_evidenced_but_does_not_consume_task_budget(tmp_path):
+    controller = tmp_path / "controller.py"
+    controller.write_text("def run(robot): return {}\n")
+    service = ExperimentService(tmp_path / "run", ResetFailureAdapter(), max_trials=1)
+
+    evidence = service.run_controller(
+        request_id="reset-failure", controller_path=controller, intent="exercise reset"
+    )
+
+    lifecycle = evidence.public["lifecycle"]
+    assert lifecycle["failure_class"] == "environment_failure"
+    assert lifecycle["task_budget_consumed"] is False
+    assert lifecycle["controller_started"] is False
+    assert service.status()["physical_attempts"] == 1
+    assert service.status()["physical_trials"] == 0
+
+
+def test_controller_failure_consumes_task_budget_after_episode_start(tmp_path):
+    controller = tmp_path / "controller.py"
+    controller.write_text("def run(robot): return {}\n")
+    adapter = FakeAdapter()
+    adapter.raise_during_execution = RuntimeError("controller process failed")
+    service = ExperimentService(tmp_path / "run", adapter, max_trials=1)
+
+    evidence = service.run_controller(
+        request_id="controller-failure", controller_path=controller, intent="execute"
+    )
+
+    lifecycle = evidence.public["lifecycle"]
+    assert lifecycle["failure_class"] == "controller_failure"
+    assert lifecycle["task_budget_consumed"] is True
+    assert lifecycle["controller_started"] is True
+    assert service.status()["physical_attempts"] == 1
+    assert service.status()["physical_trials"] == 1
+
+
 def test_preflight_artifact_captures_terminal_stdout(tmp_path):
     controller = tmp_path / "controller.py"
     controller.write_text("def run(robot): return robot.use('bad:v1', {'limit': 20})\n")

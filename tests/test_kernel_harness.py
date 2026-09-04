@@ -3,7 +3,7 @@ import json
 import sys
 from pathlib import Path
 
-from embodied_codex.kernel.agent_loop import AgentLoop
+from embodied_codex.legacy.agent_loop import AgentLoop
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore
@@ -323,7 +323,7 @@ def test_benchmark_policies_execute_before_after_and_sealed_evaluator(tmp_path):
 
 
 def test_sealed_evaluation_checks_every_campaign_case(tmp_path):
-    from embodied_codex.kernel.campaign import CampaignAdapter
+    from embodied_codex.legacy.campaign import CampaignAdapter
 
     first, second = SealedAdapter(), SealedAdapter()
     first.value = second.value = 1

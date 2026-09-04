@@ -55,24 +55,32 @@ def materialize_trial(
 
     frozen = target / "frozen_source"
     frozen.mkdir(exist_ok=True)
-    if controller_path is not None:
-        source = Path(controller_path).resolve()
-        if source.is_file():
-            destination = frozen / source.name
-            data = source.read_bytes()
-            if evidence.controller_sha256 and hashlib.sha256(data).hexdigest() != evidence.controller_sha256:
-                raise ProtocolError("Controller changed before trial materialization")
-            destination.write_bytes(data)
 
     keyframes = target / "keyframes"
     keyframes.mkdir(exist_ok=True)
     rendered = []
+    frozen_bundle_files = 0
+    bundle_manifest_path = None
     for handle in evidence.artifacts:
         data = service.read_artifact(handle)
         if hashlib.sha256(data).hexdigest() != handle.sha256:
             raise ProtocolError("artifact content digest mismatch")
-        name = Path(handle.name).name or handle.sha256
-        if name == "rollout.mp4" or handle.media_type == "video/mp4":
+        raw_name = str(handle.name)
+        name = Path(raw_name).name or handle.sha256
+        if raw_name == "candidate_bundle/manifest.json":
+            destination = target / "candidate_bundle.json"
+            bundle_manifest_path = destination
+        elif raw_name.startswith("candidate_bundle/files/"):
+            relative = Path(raw_name.removeprefix("candidate_bundle/files/"))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ProtocolError("Candidate Bundle artifact escaped frozen_source")
+            destination = (frozen / relative).resolve()
+            try:
+                destination.relative_to(frozen.resolve())
+            except ValueError as exc:
+                raise ProtocolError("Candidate Bundle artifact escaped frozen_source") from exc
+            frozen_bundle_files += 1
+        elif name == "rollout.mp4" or handle.media_type == "video/mp4":
             destination = target / "rollout.mp4"
         elif name == "trajectory.npz":
             destination = target / "trajectory.npz"
@@ -83,6 +91,19 @@ def materialize_trial(
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.exists(): destination.write_bytes(data)
         rendered.append({**handle.__dict__, "local_path": str(destination)})
+
+    # Legacy evidence created before Candidate Bundles still receives a
+    # best-effort single-file snapshot. Canonical trials always take the
+    # immutable artifact path above, so later Workspace edits cannot change
+    # what is materialized as executed source.
+    if frozen_bundle_files == 0 and controller_path is not None:
+        source = Path(controller_path).resolve()
+        if source.is_file():
+            destination = frozen / source.name
+            data = source.read_bytes()
+            if evidence.controller_sha256 and hashlib.sha256(data).hexdigest() != evidence.controller_sha256:
+                raise ProtocolError("Controller changed before trial materialization")
+            destination.write_bytes(data)
 
     action_trace = list(public_result.get("action_trace") or [])
     trajectory_synthetic = False
@@ -99,6 +120,7 @@ def materialize_trial(
     (target / "stderr.log").write_text(stderr, encoding="utf-8")
     result = {**lifecycle, "trial_id": trial_id, "evidence_ref": evidence.ref,
               "controller_sha256": evidence.controller_sha256,
+              "candidate_bundle_digest": evidence.candidate_bundle_digest,
               "physical_verification": evidence.physical_verification,
               "trace_path": str(target / "trace.json"),
               "first_error_path": str(target / "first_error.json")}
@@ -108,6 +130,9 @@ def materialize_trial(
     (target / "stdout.log").write_text(stdout, encoding="utf-8")
     _json(target / "result.json", result)
     _json(target / "manifest.json", {"schema_version": 1, "trial_id": trial_id,
+          "candidate_bundle_digest": evidence.candidate_bundle_digest,
+          "candidate_bundle_manifest": str(bundle_manifest_path) if bundle_manifest_path else None,
+          "frozen_bundle_file_count": frozen_bundle_files,
           "evidence": public, "artifacts": rendered, "paths": {
               "trace": str(target / "trace.json"), "first_error": str(target / "first_error.json"),
               "actions": str(target / "action_receipts.jsonl"), "result": str(target / "result.json"),

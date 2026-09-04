@@ -11,8 +11,8 @@ import sys
 import pytest
 
 from embodied_codex.kernel.assets import CapabilityLibrary
-from embodied_codex.kernel.agent_loop import LoopBudget
-from embodied_codex.kernel.campaign import CampaignAdapter, CampaignRunner
+from embodied_codex.legacy.agent_loop import LoopBudget
+from embodied_codex.legacy.campaign import CampaignAdapter, CampaignRunner
 from embodied_codex.kernel.capability_manager import CapabilityError, CapabilityManager
 from embodied_codex.kernel.cas import ContentAddressedStore
 from embodied_codex.kernel.context import ContextBuilder
@@ -277,7 +277,7 @@ from pathlib import Path
 import signal
 import sys
 
-from embodied_codex.kernel.agent_loop import AgentLoop, LoopBudget
+from embodied_codex.legacy.agent_loop import AgentLoop, LoopBudget
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore

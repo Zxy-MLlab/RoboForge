@@ -1,4 +1,4 @@
-"""Canonical model-driven agent loop with structured function calling."""
+"""Legacy v1 model-driven loop retained only for historical reproduction."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,13 +13,13 @@ import shutil
 import time
 from typing import Any, Mapping
 
-from .capability_manager import CapabilityManager
-from .context import ContextBuilder
-from .context_window import ContextWindowManager
-from .evidence import AgentEvidence, HarnessMetadata, build_execution_digest
-from .events import EventStore
-from .recovery import load_checkpoint, save_checkpoint
-from .tools import CONSEQUENCE_LEVELS, ToolRegistry
+from ..kernel.capability_manager import CapabilityManager
+from ..kernel.context import ContextBuilder
+from ..kernel.context_window import ContextWindowManager
+from ..kernel.evidence import AgentEvidence, HarnessMetadata, build_execution_digest
+from ..kernel.events import EventStore
+from ..kernel.recovery import load_checkpoint, save_checkpoint
+from ..kernel.tools import CONSEQUENCE_LEVELS, ToolRegistry
 
 
 @dataclass

@@ -74,7 +74,8 @@ def _bounded_public(value: Any, *, depth: int = 0) -> Any:
             str(key): _bounded_public(item, depth=depth + 1)
             for key, item in list(value.items())[:64]
             if str(key) not in _PRIVATE_EXECUTION_KEYS
-            and not str(key).startswith("_harness_")
+            and str(key).casefold() not in {"sim.data", "sim.model"}
+            and not str(key).casefold().startswith(("_harness_", "privileged_"))
         }
     if isinstance(value, (list, tuple)):
         return [_bounded_public(item, depth=depth + 1) for item in list(value)[:128]]
@@ -354,11 +355,12 @@ class LiberoDeployment:
         gripper = np.eye(4, dtype=np.float64)
         gripper[:3, :3] = np.asarray(sim.data.xmat[gripper_id]).reshape(3, 3)
         gripper[:3, 3] = np.asarray(sim.data.xpos[gripper_id])
-        hand = base_inv @ gripper
-        tool = np.eye(4, dtype=np.float64)
-        tool[:3, :3] = Rotation.from_euler("z", 90, degrees=True).as_matrix()
-        tool[:3, 3] = [0.0, 0.0, -0.107]
-        eef = hand @ tool
+        # ASPIRE/CaP-X expose the raw ``gripper0_eef`` transform in the robot
+        # base frame here. The Controller API applies its panda_hand/TCP
+        # offset exactly once when forming an IK target. Applying another tool
+        # transform to the observation shifts every Cartesian target by about
+        # 10.7 cm and makes current-pose IK fail conformance.
+        eef = base_inv @ gripper
         grip = float(np.asarray(self.obs["robot0_gripper_qpos"]).reshape(-1)[0] / 0.04)
         out["robot_joint_pos"] = np.r_[np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64), grip]
         out["robot_cartesian_pos"] = np.r_[eef[:3, 3], self._matrix_to_wxyz(eef[:3, :3]), grip]
@@ -393,7 +395,8 @@ class LiberoDeployment:
         return np.asarray(self.obs["robot0_joint_pos"], dtype=np.float64)[:7]
 
     def move_to_joints_blocking(self, joints, *, tolerance: float = 0.01,
-                                max_steps: int = 120) -> None:
+                                max_steps: int = 120,
+                                stable_steps: int = 1) -> None:
         controller = getattr(self.env.robots[0], "controller", None)
         if controller is None or str(getattr(controller, "name", "")) != "JOINT_POSITION":
             raise LiberoDeploymentError(
@@ -402,15 +405,55 @@ class LiberoDeployment:
         target = np.asarray(joints, dtype=np.float64).reshape(7)
         initial = self._panda_joint_positions()
         control_freq = float(getattr(self.env, "control_freq", 20.0))
-        for _ in range(int(max_steps)):
+        stable_required = max(1, int(stable_steps))
+        stable_count = 0
+        samples = []
+        converged = False
+        for step_index in range(int(max_steps)):
             current = self._panda_joint_positions()
-            if np.linalg.norm(target - current) < float(tolerance):
-                break
+            error = target - current
+            max_error = float(np.max(np.abs(error)))
+            l2_error = float(np.linalg.norm(error))
+            samples.append({
+                "step": step_index,
+                "target_rad": target.tolist(),
+                "actual_rad": current.tolist(),
+                "max_error_rad": max_error,
+                "l2_error_rad": l2_error,
+            })
+            if l2_error < float(tolerance):
+                stable_count += 1
+                if stable_count >= stable_required:
+                    converged = True
+                    break
+            else:
+                stable_count = 0
             action = np.r_[(target - current) * control_freq,
                            1.0 - 2.0 * self._gripper_fraction]
             self._sim_step(action)
-        else:
-            final = self._panda_joint_positions()
+        final = self._panda_joint_positions()
+        final_error = target - final
+        report = {
+            "event": "joint_control",
+            "controller": "JOINT_POSITION",
+            "action_semantics": "relative_delta_scaled_by_control_frequency",
+            "control_frequency_hz": control_freq,
+            "target_rad": target.tolist(),
+            "initial_rad": initial.tolist(),
+            "final_rad": final.tolist(),
+            "final_max_error_rad": float(np.max(np.abs(final_error))),
+            "final_l2_error_rad": float(np.linalg.norm(final_error)),
+            "tolerance_l2_rad": float(tolerance),
+            "stable_steps_required": stable_required,
+            "stable_steps_observed": stable_count,
+            "steps_commanded": max(0, len(samples) - (1 if converged else 0)),
+            "max_steps": int(max_steps),
+            "status": "converged" if converged else "timeout",
+            "samples": samples,
+        }
+        if hasattr(self, "trace"):
+            self.trace.append(report)
+        if not converged:
             raise LiberoDeploymentError(
                 "blocking joint control did not converge; "
                 f"initial_error_rad={np.linalg.norm(target - initial):.6f}; "
@@ -422,6 +465,10 @@ class LiberoDeployment:
         return {"adapter":"libero","episode_id":self.episode.case_handle or
                 f"{self.episode.suite}:{self.episode.task_index}:{self.episode.initial_state_index}",
                 "environment_generation":self.environment_generation}
+
+    def candidate_runtime_metadata(self):
+        """Secret-free Provider/API/model identity bound into Candidate Bundles."""
+        return dict(getattr(self, "_candidate_runtime_metadata", {}))
 
     def initial_observation(self):
         arguments={"channel":"rgbd","request":{}}
@@ -748,7 +795,8 @@ class LiberoDeployment:
         if method=="observe":return self._observe(str(arguments.get("channel") or "rgbd"),arguments.get("request") or {})
         if method=="act":return self._act(arguments.get("action") or {})
         if method=="use":return self._use(str(arguments.get("tool_id") or ""),arguments.get("payload") or {})
-        if method=="verify":return self._verify(str(arguments.get("verifier") or ""),arguments.get("payload") or {})
+        if method in {"verify", "check_observable_condition"}:
+            return self._verify(str(arguments.get("verifier") or ""),arguments.get("payload") or {})
         if method=="record":
             self.trace.append({"event":"controller_record","payload":arguments.get("event")});return {"recorded":True}
         if method=="sdk":
@@ -798,6 +846,7 @@ class LiberoDeployment:
                    if str(key) in self._OUTPUT_FIELDS[method]}
         required={"observe":{"step"},"act":{"type","step","reached"},
                   "use":{"tool_id","step","result"},"verify":{"verified"},
+                  "check_observable_condition":{"verified"},
                   "record":{"recorded"},"sdk":{"method","result"}}[method]
         missing=required-set(projected)
         if missing:raise LiberoDeploymentError(

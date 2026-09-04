@@ -5,8 +5,8 @@ from collections.abc import Sequence
 from typing import Any, Literal
 from pydantic import Field
 from openhands.sdk.tool import Action, Observation, ToolAnnotations, ToolDefinition, ToolExecutor
-from .assets import AssetLibrary
-from .capability import CapabilityAcquirer
+from ..assets import AssetLibrary
+from ..capability import CapabilityAcquirer
 
 class AssetObservation(Observation):
     result: Any = None

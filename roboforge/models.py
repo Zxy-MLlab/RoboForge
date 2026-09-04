@@ -47,6 +47,7 @@ class ExperimentEvidence:
     physical_verification: dict[str, bool] | None = None
     execution_error: str | None = None
     evidence_sha256: str = field(default="")
+    candidate_bundle_digest: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -65,4 +66,6 @@ class ExperimentEvidence:
             value.pop("intent")
         if value["execution_error"] is None:
             value.pop("execution_error")
+        if value["candidate_bundle_digest"] is None:
+            value.pop("candidate_bundle_digest")
         return value

@@ -1,6 +1,8 @@
-"""Small, environment-neutral Embodied Coding Agent kernel."""
+"""Environment-neutral execution primitives used by RoboForge.
 
-from .agent_loop import AgentLoop, LoopBudget, ProtocolError
+The historical model-driven AgentLoop is deliberately absent from this public
+namespace. OpenHands is the sole canonical agent core.
+"""
 from .capability_manager import CapabilityManager, ExtractionLimits
 from .assets import AssetRegistry
 from .context import ContextBuilder, MinimalSystemPrompt
@@ -15,9 +17,6 @@ from .sandbox import (SandboxBackend, PosixSandboxBackend, BubblewrapBackend,
                       select_sandbox)
 
 __all__ = [
-    "AgentLoop",
-    "LoopBudget",
-    "ProtocolError",
     "AssetRegistry",
     "CapabilityManager",
     "ExtractionLimits",

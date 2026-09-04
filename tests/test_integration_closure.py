@@ -6,7 +6,7 @@ import pytest
 
 from embodied_codex import cli
 from embodied_codex.fake_adapter import FakeAdapter
-from embodied_codex.kernel.agent_loop import AgentLoop, ProtocolError
+from embodied_codex.legacy.agent_loop import AgentLoop, ProtocolError
 from embodied_codex.kernel.capability_manager import CapabilityManager
 from embodied_codex.kernel.context import ContextBuilder
 from embodied_codex.kernel.events import EventStore
@@ -270,7 +270,7 @@ def test_libero_reset_uses_same_warmup_and_changes_generation(tmp_path):
 
 
 def test_campaign_preserves_episodic_trial_and_control_step_contract():
-    from embodied_codex.kernel.campaign import CampaignAdapter
+    from embodied_codex.legacy.campaign import CampaignAdapter
 
     class Episodic:
         episodic_trials = True
@@ -297,7 +297,7 @@ def test_campaign_preserves_episodic_trial_and_control_step_contract():
 
 
 def test_explicit_trial_budget_is_independent_of_legacy_execution_limit():
-    from embodied_codex.kernel.agent_loop import LoopBudget
+    from embodied_codex.legacy.agent_loop import LoopBudget
 
     budget = LoopBudget(max_steps=60, max_executions=2, max_trials=12)
     budget.executions = 2
@@ -307,7 +307,7 @@ def test_explicit_trial_budget_is_independent_of_legacy_execution_limit():
 
 
 def test_max_trials_means_cumulative_physical_trials_across_resume():
-    from embodied_codex.kernel.agent_loop import LoopBudget
+    from embodied_codex.legacy.agent_loop import LoopBudget
 
     budget = LoopBudget(max_steps=60, max_executions=20, max_trials=12,
                         trials_before=8)

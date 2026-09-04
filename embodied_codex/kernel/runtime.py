@@ -65,7 +65,10 @@ class Robot:
         receipt=self._rpc("use",{"tool_id":tool_id,"payload":payload})
         if not isinstance(receipt,dict) or "result" not in receipt: raise RuntimeError("Adapter use() violated ToolResult contract")
         return receipt
-    def verify(self,verifier,payload): return self._rpc("verify",{"verifier":verifier,"payload":payload})
+    def check_observable_condition(self,verifier,payload):
+        return self._rpc("check_observable_condition",{"verifier":verifier,"payload":payload})
+    def verify(self,verifier,payload):
+        return self._rpc("verify",{"verifier":verifier,"payload":payload})
     def record(self,event): return self._rpc("record",{"event":event})
     def sdk(self,method,*args,**kwargs):
         receipt=self._rpc("sdk",{"method":str(method),"args":list(args),"kwargs":dict(kwargs)})
@@ -76,7 +79,9 @@ class Robot:
         if name.startswith("_"): raise AttributeError(name)
         return lambda *args,**kwargs:self.sdk(name,*args,**kwargs)
 try:
-    path=os.path.abspath(sys.argv[1]);sys.path.insert(0,os.path.dirname(path))
+    path=os.path.abspath(sys.argv[1]);source_root=os.path.abspath(sys.argv[3])
+    if os.path.commonpath((path,source_root))!=source_root: raise RuntimeError("Controller escaped source root")
+    sys.path.insert(0,source_root);sys.path.insert(0,os.path.dirname(path))
     module=types.ModuleType("task_controller");module.__file__=path
     with open(path,"rb") as stream:source=stream.read()
     exec(compile(source,path,"exec"),module.__dict__)
@@ -87,7 +92,9 @@ except BaseException as exc:
 '''
 
 _ARGUMENT_KEYS = {"observe": {"channel", "request"}, "act": {"action"},
-                  "use": {"tool_id", "payload"}, "verify": {"verifier", "payload"},
+                  "use": {"tool_id", "payload"},
+                  "check_observable_condition": {"verifier", "payload"},
+                  "verify": {"verifier", "payload"},
                   "record": {"event"}, "sdk": {"method", "args", "kwargs"}}
 
 
@@ -189,19 +196,25 @@ class ControllerRuntime:
         return {"LANG": os.environ.get("LANG", "C.UTF-8"), "PYTHONNOUSERSITE": "1"}
 
     def execute(self, program_path: str | Path, deployment: RobotDeployment, *,
-                execution_kind: str = "physical_trial") -> dict[str, Any]:
+                execution_kind: str = "physical_trial",
+                source_root: str | Path | None = None) -> dict[str, Any]:
         if execution_kind not in {"physical_trial", "diagnostic"}:
             raise ValueError("unsupported execution kind")
         path = Path(program_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        import_root = Path(source_root).resolve() if source_root is not None else path.parent
+        try:
+            path.relative_to(import_root)
+        except ValueError as exc:
+            raise ControllerRuntimeError("Controller entrypoint is outside source root") from exc
         with tempfile.TemporaryDirectory(prefix="roboforge-controller-") as temporary:
             process = self.sandbox.popen([self.python, "-u", "-I", "-c", _CHILD,
-                str(path), json.dumps(str(deployment.instruction))], cwd=path.parent,
+                str(path), json.dumps(str(deployment.instruction)), str(import_root)], cwd=path.parent,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 bufsize=0, env=self._safe_environment(),
-                read_only_paths=[path.parent, Path(self.python).resolve().parents[1]],
+                read_only_paths=[import_root, Path(self.python).resolve().parents[1]],
                 read_write_paths=[temporary], temporary_dir=temporary,
                 timeout_seconds=self.timeout_seconds)
             assert process.stdin is not None and process.stdout is not None
@@ -325,7 +338,8 @@ class ControllerRuntime:
                 stderr = bytes(stderr_buffer).decode("utf-8", errors="replace")
         if not completed and error is None:
             error = "controller timed out" if time.monotonic() >= deadline else "controller exited"
-        verified = any(event["method"] == "verify" and isinstance(event.get("result"), Mapping)
+        verified = any(event["method"] in {"verify", "check_observable_condition"}
+                       and isinstance(event.get("result"), Mapping)
                        and event["result"].get("verified") is True for event in events)
         return {"completed": completed, "program_sha256": digest, "result": result,
                 "execution_kind": execution_kind,

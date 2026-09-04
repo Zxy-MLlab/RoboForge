@@ -118,8 +118,12 @@ class LegacyAdapterBridge:
         controller_path: Path,
         controller_sha256: str,
         environment_generation: str,
+        candidate_bundle_digest: str | None = None,
+        candidate_source_root: Path | None = None,
     ) -> AdapterResult:
-        execution = self.runtime.execute(controller_path, self.legacy)
+        execution = self.runtime.execute(
+            controller_path, self.legacy, source_root=candidate_source_root
+        )
         if not isinstance(execution, dict):
             raise TypeError("legacy Controller runtime must return a mapping")
         report = self.legacy.sensor_report(execution)
@@ -131,6 +135,7 @@ class LegacyAdapterBridge:
             raise TypeError("legacy verification receipt must be a mapping")
         # The service performs the final binding check. These values are kept
         # private in AdapterResult and never enter the public projection.
+        receipt = {**receipt, "candidate_bundle_digest": candidate_bundle_digest}
         projected, artifacts = self._project_evidence(public)
         return AdapterResult(
             public=dict(projected), artifacts=artifacts, private_receipt=dict(receipt)
@@ -142,6 +147,7 @@ class LegacyAdapterBridge:
         *,
         controller_sha256: str,
         environment_generation: str,
+        candidate_bundle_digest: str | None = None,
     ) -> bool:
         identity = self.legacy.execution_identity()
         return bool(
@@ -149,7 +155,12 @@ class LegacyAdapterBridge:
             and receipt.get("controller_sha256") == controller_sha256
             and receipt.get("environment_generation") == environment_generation
             and receipt.get("environment_identity") == identity
+            and receipt.get("candidate_bundle_digest") == candidate_bundle_digest
         )
+
+    def candidate_runtime_metadata(self) -> dict[str, Any]:
+        value = getattr(self.legacy, "candidate_runtime_metadata", None)
+        return dict(value() if callable(value) else value or {})
 
 
 __all__ = ["LegacyAdapter", "LegacyAdapterBridge"]

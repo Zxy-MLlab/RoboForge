@@ -151,7 +151,7 @@ def test_new_runtime_has_no_generic_agent_loop_implementation():
     text = "\n".join(p.read_text() for p in root.glob("*.py"))
     assert "class AgentLoop" not in text
     assert "_handle_content_response" not in text
-    assert "embodied_codex.kernel.agent_loop" not in text
+    assert "embodied_codex.legacy.agent_loop" not in text
     cli = (root / "cli.py").read_text()
     for forbidden in ("embodied_codex.providers", "kernel.agent_loop", "kernel.workspace", "context_builder"):
         assert forbidden not in cli
@@ -363,7 +363,7 @@ def test_physical_evidence_binds_declared_asset_use(tmp_path):
 def test_openhands_run_controller_requires_asset_to_be_read(tmp_path):
     import pytest
     pytest.importorskip("openhands.sdk")
-    from roboforge.openhands_tools import RunControllerAction, RunControllerExecutor
+    from roboforge.legacy.openhands_tools import RunControllerAction, RunControllerExecutor
     workspace = tmp_path / "workspace"; workspace.mkdir()
     controller = workspace / "controller.py"; controller.write_text("value = 1\n")
     library = AssetLibrary(tmp_path / "assets")
@@ -382,8 +382,8 @@ def test_asset_read_provenance_is_conversation_scoped(tmp_path):
     import pytest
     pytest.importorskip("openhands.sdk")
     from types import SimpleNamespace
-    from roboforge.asset_tools import ReadAssetAction, ReadAssetExecutor
-    from roboforge.openhands_tools import RunControllerAction, RunControllerExecutor
+    from roboforge.legacy.asset_tools import ReadAssetAction, ReadAssetExecutor
+    from roboforge.legacy.openhands_tools import RunControllerAction, RunControllerExecutor
     workspace = tmp_path / "workspace"; workspace.mkdir()
     controller = workspace / "controller.py"; controller.write_text("value = 1\n")
     library = AssetLibrary(tmp_path / "assets")
@@ -404,7 +404,7 @@ def test_asset_read_provenance_is_conversation_scoped(tmp_path):
 
 def test_public_evidence_artifacts_materialize_inside_workspace(tmp_path):
     pytest.importorskip("openhands.sdk")
-    from roboforge.openhands_tools import materialize_public_evidence
+    from roboforge.legacy.openhands_tools import materialize_public_evidence
 
     service = ExperimentService(tmp_path / "run", FakeAdapter())
     evidence = service.observe(request_id="materialize")
@@ -429,7 +429,7 @@ def test_public_evidence_artifacts_materialize_inside_workspace(tmp_path):
 def test_materialized_artifact_name_cannot_escape_workspace(tmp_path):
     pytest.importorskip("openhands.sdk")
     from dataclasses import replace
-    from roboforge.openhands_tools import materialize_public_evidence
+    from roboforge.legacy.openhands_tools import materialize_public_evidence
 
     service = ExperimentService(tmp_path / "run", FakeAdapter())
     evidence = service.observe(request_id="traversal")
@@ -450,7 +450,7 @@ def test_materialized_artifact_name_cannot_escape_workspace(tmp_path):
 
 def test_openhands_error_observation_is_structured_and_sanitized():
     pytest.importorskip("openhands.sdk")
-    from roboforge.openhands_tools import _error
+    from roboforge.legacy.openhands_tools import _error
 
     observation = _error(
         "run_controller",

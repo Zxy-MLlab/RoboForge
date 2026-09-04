@@ -98,7 +98,7 @@ def preflight_controller(controller_path: str | Path, *, capability_contracts: M
                 alternatives = contract.get("any_of") or ()
                 if alternatives and not any(all(key in present for key in option.get("required", ())) for option in alternatives):
                     raise ValueError(f"action {kind} does not satisfy any required field set")
-            elif method == "verify" and len(node.args) >= 2:
+            elif method in {"verify", "check_observable_condition"} and len(node.args) >= 2:
                 verifier = _literal(node.args[0])
                 if not isinstance(verifier, str): continue
                 checked += 1

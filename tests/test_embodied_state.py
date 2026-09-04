@@ -19,7 +19,7 @@ from embodied_codex.kernel.embodied_state import (
     transform_point,
 )
 from embodied_codex.kernel.evidence import build_execution_digest
-from embodied_codex.kernel.agent_loop import AgentLoop
+from embodied_codex.legacy.agent_loop import AgentLoop
 
 
 def test_transform_and_explicit_frame_identity():

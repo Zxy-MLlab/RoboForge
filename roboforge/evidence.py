@@ -75,8 +75,70 @@ def extract_first_error(value: Any) -> dict[str, Any] | None:
     return min(candidates, key=lambda item: item[0])[1]
 
 
-def derive_status(public: Mapping[str, Any], execution_error: str | None = None) -> dict[str, Any]:
+_FAILURE_CLASSES = {
+    "controller_failure",
+    "task_failure",
+    "perception_failure",
+    "planning_failure",
+    "harness_failure",
+    "environment_failure",
+    "service_failure",
+}
+_NON_BUDGET_FAILURES = {
+    "harness_failure",
+    "environment_failure",
+    "service_failure",
+}
+
+
+def _infer_failure_class(
+    public: Mapping[str, Any],
+    *,
+    first_error: Mapping[str, Any] | None,
+    controller_status: str,
+    environment_status: str,
+    task_success: bool | None,
+) -> str | None:
+    explicit = public.get("failure_class")
+    if explicit in _FAILURE_CLASSES:
+        return str(explicit)
+    if environment_status == "error":
+        return "environment_failure"
+    if first_error:
+        api = str(first_error.get("api") or "").casefold()
+        error_type = str(first_error.get("error_type") or "").casefold()
+        message = str(first_error.get("message") or "").casefold()
+        service_markers = (
+            "connection refused",
+            "connectionerror",
+            "service unavailable",
+            "http 5",
+            "model service",
+            "rpc disconnected",
+            "broken pipe",
+        )
+        if any(marker in error_type or marker in message for marker in service_markers):
+            return "service_failure"
+        if any(marker in api for marker in ("segment", "sam", "molmo", "perception", "mask")):
+            return "perception_failure"
+        if any(marker in api for marker in ("grasp", "plan", "ik", "curobo", "trajectory")):
+            return "planning_failure"
+    if controller_status == "error":
+        return "controller_failure"
+    if task_success is False:
+        return "task_failure"
+    return None
+
+
+def derive_status(
+    public: Mapping[str, Any],
+    execution_error: str | None = None,
+    *,
+    failure_class: str | None = None,
+    controller_started: bool | None = None,
+) -> dict[str, Any]:
     """Separate runner, controller, environment and task outcomes."""
+    accounting_requested = failure_class is not None or controller_started is not None
     first = extract_first_error(public)
     if first is None and execution_error:
         text = str(execution_error)
@@ -105,6 +167,25 @@ def derive_status(public: Mapping[str, Any], execution_error: str | None = None)
     if task_success is None:
         verification = public.get("physical_verification")
         task_success = verification.get("verified") if isinstance(verification, Mapping) else None
+    failure = failure_class or _infer_failure_class(
+        public,
+        first_error=first,
+        controller_status=controller_status,
+        environment_status=environment_status,
+        task_success=task_success if isinstance(task_success, bool) else None,
+    )
+    if failure is not None and failure not in _FAILURE_CLASSES:
+        raise ValueError(f"unsupported failure class: {failure}")
+    if controller_started is None:
+        trace = public.get("sanitized_runtime_trace") or public.get("sanitized_trace")
+        controller_started = (
+            termination == "completed"
+            or bool(trace)
+            or bool(public.get("action_trace"))
+        )
+    task_budget_consumed = bool(
+        controller_started and failure not in _NON_BUDGET_FAILURES
+    )
     result = {
         "runner_exit_code": 1 if controller_status == "error" or environment_status == "error" else 0,
         "controller_status": controller_status,
@@ -113,6 +194,15 @@ def derive_status(public: Mapping[str, Any], execution_error: str | None = None)
         "termination_reason": termination,
         "first_error": first,
     }
+    # Keep the long-standing helper shape for callers that only ask for a
+    # status summary.  Trial evidence opts into the accounting fields by
+    # passing explicit lifecycle context from ExperimentService.
+    if accounting_requested:
+        result.update({
+            "failure_class": failure,
+            "controller_started": bool(controller_started),
+            "task_budget_consumed": task_budget_consumed,
+        })
     result["trial_status"] = (
         "environment_error" if environment_status == "error"
         else "controller_error" if controller_status == "error"
