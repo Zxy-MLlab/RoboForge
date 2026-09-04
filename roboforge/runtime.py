@@ -73,7 +73,11 @@ def register_spike_tools(
         description=(
             f"{TOOL_DESCRIPTION}\n\n"
             f"Workspace: {workspace_path}\n"
-            "All reads and writes must remain inside this workspace."
+            "All reads and writes must remain inside this workspace.\n"
+            "The upstream `view` command renders PNG, JPEG, GIF, and WebP "
+            "files as multimodal image content. Use it directly on trial "
+            "keyframes and diagnostic crops instead of converting images to "
+            "ASCII or inferring appearance from pixel statistics alone."
         ),
         annotations=ToolAnnotations(
             title="file_editor",

@@ -21,11 +21,26 @@ def create_openhands_conversation(*, llm, workspace, persistence_dir, service, c
                                   max_budget_per_run=None, callbacks=None):
     """Construct an OpenHands conversation with native coding tools only."""
     from openhands.sdk import Agent
+    from openhands.sdk.context.condenser import default_condenser
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
     from .runtime import register_spike_tools
     tools = register_spike_tools(service, workspace=workspace, controller_path=controller_path,
                                  asset_root=asset_root, terminal_env=terminal_env)
-    agent = Agent(llm=llm, tools=tools, include_default_tools=["FinishTool", "ThinkTool"])
+    # Match the public OpenHands default Agent configuration.  Long-running robot
+    # campaigns contain many image and Terminal events; without a condenser the
+    # complete event history is repeatedly sent to the model until the provider
+    # rejects or disconnects the oversized request.  Keep condenser accounting
+    # separate from the primary Agent usage, as OpenHands does for its own default
+    # Agent and spawned subagents.
+    condenser = default_condenser(
+        llm.model_copy(update={"usage_id": "condenser"})
+    )
+    agent = Agent(
+        llm=llm,
+        tools=tools,
+        include_default_tools=["FinishTool", "ThinkTool"],
+        condenser=condenser,
+    )
     return LocalConversation(agent=agent, workspace=workspace, persistence_dir=persistence_dir,
                              conversation_id=conversation_id,
                              max_iteration_per_run=max_iterations,

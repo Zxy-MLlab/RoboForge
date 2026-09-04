@@ -279,6 +279,12 @@ def main(argv=None):
     p.add_argument("--model-timeout", type=int, default=180)
     p.add_argument("--max-output-tokens", type=int, default=12000)
     p.add_argument("--adapter-python", default=os.getenv("ROBOFORGE_ADAPTER_PYTHON"))
+    p.add_argument(
+        "--forbid-path",
+        action="append",
+        default=[],
+        help="path hidden from OpenHands tools to prevent historical-run contamination",
+    )
     p.add_argument("--resume", action="store_true")
     a = p.parse_args(argv)
     if a.doctor:
@@ -369,7 +375,7 @@ def main(argv=None):
             activity_count += 1
             write_tool_activity(workspace, activity_count)
 
-    execution_hook = HookConfig(stop=[HookMatcher(hooks=[HookDefinition(
+    stop_hook = HookMatcher(hooks=[HookDefinition(
         command=(
             f"PYTHONPATH={shlex.quote(str(Path(__file__).parents[1]))} "
             f"{shlex.quote(sys.executable)} -m roboforge.stop_gate "
@@ -377,7 +383,22 @@ def main(argv=None):
             f"--workspace {shlex.quote(str(workspace))}"
         ),
         timeout=10,
-    )])])
+    )])
+    pre_tool_hooks = []
+    if a.forbid_path:
+        forbid_args = " ".join(
+            f"--forbid {shlex.quote(str(Path(path).resolve()))}"
+            for path in a.forbid_path
+        )
+        pre_tool_hooks.append(HookMatcher(matcher="*", hooks=[HookDefinition(
+            command=(
+                f"PYTHONPATH={shlex.quote(str(Path(__file__).parents[1]))} "
+                f"{shlex.quote(sys.executable)} -m roboforge.path_gate "
+                f"--workspace {shlex.quote(str(workspace))} {forbid_args}"
+            ),
+            timeout=10,
+        )]))
+    execution_hook = HookConfig(pre_tool_use=pre_tool_hooks, stop=[stop_hook])
     convo = create_openhands_conversation(llm=llm, workspace=workspace,
         persistence_dir=run / "openhands", service=service, controller_path=controller,
         asset_root=a.asset_root, conversation_id=conversation_id,
@@ -391,12 +412,21 @@ def main(argv=None):
         })
     prompt = f"""Unknown robot task: {task_info.get('instruction') or a.task}
 The public Robot SDK manual is in {interface_manual}. Read relevant sections when needed.
+The complete Controller API implementation and exact upstream-compatible signatures are in
+{Path(__file__).parents[1] / 'embodied_codex/adapters/franka_libero_api.py'}.
 Work like a coding agent. Inspect files, write and revise controllers/controller.py, and run experiments
 from Terminal with `python -m roboforge trial controllers/controller.py --workspace . --intent '<hypothesis>'`.
 Read `.roboforge/trials/<trial_id>/result.json`, `first_error.json`, `trace.json`, keyframes, video and logs
 with ordinary Terminal/file tools, then continue until authentic verification or
 the physical budget is exhausted. Do not infer hidden simulator state or use task-specific patches.
 Reusable assets are under {Path(a.asset_root).resolve()} and should be searched only when useful."""
+    if a.forbid_path:
+        prompt += (
+            "\nThis is a clean evaluation campaign. Do not inspect other experiment runs, "
+            "historical Controllers, archived workspaces, or paths rejected by the public "
+            "PreToolUse hook. Derive the solution only from this task, current Workspace, "
+            "public Robot SDK source, live trial evidence, Web, and Subagents."
+        )
     prompt += ("\nUse the public coding tools and ordinary Terminal commands as appropriate. "
                "Trial preflight results, execution traces, images, logs and artifacts are available "
                "in the workspace; inspect whichever evidence is useful before deciding your next edit "

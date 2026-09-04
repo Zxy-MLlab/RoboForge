@@ -181,6 +181,66 @@ def test_openhands_editor_allows_capability_modules_but_remains_workspace_confin
     assert "relative_to(self.workspace_root)" in runtime
 
 
+def test_openhands_editor_views_workspace_images_as_multimodal_content(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    import base64
+
+    from openhands.sdk.llm import ImageContent
+    from openhands.tools.file_editor import FileEditorAction
+    from roboforge.runtime import ConfinedFileEditorExecutor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    image = workspace / "keyframe.png"
+    # Valid 1x1 transparent PNG; the upstream editor forwards image bytes
+    # without requiring Pillow or another image decoder in the OH venv.
+    image.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4"
+        "z8DwHwAFgAI/ScLwWQAAAABJRU5ErkJggg=="
+    ))
+
+    executor = ConfinedFileEditorExecutor(workspace_root=str(workspace))
+    observation = executor(FileEditorAction(command="view", path=str(image)))
+
+    assert not observation.is_error
+    assert any(isinstance(item, ImageContent) for item in observation.content)
+    assert any(
+        url.startswith("data:image/png;base64,")
+        for item in observation.content
+        if isinstance(item, ImageContent)
+        for url in item.image_urls
+    )
+
+
+def test_openhands_conversation_uses_official_default_condenser(tmp_path):
+    pytest.importorskip("openhands.sdk")
+    from openhands.sdk import LLM
+    from openhands.sdk.context.condenser import LLMSummarizingCondenser
+    from roboforge import create_openhands_conversation
+
+    workspace = tmp_path / "workspace"
+    persistence = tmp_path / "openhands"
+    workspace.mkdir()
+    controller = workspace / "controller.py"
+    controller.write_text("def run(robot): return robot.observe()\n")
+    llm = LLM(model="gpt-5", api_key="test-only", usage_id="campaign")
+
+    conversation = create_openhands_conversation(
+        llm=llm,
+        workspace=workspace,
+        persistence_dir=persistence,
+        service=ExperimentService(tmp_path / "run", FakeAdapter()),
+        controller_path=controller,
+    )
+
+    condenser = conversation.agent.condenser
+    assert isinstance(condenser, LLMSummarizingCondenser)
+    assert condenser.max_size == 80
+    assert condenser.keep_first == 4
+    assert condenser.llm.usage_id == "condenser"
+    assert conversation.agent.llm.usage_id == "campaign"
+
+
 def test_formal_tools_use_public_planning_and_subagent_extensions(tmp_path):
     pytest.importorskip("openhands.sdk")
     from roboforge.runtime import register_spike_tools
