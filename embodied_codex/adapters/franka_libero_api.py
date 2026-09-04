@@ -199,7 +199,15 @@ def _obb(points: np.ndarray) -> dict[str, Any]:
     cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(noisy))
     cloud, _ = cloud.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
     box = cloud.get_oriented_bounding_box()
-    center, extent, R = np.asarray(box.center), np.asarray(box.extent), np.asarray(box.R)
+    center = np.array(box.center, dtype=np.float64, copy=True)
+    extent = np.array(box.extent, dtype=np.float64, copy=True)
+    # Open3D exposes ``OrientedBoundingBox.R`` as a read-only Fortran-order
+    # pybind view.  SciPy's Rotation Cython buffer requires a writable array
+    # in the LIBERO Python 3.11 environment and otherwise raises
+    # ``ValueError: buffer source array is read-only``.  Materializing the
+    # same matrix as an owned C-order array preserves the upstream geometry
+    # while making the library boundary explicit.
+    R = np.array(box.R, dtype=np.float64, copy=True, order="C")
     q = Rotation.from_matrix(R).as_quat(); wxyz = np.array([q[3], q[0], q[1], q[2]])
     return {"center": center, "extent": extent, "R": R, "quaternion_wxyz": wxyz}
 
@@ -366,10 +374,16 @@ class FrankaLiberoApi:
     def point_prompt_molmo(self, image: np.ndarray, text_prompt: str) -> dict[str, tuple[int | None, int | None]]:
         # Keep the upstream Molmo prompt and parsing contract, with a small
         # parser that accepts Molmo1/Molmo2 XML and normalized coordinates.
-        payload = {"model": os.environ.get("ROBOFORGE_MOLMO_MODEL", "allenai/Molmo2-8B"),
-                   "messages": [{"role": "user", "content": [{"type": "text", "text": f"Point at {text_prompt}"},
+        payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": f"Point at {text_prompt}"},
                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_image(image)}"}}]}],
                    "max_tokens": 1024, "temperature": 0.0, "stop": ["<|endoftext|>"]}
+        # A stock vLLM server may expose a local path or another served-model
+        # alias rather than the upstream Hugging Face repository name.  When
+        # no explicit alias is configured, omit ``model`` just like the live
+        # conformance probe so vLLM selects its sole served model.
+        model = os.environ.get("ROBOFORGE_MOLMO_MODEL")
+        if model:
+            payload["model"] = model
         try:
             data = _post_with_retries(f"{MOLMO_URL.rstrip('/')}/chat/completions", payload,
                                        max_retries=3)

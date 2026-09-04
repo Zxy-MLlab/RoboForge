@@ -2,11 +2,13 @@ import inspect
 import base64
 import io
 from pathlib import Path
+import sys
+import types
 
 import numpy as np
 
 from embodied_codex.adapters.franka_libero_api import (
-    FrankaLiberoApi, decompose_transform, depth_to_point_cloud,
+    FrankaLiberoApi, _obb, decompose_transform, depth_to_point_cloud,
     depth_to_pointcloud, mask_to_world_points,
 )
 from embodied_codex.adapters.libero_sdk import LIBERO_ROBOT_SDK_CONTRACT
@@ -60,6 +62,32 @@ def test_depth_helpers_match_both_upstream_return_shapes():
     filtered = depth_to_pointcloud(depth, K)
     assert filtered.shape == (2, 3)
     np.testing.assert_allclose(filtered[:, 2], [1.0, 2.0])
+
+
+def test_obb_copies_open3d_readonly_rotation_before_scipy(monkeypatch):
+    rotation = np.asfortranarray(np.eye(3))
+    rotation.setflags(write=False)
+
+    class Box:
+        center = np.array([0.1, 0.2, 0.3])
+        extent = np.array([0.4, 0.5, 0.6])
+        R = rotation
+
+    class Cloud:
+        def __init__(self, _points): pass
+        def remove_statistical_outlier(self, **_kwargs): return self, []
+        def get_oriented_bounding_box(self): return Box()
+
+    fake_open3d = types.SimpleNamespace(
+        geometry=types.SimpleNamespace(PointCloud=Cloud),
+        utility=types.SimpleNamespace(Vector3dVector=lambda points: points),
+    )
+    monkeypatch.setitem(sys.modules, "open3d", fake_open3d)
+
+    result = _obb(np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]))
+    np.testing.assert_allclose(result["R"], np.eye(3))
+    np.testing.assert_allclose(result["quaternion_wxyz"], [1., 0., 0., 0.])
+    assert result["R"].flags.writeable and result["R"].flags.c_contiguous
 
 
 def test_interpolate_segment_matches_upstream_zero_distance_semantics():
@@ -169,6 +197,7 @@ def test_contact_graspnet_pointcloud_payload_and_post_transform(monkeypatch):
 
 
 def test_molmo_parsing_matches_upstream_supported_formats(monkeypatch):
+    monkeypatch.delenv("ROBOFORGE_MOLMO_MODEL", raising=False)
     api = FrankaLiberoApi(Env())
     image = np.zeros((100, 200, 3), np.uint8)
     replies = iter([
@@ -179,11 +208,28 @@ def test_molmo_parsing_matches_upstream_supported_formats(monkeypatch):
     def fake_post(url, payload, **kwargs):
         assert url.endswith("/chat/completions")
         assert payload["stop"] == ["<|endoftext|>"]
+        assert "model" not in payload
         return {"choices": [{"message": {"content": next(replies)}}]}
 
     monkeypatch.setattr("embodied_codex.adapters.franka_libero_api._post_with_retries", fake_post)
     assert api.point_prompt_molmo(image, "object") == {"object": (50, 75)}
     assert api.point_prompt_molmo(image, "object") == {"object": (50, 75)}
+
+
+def test_molmo_uses_explicit_served_model_alias_when_configured(monkeypatch):
+    monkeypatch.setenv("ROBOFORGE_MOLMO_MODEL", "served-molmo")
+    captured = {}
+
+    def fake_post(_url, payload, **_kwargs):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": '<point x="50" y="50" />'}}]}
+
+    monkeypatch.setattr("embodied_codex.adapters.franka_libero_api._post_with_retries", fake_post)
+    result = FrankaLiberoApi(Env()).point_prompt_molmo(
+        np.zeros((10, 10, 3), np.uint8), "object"
+    )
+    assert captured["model"] == "served-molmo"
+    assert result == {"object": (5, 5)}
 
 
 def test_sample_grasp_pose_applies_upstream_90_degree_post_rotation(monkeypatch):
