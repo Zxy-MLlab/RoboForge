@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from roboforge.fakes import FakeAdapter
 from roboforge.models import AdapterResult, RawArtifact
 from roboforge.preflight import preflight_controller
 from roboforge.service import ExperimentService, ProtocolError
+from roboforge.stop_gate import campaign_stop_decision
 from roboforge.trial_artifacts import materialize_preflight_failure, materialize_trial
 
 
@@ -30,6 +32,37 @@ PERCEPTION = {
         "additionalProperties": False,
     }
 }
+
+
+def test_campaign_stop_requires_changed_candidate_with_matching_valid_trial(tmp_path):
+    controller = tmp_path / "controller.py"
+    controller.write_text("def run(robot): return robot.observe()\n")
+    baseline = hashlib.sha256(controller.read_bytes()).hexdigest()
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"records": []}))
+    assert campaign_stop_decision(ledger, controller, baseline)["decision"] == "deny"
+
+    controller.write_text("def run(robot): return robot.get_task_language()\n")
+    candidate = hashlib.sha256(controller.read_bytes()).hexdigest()
+    ledger.write_text(json.dumps({"records": [{
+        "controller_sha256": candidate, "valid_trial": True,
+    }]}))
+    assert campaign_stop_decision(ledger, controller, baseline)["decision"] == "allow"
+
+
+def test_campaign_stop_rejects_stale_or_invalid_candidate_trial(tmp_path):
+    controller = tmp_path / "controller.py"
+    controller.write_text("candidate\n")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"records": [{
+        "controller_sha256": "0" * 64, "valid_trial": True,
+    }, {
+        "controller_sha256": hashlib.sha256(controller.read_bytes()).hexdigest(),
+        "valid_trial": False,
+    }]}))
+    decision = campaign_stop_decision(ledger, controller, "f" * 64)
+    assert decision["decision"] == "deny"
+    assert "exact source digest" in decision["additionalContext"]
 
 
 def test_contract_preflight_rejects_literal_field_but_accepts_dynamic_frame(tmp_path):

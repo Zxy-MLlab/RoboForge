@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load_campaign_config(args.config)
     run = args.run_dir.resolve(); workspace = run / "workspace"
     controller = ProjectWorkspace(workspace).initialize()
+    baseline_digest = hashlib.sha256(controller.read_bytes()).hexdigest()
     manifest = {
         "schema_version": "roboforge-canonical-campaign-v1",
         "runtime": config.runtime, "task": config.task,
@@ -36,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_iterations": args.max_iterations or config.max_iterations,
         "controller_mode": config.controller_mode,
         "controller": str(controller), "started_unix": time.time(),
+        "baseline_controller_sha256": baseline_digest,
         "termination_reason": None,
     }
     (run / "campaign-manifest.json").parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
                                  indent=2, sort_keys=True) + "\n")
 
     from openhands.sdk import LLM
+    from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher
     from . import create_openhands_conversation
     key = os.getenv(args.api_key_env)
     if not key:
@@ -79,6 +84,16 @@ OpenHands SDK reports an explicit budget, error, or FinishTool termination."""
         llm=llm, workspace=workspace, persistence_dir=run / "openhands",
         service=None, controller_path=controller,
         max_iterations=args.max_iterations or config.max_iterations,
+        hook_config=HookConfig(stop=[HookMatcher(hooks=[HookDefinition(
+            command=(
+                f"PYTHONPATH={shlex.quote(str(Path(__file__).parents[1]))} "
+                f"{shlex.quote(os.sys.executable)} -m roboforge.stop_gate "
+                f"--campaign-ledger {shlex.quote(str(ledger))} "
+                f"--controller {shlex.quote(str(controller))} "
+                f"--baseline-digest {shlex.quote(baseline_digest)}"
+            ),
+            timeout=10,
+        )])]),
         terminal_env={"ROBOFORGE_WORKSPACE": str(workspace), "PYTHONPATH": str(Path(__file__).parents[1]),
                       "ROBOFORGE_ADAPTER_PYTHON": args.adapter_python,
                       "ROBOFORGE_DEVELOPMENT_STATES": json.dumps(list(config.development_states)),

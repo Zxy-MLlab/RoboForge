@@ -7,6 +7,7 @@ external experiment service still has no successful sealed receipt.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -109,6 +110,46 @@ def execution_task_stop_decision(activity_path: str | Path, workspace: str | Pat
     }
 
 
+def campaign_stop_decision(
+    ledger_path: str | Path,
+    controller_path: str | Path,
+    baseline_digest: str,
+) -> dict[str, Any]:
+    """Reject premature completion without prescribing the next agent action."""
+    try:
+        ledger = json.loads(Path(ledger_path).read_text(encoding="utf-8"))
+        records = [item for item in ledger.get("records", []) if isinstance(item, dict)]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        records = []
+    try:
+        current = hashlib.sha256(Path(controller_path).read_bytes()).hexdigest()
+    except OSError:
+        current = ""
+    candidate_trials = [
+        item for item in records
+        if item.get("controller_sha256") == current and item.get("valid_trial") is True
+    ]
+    if current and current != baseline_digest and candidate_trials:
+        return {
+            "decision": "allow",
+            "reason": "a changed candidate has completed a valid development trial",
+        }
+    if current == baseline_digest:
+        context = (
+            "The Controller still matches the initial baseline. Inspect public trial evidence, "
+            "make a justified workspace change, and test the changed candidate with the ordinary CLI."
+        )
+    elif not candidate_trials:
+        context = (
+            "The Controller has changed, but this exact source digest has no valid development trial. "
+            "Run it on an allowed development state and inspect the public result before finishing."
+        )
+    else:
+        context = "Continue autonomous development using public workspace tools."
+    return {"decision": "deny", "reason": "development completion evidence is incomplete",
+            "additionalContext": context}
+
+
 def write_public_status(
     service: ExperimentService,
     workspace: str | Path,
@@ -185,12 +226,20 @@ def main(argv: list[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--status")
     group.add_argument("--tool-activity")
+    group.add_argument("--campaign-ledger")
     parser.add_argument("--workspace")
+    parser.add_argument("--controller")
+    parser.add_argument("--baseline-digest")
     args = parser.parse_args(argv)
     if args.tool_activity and not args.workspace:
         parser.error("--workspace is required with --tool-activity")
-    decision = (execution_task_stop_decision(args.tool_activity, args.workspace)
-                if args.tool_activity else stop_decision(args.status))
+    if args.campaign_ledger:
+        if not args.controller or not args.baseline_digest:
+            parser.error("--controller and --baseline-digest are required with --campaign-ledger")
+        decision = campaign_stop_decision(args.campaign_ledger, args.controller, args.baseline_digest)
+    else:
+        decision = (execution_task_stop_decision(args.tool_activity, args.workspace)
+                    if args.tool_activity else stop_decision(args.status))
     print(json.dumps(decision, sort_keys=True))
     return 0
 

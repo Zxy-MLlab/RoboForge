@@ -1,6 +1,6 @@
 """Formal OpenHands-native RoboForge entry point."""
 from __future__ import annotations
-import argparse, os, secrets, shlex, subprocess, sys, threading, time
+import argparse, os, secrets, shlex, subprocess, sys, tempfile, threading, time
 import uuid
 import json
 from pathlib import Path
@@ -135,7 +135,11 @@ def _run_frozen_candidate(args) -> dict:
     if not entrypoint.is_file() or entrypoint.suffix != ".py":
         raise ValueError("entrypoint must be a Python Controller file")
     run.mkdir(parents=True, exist_ok=False)
-    socket_path = run / "adapter.sock"; token = secrets.token_urlsafe(32)
+    # AF_UNIX paths are limited to roughly 108 bytes on Linux.  Experiment
+    # directories can be deeply nested, so keep the transient RPC endpoint in
+    # /tmp while durable evidence remains under the requested run directory.
+    socket_path = Path(tempfile.gettempdir()) / f"roboforge-{uuid.uuid4().hex}.sock"
+    token = secrets.token_urlsafe(32)
     command = [args.adapter_python, "-m", "roboforge.rpc_server", "--adapter", args.runtime,
         "--task", str(args.task), "--state", str(args.seed), "--run-root", str(run / "provider"),
         "--controller-path", str(entrypoint), "--socket", str(socket_path),
@@ -162,6 +166,7 @@ def _run_frozen_candidate(args) -> dict:
         worker.terminate()
         try: worker.wait(timeout=10)
         except subprocess.TimeoutExpired: worker.kill(); worker.wait()
+        socket_path.unlink(missing_ok=True)
 
 
 def _enforce_trial_budget(path: Path, budget: int) -> None:
