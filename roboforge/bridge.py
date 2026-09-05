@@ -1,4 +1,8 @@
-"""Narrow bridge from a frozen RoboForge Adapter to the spike service contract."""
+"""Legacy compatibility bridge for historical evidence only.
+
+Canonical RPC execution uses :mod:`roboforge.providers.libero` and does not
+import this module.  It remains available solely for old evidence readers.
+"""
 from __future__ import annotations
 
 from pathlib import Path

@@ -121,6 +121,11 @@ class ExperimentService:
             }
 
     def task_info(self) -> dict[str, Any]:
+        provider_info = getattr(self.adapter, "task_info", None)
+        if callable(provider_info):
+            value = provider_info()
+            if isinstance(value, dict):
+                return value
         legacy = getattr(self.adapter, "legacy", None)
         instruction = getattr(legacy, "instruction", None)
         sdk_index = getattr(legacy, "sdk_index", None)

@@ -8,7 +8,7 @@ from pathlib import Path
 import signal
 import threading
 
-from .bridge import LegacyAdapterBridge
+from .providers.libero import LiberoProvider
 from .rpc import ExperimentRpcServer
 from .service import ExperimentService
 
@@ -33,7 +33,7 @@ def main() -> None:
     # Imports are deliberately local: this process is the only side allowed to
     # load the frozen Adapter/deployment and its physical dependencies.
     from embodied_codex.adapters.factory import load_adapter
-    from embodied_codex.kernel.runtime import ControllerRuntime
+    from .candidate_runtime import ControllerRuntime
 
     configuration = json.loads(args.configuration_json)
     if not isinstance(configuration, dict):
@@ -45,13 +45,13 @@ def main() -> None:
         case=args.state,
         configuration=configuration,
     )
-    bridge = LegacyAdapterBridge(
+    provider = LiberoProvider(
         legacy,
         ControllerRuntime(timeout_seconds=args.timeout_seconds),
     )
     service = ExperimentService(
         args.run_root / "service",
-        bridge,
+        provider,
         max_trials=args.max_trials,
         max_diagnostics=args.max_diagnostics,
     )

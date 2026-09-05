@@ -132,3 +132,8 @@ def register_spike_tools(
         *( [Tool(name=BrowserToolSet.name)]
            if browser_usable and BrowserToolSet is not None else []),
     ]
+
+
+# Canonical name; the compatibility alias above is retained for existing
+# callers while all new entry points describe this as OpenHands-native tools.
+register_native_tools = register_spike_tools

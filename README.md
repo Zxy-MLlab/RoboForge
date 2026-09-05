@@ -39,7 +39,8 @@ authority，OpenHands 进程不加载 LIBERO 或 evaluator。
 `embodied_codex/kernel` 是旧版兼容和 embodied implementation 来源，不再是新正式
 OpenHands-native CLI 的 Agent loop。安装包不再暴露旧 `embodied_codex` console
 entry；源码 checkout 中的 `python -m embodied_codex` 仅为历史 run 和回归测试保留，明确
-deprecated，不是新运行入口。新调用链不导入旧 AgentLoop、provider loop、workspace、
+deprecated，不是新运行入口。canonical 调用链使用 OpenHands LocalConversation、普通
+Terminal 和 `roboforge develop campaign.yaml`；新调用链不导入旧 AgentLoop、provider loop、workspace、
 context builder 或 generic editor。
 
 RoboForge 是一个环境无关的 Embodied Coding Agent Harness。它提供持久 workspace、隔离

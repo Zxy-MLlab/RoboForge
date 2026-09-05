@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from embodied_codex.adapters.factory import load_adapter
-from embodied_codex.kernel.runtime import ControllerRuntime
+from roboforge.candidate_runtime import ControllerRuntime
 from evaluation.sealed_evaluation import SealedEvaluationPolicy
 from roboforge.store import atomic_write, canonical_json
 

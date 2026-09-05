@@ -33,6 +33,14 @@ Capability = Callable[[Mapping[str,Any]],Mapping[str,Any]]
 class LiberoDeploymentError(RuntimeError): pass
 
 
+class LiberoControlError(LiberoDeploymentError):
+    """Structured, recoverable controller-side motion failure."""
+
+    def __init__(self, message: str, result: Mapping[str, Any]):
+        super().__init__(message)
+        self.result = dict(result)
+
+
 _PUBLIC_PATH_RE = re.compile(
     r"(?:file://)?(?:/root|/tmp|/workspace|/home)/[^\s,;]+"
 )
@@ -396,7 +404,7 @@ class LiberoDeployment:
 
     def move_to_joints_blocking(self, joints, *, tolerance: float = 0.01,
                                 max_steps: int = 120,
-                                stable_steps: int = 1) -> None:
+                                stable_steps: int = 1) -> dict[str, Any]:
         controller = getattr(self.env.robots[0], "controller", None)
         if controller is None or str(getattr(controller, "name", "")) != "JOINT_POSITION":
             raise LiberoDeploymentError(
@@ -454,12 +462,13 @@ class LiberoDeployment:
         if hasattr(self, "trace"):
             self.trace.append(report)
         if not converged:
-            raise LiberoDeploymentError(
+            raise LiberoControlError(
                 "blocking joint control did not converge; "
                 f"initial_error_rad={np.linalg.norm(target - initial):.6f}; "
                 f"final_error_rad={np.linalg.norm(target - final):.6f}; "
-                f"steps={int(max_steps)}"
+                f"steps={int(max_steps)}", report
             )
+        return report
 
     def execution_identity(self):
         return {"adapter":"libero","episode_id":self.episode.case_handle or

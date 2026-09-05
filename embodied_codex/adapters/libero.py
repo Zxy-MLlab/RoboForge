@@ -1,4 +1,4 @@
-"""LIBERO Adapter plugin. All task execution still runs through kernel.AgentLoop."""
+"""LIBERO execution adapter used by the canonical RoboForge provider."""
 from __future__ import annotations
 
 import hashlib

@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 from embodied_codex.adapters.factory import load_adapter
-from embodied_codex.kernel.runtime import ControllerRuntime
-from roboforge.bridge import LegacyAdapterBridge
+from roboforge.candidate_runtime import ControllerRuntime
+from roboforge.providers.libero import LiberoProvider
 from roboforge.service import ExperimentService
 
 
@@ -81,7 +81,7 @@ def provider_arm(controller: Path, root: Path, task: str, state: int) -> dict:
                            configuration={"disable_agent_verifier": True})
     try:
         service = ExperimentService(root / "service",
-            LegacyAdapterBridge(adapter, ControllerRuntime(timeout_seconds=600)), max_trials=1)
+            LiberoProvider(adapter, ControllerRuntime(timeout_seconds=600)), max_trials=1)
         started = time.monotonic()
         evidence = service.run_controller(request_id="runtime-consistency",
             controller_path=controller, intent="runtime consistency validation")

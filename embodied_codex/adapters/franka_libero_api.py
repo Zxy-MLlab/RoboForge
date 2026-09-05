@@ -600,51 +600,28 @@ class FrankaLiberoApi:
         upstream adapter).
         """
         pos = np.asarray(position, dtype=np.float64).reshape(3)
-        # The reduced upstream API clamps targets to its documented reachable
-        # LIBERO workspace before applying the TCP offset.  Keep this guard in
-        # the controller-facing implementation so out-of-range requests have
-        # identical solver inputs and do not turn into service timeouts.
-        pos = np.clip(pos, [-0.1, -0.5, 0.005], [0.75, 0.5, 0.9])
         quat = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(4)
+        if not np.isfinite(pos).all() or not np.isfinite(quat).all():
+            raise ValueError("IK target must contain finite position and quaternion values")
+        if np.linalg.norm(quat) < 1e-8:
+            raise ValueError("IK quaternion must be non-zero")
+        # Never alter a Controller's requested pose.  Reachability, collision
+        # and joint-limit failures are reported by the IK service as explicit
+        # errors; policy fallbacks belong to the editable Controller stack.
         rot = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
         offset_pos = pos + rot.apply(self._TCP_OFFSET)
         if self.cfg is None:
             self.cfg = self._current_pyroki_configuration()
-        orientations = (
-            ("requested", quat),
-            ("top-down", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)),
-            ("45-tilt", np.array([0.707, 0.707, 0.0, 0.0], dtype=np.float64)),
-            ("side-approach", np.array([0.707, 0.0, 0.707, 0.0], dtype=np.float64)),
-        )
-        failures = []
-        for label, candidate_quat in orientations:
-            candidate_offset = (
-                offset_pos if label == "requested"
-                else pos + Rotation.from_quat([
-                    candidate_quat[1], candidate_quat[2],
-                    candidate_quat[3], candidate_quat[0],
-                ]).apply(self._TCP_OFFSET)
-            )
-            try:
-                previous = self.cfg
-                result = previous
-                for _ in range(5):
-                    result = self._solve_ik_with_prev(
-                        candidate_offset, candidate_quat, previous
-                    )
-                    if previous is not None and np.allclose(
-                        result, previous, atol=1e-3
-                    ):
-                        break
-                    previous = result
-                self.cfg = np.asarray(result, dtype=np.float64).reshape(-1)
-                return self._pyroki_arm_to_libero(self.cfg)
-            except Exception as exc:
-                failures.append(f"{label}: {type(exc).__name__}: {exc}")
-        raise RuntimeError(
-            f"IK failed for position {pos.tolist()} with all orientation fallbacks: "
-            + "; ".join(failures)
-        )
+        try:
+            previous = self.cfg
+            result = self._solve_ik_with_prev(offset_pos, quat, previous)
+            self.cfg = np.asarray(result, dtype=np.float64).reshape(-1)
+            return self._pyroki_arm_to_libero(self.cfg)
+        except Exception as exc:
+            raise RuntimeError(
+                f"IK failed for requested position {pos.tolist()} and orientation {quat.tolist()}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     def _current_pyroki_configuration(self) -> np.ndarray | None:
         """Map live LIBERO qpos into the installed panda URDF convention."""
@@ -698,10 +675,20 @@ class FrankaLiberoApi:
         # warm-start.  Only the blocking Franka arm boundary consumes seven.
         return joints
 
-    def move_to_joints(self, joints: np.ndarray) -> None:
+    def move_to_joints(self, joints: np.ndarray) -> dict[str, Any]:
         env = self._env
         if not hasattr(env, "move_to_joints_blocking"): raise RuntimeError("blocking joint control unavailable")
-        env.move_to_joints_blocking(np.asarray(joints, dtype=float).reshape(7))
+        target = np.asarray(joints, dtype=float).reshape(7)
+        result = env.move_to_joints_blocking(target)
+        if isinstance(result, Mapping):
+            return {"status": str(result.get("status", "converged")),
+                    "target_rad": np.asarray(result.get("target_rad", target), float).tolist(),
+                    "final_rad": np.asarray(result.get("final_rad", []), float).tolist(),
+                    "final_max_error_rad": float(result.get("final_max_error_rad", 0.0)),
+                    "final_l2_error_rad": float(result.get("final_l2_error_rad", 0.0)),
+                    "steps_commanded": int(result.get("steps_commanded", 0)),
+                    "stable_steps_observed": int(result.get("stable_steps_observed", 0))}
+        return {"status": "converged", "target_rad": target.tolist()}
 
     def goto_pose(self, position: np.ndarray, quaternion_wxyz: np.ndarray, z_approach: float = 0.0) -> None:
         pos = np.asarray(position, float).reshape(3)
@@ -710,11 +697,16 @@ class FrankaLiberoApi:
         # world-Z offset, while solve_ik() alone owns the panda_hand TCP
         # correction. The previous adapter applied a second, tool-frame
         # offset and therefore commanded the wrong Cartesian pose.
+        reports = []
         if z_approach > 0.0:
             approach_pos = pos.copy()
             approach_pos[2] += float(z_approach)
-            self.move_to_joints(self.solve_ik(approach_pos, q))
-        self.move_to_joints(self.solve_ik(pos, q))
+            reports.append(self.move_to_joints(self.solve_ik(approach_pos, q)))
+        reports.append(self.move_to_joints(self.solve_ik(pos, q)))
+        # Upstream callers rely on goto_pose returning None.  The structured
+        # waypoint reports remain in the deployment trace/control result.
+        del reports
+        return None
 
     def _goto_pose_once(self, pos, q):
         joints = self._solve_ik_with_prev(pos, q, self.cfg); self.cfg = joints

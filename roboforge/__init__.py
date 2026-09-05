@@ -23,8 +23,8 @@ def create_openhands_conversation(*, llm, workspace, persistence_dir, service, c
     from openhands.sdk import Agent
     from openhands.sdk.context.condenser import default_condenser
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
-    from .runtime import register_spike_tools
-    tools = register_spike_tools(service, workspace=workspace, controller_path=controller_path,
+    from .runtime import register_native_tools
+    tools = register_native_tools(service, workspace=workspace, controller_path=controller_path,
                                  asset_root=asset_root, terminal_env=terminal_env)
     # Match the public OpenHands default Agent configuration.  Long-running robot
     # campaigns contain many image and Terminal events; without a condenser the

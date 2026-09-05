@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 
 from embodied_codex.adapters.factory import load_adapter
-from embodied_codex.kernel.runtime import ControllerRuntime
+from roboforge.candidate_runtime import ControllerRuntime
 from roboforge.assets import AssetLibrary
-from roboforge.bridge import LegacyAdapterBridge
+from roboforge.providers.libero import LiberoProvider
 from roboforge.capability import CapabilityAcquirer
 from roboforge.service import ExperimentService
 
@@ -45,7 +45,7 @@ def main() -> int:
         adapter = load_adapter("libero", task=args.task, run_dir=output / f"state-{state}" / arm / "legacy",
             case=state, configuration={"disable_agent_verifier": True})
         try:
-          service = ExperimentService(output / f"state-{state}" / arm / "service", LegacyAdapterBridge(adapter, ControllerRuntime(timeout_seconds=600)), max_trials=1)
+          service = ExperimentService(output / f"state-{state}" / arm / "service", LiberoProvider(adapter, ControllerRuntime(timeout_seconds=600)), max_trials=1)
           evidence = service.run_controller(request_id=f"reuse-{state}-{arm}",controller_path=controller,intent=arm,assets_used=used)
           rows.append({"state":state,"arm":arm,"success":bool((evidence.physical_verification or {}).get("verified")),"trial":evidence.public_dict()})
         finally: adapter.close()

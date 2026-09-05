@@ -7,8 +7,11 @@ from pathlib import Path
 
 
 def _lifecycle_main(argv: list[str]) -> int | None:
-    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit", "validate-controller-api"}:
+    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit", "develop", "validate-controller-api"}:
         return None
+    if argv[0] == "develop":
+        from .develop import main as develop_main
+        return develop_main(argv[1:])
     from .control_plane import compare, environment_info, replay, submit
     root = argparse.ArgumentParser(prog="roboforge")
     commands = root.add_subparsers(dest="command", required=True)

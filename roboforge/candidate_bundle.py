@@ -163,6 +163,11 @@ class CandidateBundleStore:
         capability_entries = [
             item for item in entries if Path(item["path"]).parts[:1] == ("capabilities",)
         ]
+        robot_stack_prefixes = ("robot_sdk", "runtime_adapters", "services", "models")
+        robot_stack_entries = [
+            item for item in entries
+            if Path(item["path"]).parts[:1] in robot_stack_prefixes
+        ]
         runtime = dict(runtime_metadata or {})
         packages = _package_versions()
         dependency_payload = {
@@ -184,6 +189,10 @@ class CandidateBundleStore:
             "dependency_digest": dependency_digest,
             "dependencies": dependency_payload,
             "capability_digests": capability_digests,
+            "editable_robot_stack": {
+                "roots": list(robot_stack_prefixes),
+                "files": robot_stack_entries,
+            },
             "model_artifact_digests": model_artifact_digests,
             "runtime_provider_digest": runtime.get("runtime_provider_digest"),
             "runtime_api_version": runtime.get("runtime_api_version"),
