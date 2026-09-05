@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=os.getenv("ROBOFORGE_MODEL_BASE_URL", "https://api.apexin.ai/v1"))
     parser.add_argument("--api-key-env", default=os.getenv("ROBOFORGE_MODEL_KEY_ENV", "OPENAI_API_KEY"))
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument("--reasoning-effort", default=os.getenv("ROBOFORGE_REASONING_EFFORT", "medium"),
+                        choices=["low", "medium", "high", "xhigh"])
     parser.add_argument("--adapter-python", default=os.getenv("ROBOFORGE_ADAPTER_PYTHON", "/root/autodl-tmp/mj311/bin/python"))
     args = parser.parse_args(argv)
     config = load_campaign_config(args.config)
@@ -50,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"missing model credential environment variable: {args.api_key_env}")
     llm = LLM(model=args.model, api_key=key, base_url=args.base_url,
               api_mode="chat" if args.base_url.rstrip("/").endswith("/v1") else "auto",
-              max_output_tokens=12000, usage_id=f"roboforge:develop:{run.name}")
+              max_output_tokens=12000, reasoning_effort=args.reasoning_effort,
+              usage_id=f"roboforge:develop:{run.name}")
     state_list = ", ".join(str(item) for item in config.development_states)
     prompt = f"""Develop the LIBERO task {config.task} as one reusable program in this workspace.
 The Harness allowlist permits development initial-state indices {state_list}; they are supplied
@@ -64,7 +67,14 @@ multiple states. Hidden evaluation states are verifier-private and are not prese
 workspace. Continue
 until the development budget is exhausted or a single unified candidate is ready, then
 write a final candidate manifest. Use only ordinary Editor, Terminal, search, Git and
-the other generic OpenHands tools; there are no robot-specific LLM tools."""
+the other generic OpenHands tools; there are no robot-specific LLM tools.
+This is an execution task, not a request for a plan or acknowledgement. Your first response
+must invoke a public workspace or Terminal tool to inspect the current project and task
+context. Do not finish with prose before performing at least one tool call and running the
+current Controller once. After every tool observation, continue with another public tool
+call; a text-only progress update is not a valid stopping condition. Only stop after the
+current Controller has actually been run and its result has been inspected, or when the
+OpenHands SDK reports an explicit budget, error, or FinishTool termination."""
     conversation = create_openhands_conversation(
         llm=llm, workspace=workspace, persistence_dir=run / "openhands",
         service=None, controller_path=controller,
