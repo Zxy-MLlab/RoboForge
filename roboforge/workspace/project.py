@@ -21,6 +21,16 @@ class ProjectWorkspace:
         self.root.mkdir(parents=True, exist_ok=True)
         for relative in self.REQUIRED_DIRS:
             (self.root / relative).mkdir(parents=True, exist_ok=True)
+        # Make every editable stack directory importable from the frozen
+        # candidate source root.  The files remain ordinary workspace code;
+        # these markers only make Python package discovery deterministic.
+        for package in ("robot_sdk", "runtime_adapters", "services", "models",
+                        "capabilities", "capabilities/perception",
+                        "capabilities/geometry", "capabilities/grasping",
+                        "capabilities/planning", "capabilities/ik",
+                        "capabilities/control"):
+            marker = self.root / package / "__init__.py"
+            marker.touch(exist_ok=True)
         path = self.root / entrypoint
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():

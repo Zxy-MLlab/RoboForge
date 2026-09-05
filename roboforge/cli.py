@@ -7,11 +7,26 @@ from pathlib import Path
 
 
 def _lifecycle_main(argv: list[str]) -> int | None:
-    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit", "develop", "validate-controller-api"}:
+    if not argv or argv[0] not in {"env", "run", "trial", "replay", "compare", "submit", "develop", "services", "validate-controller-api"}:
         return None
     if argv[0] == "develop":
         from .develop import main as develop_main
         return develop_main(argv[1:])
+    if argv[0] == "services":
+        from .services import doctor, down, status, up, warmup
+        parser = argparse.ArgumentParser(prog="roboforge services")
+        parser.add_argument("action", choices=["doctor", "up", "status", "warmup", "down"])
+        parser.add_argument("--runtime", choices=["libero"], default="libero")
+        parser.add_argument("--no-molmo", action="store_true")
+        args = parser.parse_args(argv[1:])
+        del args.runtime
+        if args.action == "doctor": value = doctor()
+        elif args.action == "up": value = up(include_molmo=not args.no_molmo)
+        elif args.action == "status": value = status()
+        elif args.action == "warmup": value = warmup()
+        else: value = down()
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0 if value.get("ok", True) else 1
     from .control_plane import compare, environment_info, replay, submit
     root = argparse.ArgumentParser(prog="roboforge")
     commands = root.add_subparsers(dest="command", required=True)
@@ -106,6 +121,17 @@ def _run_active_trial(args) -> int:
 def _run_frozen_candidate(args) -> dict:
     from .rpc import ExperimentRpcClient
     entrypoint = args.entrypoint.resolve(); run = args.run_dir.resolve()
+    allowed_raw = os.getenv("ROBOFORGE_DEVELOPMENT_STATES")
+    if allowed_raw:
+        try:
+            allowed = {int(item) for item in json.loads(allowed_raw)}
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("ROBOFORGE_DEVELOPMENT_STATES must be a JSON integer list") from exc
+        if args.seed not in allowed:
+            raise ValueError("initial-state index is outside the development allowlist")
+    ledger_path = os.getenv("ROBOFORGE_CAMPAIGN_LEDGER")
+    if ledger_path:
+        _enforce_trial_budget(Path(ledger_path), int(os.getenv("ROBOFORGE_VALID_TRIAL_BUDGET", "0")))
     if not entrypoint.is_file() or entrypoint.suffix != ".py":
         raise ValueError("entrypoint must be a Python Controller file")
     run.mkdir(parents=True, exist_ok=False)
@@ -128,11 +154,52 @@ def _run_frozen_candidate(args) -> dict:
         else: raise TimeoutError("runtime worker did not become ready")
         evidence = client.run_controller(request_id=f"cli:{uuid.uuid4()}", controller_path=entrypoint,
             intent="frozen candidate CLI execution")
-        return evidence.public_dict()
+        value = evidence.public_dict()
+        if ledger_path:
+            _record_campaign_trial(Path(ledger_path), args.seed, value)
+        return value
     finally:
         worker.terminate()
         try: worker.wait(timeout=10)
         except subprocess.TimeoutExpired: worker.kill(); worker.wait()
+
+
+def _enforce_trial_budget(path: Path, budget: int) -> None:
+    if budget <= 0 or not path.exists():
+        return
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        records = list(value.get("records") or [])
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"campaign ledger is unreadable: {path}") from exc
+    valid = sum(bool(item.get("valid_trial")) for item in records if isinstance(item, dict))
+    if valid >= budget:
+        raise RuntimeError("development valid-trial budget exhausted")
+
+
+def _record_campaign_trial(path: Path, state: int, value: dict) -> None:
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"campaign ledger is unreadable: {path}") from exc
+    public = dict(value.get("public") or {})
+    lifecycle = dict(public.get("lifecycle") or {})
+    failure = public.get("failure_class") or lifecycle.get("failure_class")
+    valid = not failure and int(lifecycle.get("runner_exit_code", 0)) == 0
+    payload.setdefault("records", []).append({
+        "state": int(state), "valid_trial": bool(valid),
+        "candidate_bundle_digest": value.get("candidate_bundle_digest"),
+        "controller_sha256": value.get("controller_sha256"),
+        "runner_exit_code": lifecycle.get("runner_exit_code"),
+        "failure_class": failure,
+        "evidence_sha256": value.get("evidence_sha256"),
+        "recorded_unix": time.time(),
+    })
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _llm_base_url(model: str, base_url: str) -> str:

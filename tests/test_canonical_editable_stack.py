@@ -49,6 +49,12 @@ def test_canonical_rpc_server_does_not_import_legacy_bridge():
     assert "LegacyAdapterBridge" not in source
 
 
+def test_provider_never_executes_candidate_bundle_python():
+    source = Path(__file__).parents[1].joinpath("roboforge/providers/libero/provider.py").read_text()
+    for forbidden in ("importlib.util", "exec_module", "_SdkEnvironment", "candidate_sdk"):
+        assert forbidden not in source
+
+
 def test_provider_passes_only_explicit_public_boundary_to_controller_runtime():
     class Deployment:
         instruction = "public task"

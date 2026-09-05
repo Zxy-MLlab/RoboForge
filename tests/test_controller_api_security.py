@@ -10,7 +10,7 @@ from embodied_codex.deployments.libero import (
     LiberoDeploymentError,
     _public_execution_diagnostics,
 )
-from embodied_codex.kernel.runtime import ControllerRuntime
+from roboforge.candidate_runtime import ControllerRuntime
 
 
 def _dispatch_deployment(tmp_path: Path) -> LiberoDeployment:
@@ -80,6 +80,48 @@ def test_controller_sandbox_cannot_read_files_outside_frozen_bundle(tmp_path):
     )
     assert result["completed"] is True
     assert result["result"] == {"outside_read": False}
+
+
+def test_editable_stack_runs_in_candidate_sandbox_and_cannot_reach_provider(tmp_path):
+    workspace = tmp_path / "bundle"
+    (workspace / "robot_sdk").mkdir(parents=True)
+    (workspace / "capabilities").mkdir()
+    (workspace / "robot_sdk" / "custom_stack.py").write_text(
+        "def marker():\n    return 'workspace-stack'\n"
+    )
+    controller = workspace / "controller.py"
+    controller.write_text(
+        "from robot_sdk.custom_stack import marker\n"
+        "def blocked(fn):\n"
+        "    try:\n        fn()\n        return False\n"
+        "    except Exception:\n        return True\n"
+        "def run(robot):\n"
+        "    return {'marker': marker(), 'blocked': {\n"
+        "      'env': blocked(lambda: robot.env()),\n"
+        "      'sim': blocked(lambda: robot.sim()),\n"
+        "      'reset': blocked(lambda: robot.reset()),\n"
+        "      'check_success': blocked(lambda: robot.check_success()),\n"
+        "      'deployment': blocked(lambda: robot._deployment),\n"
+        "    }}\n"
+    )
+
+    class Deployment:
+        instruction = "security test"
+
+        def dispatch(self, method, arguments):
+            if method == "sdk":
+                raise RuntimeError("private method is not in the public SDK")
+            raise RuntimeError("operation not used by this test")
+
+    result = ControllerRuntime(timeout_seconds=10).execute(
+        controller, Deployment(), source_root=workspace
+    )
+    assert result["completed"] is True
+    assert result["result"] == {
+        "marker": "workspace-stack",
+        "blocked": {"env": True, "sim": True, "reset": True,
+                    "check_success": True, "deployment": True},
+    }
 
 
 def test_public_trace_drops_privileged_simulator_and_evaluator_fields():

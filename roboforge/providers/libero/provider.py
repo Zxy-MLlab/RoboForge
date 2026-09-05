@@ -6,8 +6,6 @@ delegates only the explicit RobotDeployment methods needed by the harness.
 """
 from __future__ import annotations
 
-import hashlib
-import importlib.util
 import mimetypes
 from pathlib import Path
 from typing import Any
@@ -21,56 +19,6 @@ class LiberoProvider:
     def __init__(self, deployment: Any, runtime: Any):
         self.deployment = deployment
         self.runtime = runtime
-        self._candidate_sdk: Any = None
-        self._candidate_sdk_digest: str | None = None
-
-    class _SdkEnvironment:
-        """Public adapter facade used by an editable workspace SDK module."""
-        def __init__(self, deployment: Any):
-            self._deployment = deployment
-            self.instruction = str(getattr(deployment, "instruction", ""))
-            self.home_joint_position = getattr(deployment, "home_joint_position", None)
-
-        def get_franka_libero_observation(self):
-            return self._deployment.initial_observation()
-
-        def get_observation(self):
-            return self._deployment.initial_observation()
-
-        def move_to_joints_blocking(self, joints, **kwargs):
-            return self._deployment.move_to_joints_blocking(joints, **kwargs)
-
-        def _set_gripper(self, value):
-            return self._deployment._set_gripper(value)
-
-        def _step_once(self):
-            return self._deployment._step_once()
-
-        def dispatch(self, method, arguments):
-            return self._deployment.dispatch(method, arguments)
-
-    def _load_candidate_sdk(self, source_root: Path | None) -> None:
-        """Load the immutable Bundle's editable SDK implementation for a trial."""
-        self._candidate_sdk = None
-        self._candidate_sdk_digest = None
-        if source_root is None:
-            return
-        path = Path(source_root).resolve() / "robot_sdk" / "franka_libero_api.py"
-        if not path.is_file():
-            return
-        source = path.read_bytes()
-        digest = hashlib.sha256(source).hexdigest()
-        module_name = f"roboforge_candidate_sdk_{digest[:16]}"
-        spec = importlib.util.spec_from_file_location(module_name, path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"candidate SDK cannot be imported: {path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        factory = getattr(module, "FrankaLiberoApi", None)
-        if not callable(factory):
-            raise RuntimeError("candidate robot_sdk/franka_libero_api.py has no FrankaLiberoApi")
-        self._candidate_sdk = factory(self._SdkEnvironment(self.deployment))
-        self._candidate_sdk_digest = digest
 
     @property
     def instruction(self) -> str:
@@ -87,19 +35,6 @@ class LiberoProvider:
         """Dispatch the finite public Robot protocol to the deployment."""
         if method not in {"observe", "act", "use", "verify", "check_observable_condition", "record", "sdk"}:
             raise RuntimeError(f"unsupported candidate operation: {method}")
-        if method == "sdk" and self._candidate_sdk is not None:
-            name = str(arguments.get("method") or "")
-            fn = self._candidate_sdk.functions().get(name)
-            if not callable(fn):
-                raise RuntimeError(f"unknown candidate Robot SDK method: {name}")
-            args = arguments.get("args") or []
-            kwargs = arguments.get("kwargs") or {}
-            if not isinstance(args, list) or not isinstance(kwargs, dict):
-                raise RuntimeError("candidate SDK args/kwargs must be JSON containers")
-            result = fn(*args, **kwargs)
-            self.deployment.trace.append({"event": "sdk_call", "method": name,
-                                          "status": "ok", "implementation": "candidate_bundle"})
-            return {"method": name, "result": result}
         return self.deployment.dispatch(method, arguments)
 
     def project_rpc_output(self, method: str, arguments: dict[str, Any], result: Any) -> Any:
@@ -180,7 +115,6 @@ class LiberoProvider:
                            environment_generation: str,
                            candidate_bundle_digest: str | None = None,
                            candidate_source_root: Path | None = None) -> AdapterResult:
-        self._load_candidate_sdk(candidate_source_root)
         execution = self.runtime.execute(
             controller_path, self, source_root=candidate_source_root
         )

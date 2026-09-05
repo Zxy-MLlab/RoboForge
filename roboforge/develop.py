@@ -38,6 +38,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     (run / "campaign-manifest.json").parent.mkdir(parents=True, exist_ok=True)
     (run / "campaign-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    ledger = run / "development-trial-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "allowed_states": list(config.development_states),
+                                  "valid_trial_budget": config.max_valid_trials, "records": []},
+                                 indent=2, sort_keys=True) + "\n")
 
     from openhands.sdk import LLM
     from . import create_openhands_conversation
@@ -49,13 +53,15 @@ def main(argv: list[str] | None = None) -> int:
               max_output_tokens=12000, usage_id=f"roboforge:develop:{run.name}")
     state_list = ", ".join(str(item) for item in config.development_states)
     prompt = f"""Develop the LIBERO task {config.task} as one reusable program in this workspace.
-Development initial-state indices are {state_list}; they are supplied only to ordinary
-Terminal commands and must never be read by the Controller. Run each state with:
+The Harness allowlist permits development initial-state indices {state_list}; they are supplied
+only to ordinary Terminal commands and must never be read by the Controller. Run an allowed
+state with:
 python -m roboforge run controllers/controller.py --runtime libero --task {config.task}
 --seed STATE --run-dir experiments/state-STATE --adapter-python $ROBOFORGE_ADAPTER_PYTHON
 Inspect stdout and experiment evidence after every run, edit the Controller and the
 workspace robot_sdk/capabilities/runtime_adapters code as needed, and regress across
-multiple states. Do not inspect {config.held_out_split}; it is verifier-private. Continue
+multiple states. Hidden evaluation states are verifier-private and are not present in this
+workspace. Continue
 until the development budget is exhausted or a single unified candidate is ready, then
 write a final candidate manifest. Use only ordinary Editor, Terminal, search, Git and
 the other generic OpenHands tools; there are no robot-specific LLM tools."""
@@ -64,7 +70,10 @@ the other generic OpenHands tools; there are no robot-specific LLM tools."""
         service=None, controller_path=controller,
         max_iterations=args.max_iterations or config.max_iterations,
         terminal_env={"ROBOFORGE_WORKSPACE": str(workspace), "PYTHONPATH": str(Path(__file__).parents[1]),
-                      "ROBOFORGE_ADAPTER_PYTHON": args.adapter_python},
+                      "ROBOFORGE_ADAPTER_PYTHON": args.adapter_python,
+                      "ROBOFORGE_DEVELOPMENT_STATES": json.dumps(list(config.development_states)),
+                      "ROBOFORGE_VALID_TRIAL_BUDGET": str(config.max_valid_trials),
+                      "ROBOFORGE_CAMPAIGN_LEDGER": str(ledger)},
     )
     try:
         conversation.send_message(prompt)
