@@ -133,6 +133,23 @@ def test_controller_failure_consumes_task_budget_after_episode_start(tmp_path):
     assert service.status()["physical_trials"] == 1
 
 
+def test_campaign_records_candidate_task_failure_as_valid_trial(tmp_path):
+    from roboforge.cli import _record_campaign_trial
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"records": []}))
+    _record_campaign_trial(ledger, 0, {
+        "candidate_bundle_digest": "bundle",
+        "controller_sha256": "controller",
+        "evidence_sha256": "evidence",
+        "public": {"failure_class": "task_failure", "lifecycle": {
+            "runner_exit_code": 0, "task_budget_consumed": True,
+        }},
+    })
+    value = json.loads(ledger.read_text())
+    assert value["records"][0]["valid_trial"] is True
+
+
 def test_preflight_artifact_captures_terminal_stdout(tmp_path):
     controller = tmp_path / "controller.py"
     controller.write_text("def run(robot): return robot.use('bad:v1', {'limit': 20})\n")

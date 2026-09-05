@@ -192,7 +192,17 @@ def _record_campaign_trial(path: Path, state: int, value: dict) -> None:
     public = dict(value.get("public") or {})
     lifecycle = dict(public.get("lifecycle") or {})
     failure = public.get("failure_class") or lifecycle.get("failure_class")
-    valid = not failure and int(lifecycle.get("runner_exit_code", 0)) == 0
+    # A candidate failure after episode startup is still a valid development
+    # trial: it consumed a fresh LIBERO reset and provides evidence for the
+    # agent. Only infrastructure/preflight failures are excluded from the
+    # task-level budget.
+    infrastructure = {
+        "harness_failure", "environment_failure", "service_failure",
+        "rpc_failure", "preflight_failure",
+    }
+    valid = failure not in infrastructure and bool(
+        lifecycle.get("task_budget_consumed", False)
+    )
     payload.setdefault("records", []).append({
         "state": int(state), "valid_trial": bool(valid),
         "candidate_bundle_digest": value.get("candidate_bundle_digest"),
