@@ -58,6 +58,14 @@ REQUIRED_APIS = {
     "curobo_service",
 }
 
+# Molmo point grounding is a useful optional detector.  The task-facing
+# Controller can use the independent SAM3 text/point path when it is absent.
+CORE_REQUIRED_APIS = REQUIRED_APIS - {"point_prompt_molmo"}
+OPTIONAL_AVAILABLE_APIS = {
+    "segment_sam3_point_prompt", "curobo_service",
+}
+FORBIDDEN_APIS = {"env.reset", "env.seed", "env.check_success", "sim.data", "sim.model"}
+
 API_PROVENANCE = {
     "get_observation": "aspire/sim/cap/envs/simulators/libero.py",
     "get_task_language": "aspire/sim/cap/envs/simulators/libero.py",
@@ -526,11 +534,19 @@ def main(argv: list[str] | None = None) -> int:
     matrix = _matrix(state_manifests)
     failed = [row["api"] for row in matrix if row["result"] != "passed"]
     enough_states = len(states) >= 5
-    manifest = {"protocol": "roboforge-aspire-capx-libero-api-conformance-v3", "task": args.task, "states": states, "minimum_state_count": 5, "state_count_gate_passed": enough_states, "model_check_state": model_state, "controller_mode": "JOINT_POSITION", "upstream": UPSTREAM, "required_apis": sorted(REQUIRED_APIS), "complete_conformance": not failed and enough_states, "failed_apis": failed, "state_manifests": [{"state": item["state"], "passed": item["passed"], "manifest_sha256": item["manifest_sha256"], "path": str((args.output / f"state-{item['state']:03d}" / "state-conformance.json").resolve())} for item in state_manifests], "conformance_matrix": matrix, "elapsed_seconds": time.time() - started}
+    core_failed = sorted(set(failed) & CORE_REQUIRED_APIS)
+    optional_unavailable = sorted(set(failed) - CORE_REQUIRED_APIS)
+    profile = {
+        "core_required": sorted(CORE_REQUIRED_APIS),
+        "optional_available": sorted((set(REQUIRED_APIS) - set(optional_unavailable)) - CORE_REQUIRED_APIS),
+        "optional_unavailable": optional_unavailable,
+        "forbidden": sorted(FORBIDDEN_APIS),
+    }
+    manifest = {"protocol": "roboforge-aspire-capx-libero-api-conformance-v3", "task": args.task, "states": states, "minimum_state_count": 5, "state_count_gate_passed": enough_states, "model_check_state": model_state, "controller_mode": "JOINT_POSITION", "upstream": UPSTREAM, "required_apis": sorted(REQUIRED_APIS), "capability_profile": profile, "core_conformance": not core_failed and enough_states, "complete_conformance": not failed and enough_states, "full_conformance": not failed and enough_states, "failed_apis": failed, "core_failed_apis": core_failed, "optional_unavailable": optional_unavailable, "state_manifests": [{"state": item["state"], "passed": item["passed"], "manifest_sha256": item["manifest_sha256"], "path": str((args.output / f"state-{item['state']:03d}" / "state-conformance.json").resolve())} for item in state_manifests], "conformance_matrix": matrix, "elapsed_seconds": time.time() - started}
     manifest["manifest_sha256"] = _manifest_digest(manifest)
     (args.output / "api-conformance.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
-    return 0 if (not failed and enough_states) or args.allow_incomplete else 1
+    return 0 if (not core_failed and enough_states) or args.allow_incomplete else 1
 
 
 if __name__ == "__main__":

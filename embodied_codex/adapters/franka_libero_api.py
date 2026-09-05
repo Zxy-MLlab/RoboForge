@@ -35,6 +35,14 @@ GRASPNET_URL = os.environ.get("ROBOFORGE_GRASPNET_URL", os.environ.get("GRASPNET
 PYROKI_URL = os.environ.get("ROBOFORGE_PYROKI_URL", "http://127.0.0.1:8116")
 
 
+class CapabilityUnavailable(RuntimeError):
+    """A declared optional Robot SDK capability is unavailable."""
+
+    def __init__(self, capability: str, message: str) -> None:
+        self.capability = str(capability)
+        super().__init__(f"{self.capability}: {message}")
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -396,8 +404,8 @@ class FrankaLiberoApi:
         try:
             data = _post_with_retries(f"{MOLMO_URL.rstrip('/')}/chat/completions", payload,
                                        max_retries=3)
-        except RuntimeError:
-            data = {}
+        except RuntimeError as exc:
+            raise CapabilityUnavailable("point_prompt_molmo", str(exc)) from exc
         text = str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
         import re
         points: list[tuple[float, float]] = []
@@ -424,7 +432,8 @@ class FrankaLiberoApi:
             if not points:
                 points = [(float(x), float(y)) for x, y in re.findall(r"([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)", text)
                            if 0 <= float(x) <= 100 and 0 <= float(y) <= 100]
-        if not points: return {text_prompt: (None, None)}
+        if not points:
+            raise CapabilityUnavailable("point_prompt_molmo", "service returned no parseable point")
         w, h = Image.fromarray(np.asarray(image)).size
         x, y = points[0]
         return {text_prompt: (int(x / scale * w), int(y / scale * h))}
@@ -488,7 +497,11 @@ class FrankaLiberoApi:
         camera_data = {}
         cameras = [self.camera_name] + ([self.wrist_camera_name] if use_multiview else [])
         for name in cameras:
-            cam = self._camera(name); point = self.point_prompt_molmo(cam["rgb"], text_prompt).get(text_prompt)
+            cam = self._camera(name)
+            try:
+                point = self.point_prompt_molmo(cam["rgb"], text_prompt).get(text_prompt)
+            except CapabilityUnavailable:
+                point = None
             masks = self.segment_sam3_point_prompt(cam["rgb"], point) if point and point[0] is not None else []
             if not masks: masks = self.segment_sam3_text_prompt(cam["rgb"], text_prompt)
             if not masks: raise ValueError(f"SAM3 segmentation failed for '{text_prompt}' on {name}")
