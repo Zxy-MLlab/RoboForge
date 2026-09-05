@@ -383,7 +383,9 @@ class FrankaLiberoApi:
         # parser that accepts Molmo1/Molmo2 XML and normalized coordinates.
         payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": f"Point at {text_prompt}"},
                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_image(image)}"}}]}],
-                   "max_tokens": 1024, "temperature": 0.0, "stop": ["<|endoftext|>"]}
+                   # Point grounding emits a short XML response.  Avoid an
+                   # oversized KV cache alongside the vision model.
+                   "max_tokens": 256, "temperature": 0.0, "stop": ["<|endoftext|>"]}
         # A stock vLLM server may expose a local path or another served-model
         # alias rather than the upstream Hugging Face repository name.  When
         # no explicit alias is configured, omit ``model`` just like the live

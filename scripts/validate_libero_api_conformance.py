@@ -349,21 +349,38 @@ def _run_public_geometry(api: FrankaLiberoApi, obs: dict, record) -> tuple[np.nd
 
 
 def _run_model_checks(api: FrankaLiberoApi, rgb, depth, intrinsic, pose, target: str, record) -> None:
-    point = _record_call(record, "point_prompt_molmo", lambda: api.point_prompt_molmo(rgb, target))
-    point_xy = point.get(target) if isinstance(point, dict) else None
-    if not point_xy or point_xy[0] is None:
-        record({"api": "point_prompt_molmo", "status": "failed", "error": "no parseable point"})
-
+    # Validate text and point SAM3 independently.  The public centroid of a
+    # successful text mask is sufficient for the point API and does not rely
+    # on Molmo or simulator state.  Molmo is then tested as a separate
+    # detector and, when available, as an additional SAM3 point integration.
     text_masks = _record_call(record, "segment_sam3_text_prompt", lambda: api.segment_sam3_text_prompt(rgb, target))
     if not text_masks:
         record({"api": "segment_sam3_text_prompt", "status": "failed", "error": "no masks"})
+
     point_masks = None
-    if point_xy and point_xy[0] is not None:
-        point_masks = _record_call(record, "segment_sam3_point_prompt", lambda: api.segment_sam3_point_prompt(rgb, point_xy))
+    centroid = None
+    if text_masks:
+        best_text = max(text_masks, key=lambda item: float(item.get("score", 0.0)))
+        text_mask = np.asarray(best_text.get("mask"), dtype=bool)
+        ys, xs = np.where(text_mask)
+        if len(xs):
+            centroid = (float(np.mean(xs)), float(np.mean(ys)))
+    if centroid is not None:
+        point_masks = _record_call(record, "segment_sam3_point_prompt", lambda: api.segment_sam3_point_prompt(rgb, centroid))
         if not point_masks:
-            record({"api": "segment_sam3_point_prompt", "status": "failed", "error": "no masks"})
+            record({"api": "segment_sam3_point_prompt", "status": "failed", "error": "no masks for text-mask centroid", "point_xy": list(centroid)})
     else:
-        record({"api": "segment_sam3_point_prompt", "status": "failed", "error": "Molmo did not provide a point"})
+        record({"api": "segment_sam3_point_prompt", "status": "failed", "error": "text SAM3 produced no public mask centroid"})
+
+    point = _record_call(record, "point_prompt_molmo", lambda: api.point_prompt_molmo(rgb, target))
+    point_xy = point.get(target) if isinstance(point, dict) else None
+    if not point_xy or point_xy[0] is None or point_xy[1] is None:
+        record({"api": "point_prompt_molmo", "status": "failed", "error": "no parseable point"})
+    elif text_masks:
+        # This is supplemental evidence only; the required SAM3 point result
+        # above remains independent of Molmo's availability.
+        molmo_masks = _record_call(record, "sam3_point_from_molmo", lambda: api.segment_sam3_point_prompt(rgb, point_xy))
+        record({"api": "sam3_point_from_molmo", "status": "passed" if molmo_masks else "failed", "point_xy": list(point_xy)})
 
     candidates = point_masks or text_masks or []
     if not candidates:
